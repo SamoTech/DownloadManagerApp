@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Universal Download Manager</string>
+    <string name="add_download">Add Download</string>
+    <string name="download_details">Download Details</string>
+    <string name="downloads">Downloads</string>
+    <string name="completed">Completed</string>
+    <string name="active">Active</string>
+    <string name="paused">Paused</string>
+    <string name="failed">Failed</string>
+    <string name="queued">Queued</string>
+    <string name="all_files">All Files</string>
+    <string name="torrents">Torrents</string>
+    <string name="videos">Videos</string>
+    <string name="settings">Settings</string>
+    <string name="about">About</string>
+    <string name="exit">Exit</string>
+    
+    <string name="url_hint">Enter URL or magnet link</string>
+    <string name="filename_hint">Filename (optional)</string>
+    <string name="save_to">Save to</string>
+    <string name="default_download_path">Downloads</string>
+    <string name="start_download">Start Download</string>
+    <string name="pause">Pause</string>
+    <string name="resume">Resume</string>
+    <string name="cancel">Cancel</string>
+    <string name="retry">Retry</string>
+    <string name="delete">Delete</string>
+    <string name="open">Open</string>
+    <string name="share">Share</string>
+    
+    <string name="downloading">Downloading...</string>
+    <string name="completed_notification">Download completed: %s</string>
+    <string name="failed_notification">Download failed: %s</string>
+    <string name="notification_channel_name">Download Notifications</string>
+    <string name="notification_channel_description">Notifications for download status</string>
+    
+    <string name="storage_permission_rationale">This app needs storage permission to save downloaded files</string>
+    <string name="notification_permission_rationale">This app needs notification permission to show download progress</string>
+    <string name="grant_permission">Grant Permission</string>
+    <string name="permission_denied">Permission denied. Some features may not work properly.</string>
+    
+    <string name="no_downloads">No downloads yet. Tap + to add a download.</string>
+    <string name="no_active_downloads">No active downloads</string>
+    <string name="no_completed_downloads">No completed downloads</string>
+    
+    <string name="download_speed">%s/s</string>
+    <string name="eta">ETA: %s</string>
+    <string name="of">of</string>
+    <string name="unknown_size">Unknown size</string>
+    <string name="unknown_speed">--</string>
+    <string name="unknown_eta">--:--</string>
+    
+    <string name="app_description">Universal Download Manager supports downloading all file types from any website, including torrents and videos.</string>
+    <string name="version">Version</string>
+    <string name="developer">Developer</string>
+    <string name="privacy_policy">Privacy Policy</string>
+    <string name="open_source_licenses">Open Source Licenses</string>
+    
+    <string name="download_settings">Download Settings</string>
+    <string name="max_concurrent_downloads">Max Concurrent Downloads</string>
+    <string name="download_speed_limit">Speed Limit (KB/s)</string>
+    <string name="none">None</string>
+    <string name="unlimited">Unlimited</string>
+    <string name="save_location">Save Location</string>
+    <string name="use_mobile_data">Use Mobile Data</string>
+    <string name="wifi_only">WiFi Only</string>
+    <string name="auto_resume">Auto Resume Failed Downloads</string>
+    <string name="enable_notifications">Enable Notifications</string>
+    <string name="dark_mode">Dark Mode</string>
+    <string name="language">Language</string>
+    
+    <string name="torrent_settings">Torrent Settings</string>
+    <string name="max_upload_speed">Max Upload Speed (KB/s)</string>
+    <string name="max_connections">Max Connections</string>
+    <string name="enable_seeding">Enable Seeding</string>
+    <string name="seed_ratio">Seed Ratio</string>
+    <string name="seed_until">Seed Until</string>
+    <string name="seed_forever">Forever</string>
+    <string name="seed_for_minutes">For %d minutes</string>
+    
+    <string name="video_settings">Video Settings</string>
+    <string name="video_quality">Video Quality</string>
+    <string name="best">Best</string>
+    <string name="high">High</string>
+    <string name="medium">Medium</string>
+    <string name="low">Low</string>
+    <string name="audio_only">Audio Only</string>
+    <string name="extract_audio">Extract Audio</string>
+    
+    <string name="confirm_delete">Are you sure you want to delete this download?</string>
+    <string name="confirm_delete_file">Also delete the downloaded file?</string>
+    <string name="yes">Yes</string>
+    <string name="no">No</string>
+    <string name="ok">OK</string>
+    
+    <string name="error_invalid_url">Invalid URL</string>
+    <string name="error_connection">Connection error</string>
+    <string name="error_storage">Storage error</string>
+    <string name="error_unknown">Unknown error</string>
+    <string name="error_insufficient_space">Insufficient storage space</string>
+    <string name="error_file_exists">File already exists</string>
+    
+    <string name="torrent">Torrent</string>
+    <string name="magnet_link">Magnet Link</string>
+    <string name="direct_download">Direct Download</string>
+    <string name="video_download">Video Download</string>
+    <string name="extracting_metadata">Extracting metadata...</string>
+    <string name="getting_torrent_info">Getting torrent info...</string>
+    <string name="connecting_to_peers">Connecting to peers...</string>
+    <string name="downloading_metadata">Downloading metadata...</string>
+    
+    <string name="peers">Peers: %d</string>
+    <string name="seeds">Seeds: %d</string>
+    <string name="upload_speed">Upload: %s/s</string>
+    <string name="download_progress">%d%%</string>
+    <string name="status">Status: %s</string>
+    <string name="file_size">Size: %s</string>
+    <string name="save_path">Path: %s</string>
+    <string name="added_on">Added: %s</string>
+    <string name="completed_on">Completed: %s</string>
+</resources>
