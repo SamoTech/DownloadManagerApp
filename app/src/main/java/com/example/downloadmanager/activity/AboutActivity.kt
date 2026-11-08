@@ -29,7 +29,7 @@ class AboutActivity : AppCompatActivity() {
             AlertDialog.Builder(this)
                 .setTitle(R.string.privacy_policy)
                 .setMessage(
-                    "Universal Download Manager processes all URLs, music streams, videos, and files locally on your device.\n\n" +
+                    "Luca Download Manager processes all URLs, music streams, videos, and files locally on your device.\n\n" +
                     "• No personal data, browsing history, or download history is shared with external servers.\n" +
                     "• Downloaded files are stored directly in your selected device storage folder."
                 )

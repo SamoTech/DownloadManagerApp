@@ -1,6 +1,6 @@
 {
-  "name": "Universal Download Manager",
-  "description": "Universal Download Manager supports downloading all file types from any website, including torrents and videos.",
+  "name": "Luca Download Manager",
+  "description": "Luca Download Manager supports high-speed downloading of all file types, music from major audio platforms, videos, and torrents.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

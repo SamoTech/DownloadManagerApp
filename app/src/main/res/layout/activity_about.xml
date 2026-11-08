@@ -84,7 +84,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="Universal Download Manager Team"
+                android:text="SamoTech • Luca Download Manager"
                 android:textColor="@color/colorOnSurface"
                 android:textSize="15sp"
                 android:textStyle="bold" />

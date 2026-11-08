@@ -13,5 +13,5 @@ dependencyResolutionManagement {
         maven { url 'https://jitpack.io' }
     }
 }
-rootProject.name = "DownloadManagerApp"
+rootProject.name = "Luca Download Manager"
 include ':app'
