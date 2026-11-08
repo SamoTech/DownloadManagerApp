@@ -3,28 +3,31 @@
     <!-- Background -->
     <item android:id="@android:id/background">
         <shape android:shape="rectangle">
-            <corners android:radius="4dp" />
+            <corners android:radius="6dp" />
             <solid android:color="@color/light_gray" />
         </shape>
     </item>
     
     <!-- Secondary progress -->
     <item android:id="@android:id/secondaryProgress">
-        <clip>
+        <scale android:scaleWidth="100%">
             <shape android:shape="rectangle">
-                <corners android:radius="4dp" />
+                <corners android:radius="6dp" />
                 <solid android:color="@color/gray" />
             </shape>
-        </clip>
+        </scale>
     </item>
     
     <!-- Primary progress -->
     <item android:id="@android:id/progress">
-        <clip>
+        <scale android:scaleWidth="100%">
             <shape android:shape="rectangle">
-                <corners android:radius="4dp" />
-                <solid android:color="@color/colorPrimary" />
+                <corners android:radius="6dp" />
+                <gradient
+                    android:startColor="@color/colorPrimary"
+                    android:endColor="@color/colorAccent"
+                    android:angle="0" />
             </shape>
-        </clip>
+        </scale>
     </item>
 </layer-list>

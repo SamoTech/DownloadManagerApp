@@ -21,6 +21,18 @@ class DownloadRepository(private val downloadDao: DownloadDao) {
     suspend fun deleteAll() {
         downloadDao.deleteAll()
     }
+
+    suspend fun deleteCompletedDownloads() {
+        downloadDao.deleteCompletedDownloads()
+    }
+
+    suspend fun getAllDownloadsList(): List<DownloadItem> {
+        return downloadDao.getAllDownloadsList()
+    }
+
+    suspend fun deleteInvalidDownloads() {
+        downloadDao.deleteInvalidDownloads()
+    }
     
     fun getDownloadsByStatus(status: DownloadStatus): LiveData<List<DownloadItem>> {
         return downloadDao.getDownloadsByStatus(status)

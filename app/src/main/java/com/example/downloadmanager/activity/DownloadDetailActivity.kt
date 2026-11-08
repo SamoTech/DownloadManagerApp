@@ -1,5 +1,7 @@
 package com.example.downloadmanager.activity
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -16,6 +18,7 @@ import com.example.downloadmanager.model.DownloadDatabase
 import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
+import com.example.downloadmanager.model.DownloadType
 import com.example.downloadmanager.service.DownloadService
 import kotlinx.coroutines.launch
 import java.io.File
@@ -72,6 +75,15 @@ class DownloadDetailActivity : AppCompatActivity() {
         viewModel.download.observe(this, Observer { downloadItem ->
             downloadItem?.let { updateUI(it) }
         })
+
+        binding.btnCopyUrl.setOnClickListener {
+            val url = viewModel.download.value?.url
+            if (!url.isNullOrBlank()) {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("Download URL", url))
+                Toast.makeText(this, R.string.link_copied, Toast.LENGTH_SHORT).show()
+            }
+        }
         
         setupActionButtons()
         startDownloadService()
@@ -117,8 +129,8 @@ class DownloadDetailActivity : AppCompatActivity() {
         
         binding.ivFileType.setImageResource(getFileTypeIcon(downloadItem))
         
-        if (downloadItem.downloadType == com.example.downloadmanager.model.DownloadType.TORRENT ||
-            downloadItem.downloadType == com.example.downloadmanager.model.DownloadType.MAGNET) {
+        if (downloadItem.downloadType == DownloadType.TORRENT ||
+            downloadItem.downloadType == DownloadType.MAGNET) {
             binding.torrentInfo.visibility = View.VISIBLE
             binding.tvPeers.text = getString(R.string.peers, downloadItem.peers)
             binding.tvSeeds.text = getString(R.string.seeds, downloadItem.seeds)
@@ -134,10 +146,11 @@ class DownloadDetailActivity : AppCompatActivity() {
             binding.torrentInfo.visibility = View.GONE
         }
         
-        if (downloadItem.downloadType == com.example.downloadmanager.model.DownloadType.VIDEO) {
+        if (downloadItem.downloadType == DownloadType.VIDEO ||
+            downloadItem.downloadType == DownloadType.MUSIC) {
             binding.videoInfo.visibility = View.VISIBLE
-            binding.tvVideoTitle.text = downloadItem.videoTitle ?: ""
-            binding.tvVideoQuality.text = downloadItem.videoQuality ?: ""
+            binding.tvVideoTitle.text = downloadItem.videoTitle ?: downloadItem.filename
+            binding.tvVideoQuality.text = downloadItem.videoQuality ?: downloadItem.mimeType
         } else {
             binding.videoInfo.visibility = View.GONE
         }
@@ -390,25 +403,30 @@ class DownloadDetailActivity : AppCompatActivity() {
     
     private fun getStatusText(status: DownloadStatus): String {
         return when (status) {
-            DownloadStatus.QUEUED -> "Queued"
-            DownloadStatus.DOWNLOADING -> "Downloading"
-            DownloadStatus.PAUSED -> "Paused"
-            DownloadStatus.COMPLETED -> "Completed"
-            DownloadStatus.FAILED -> "Failed"
-            DownloadStatus.CANCELLED -> "Cancelled"
+            DownloadStatus.QUEUED -> getString(R.string.queued)
+            DownloadStatus.DOWNLOADING -> getString(R.string.downloading)
+            DownloadStatus.PAUSED -> getString(R.string.paused)
+            DownloadStatus.COMPLETED -> getString(R.string.completed_status)
+            DownloadStatus.FAILED -> getString(R.string.failed)
+            DownloadStatus.CANCELLED -> getString(R.string.cancelled)
         }
     }
     
     private fun getFileTypeIcon(downloadItem: DownloadItem): Int {
         return when (downloadItem.downloadType) {
-            com.example.downloadmanager.model.DownloadType.TORRENT -> R.drawable.ic_torrent
-            com.example.downloadmanager.model.DownloadType.VIDEO -> R.drawable.ic_video
-            com.example.downloadmanager.model.DownloadType.MAGNET -> R.drawable.ic_torrent
-            else -> {
+            DownloadType.TORRENT -> R.drawable.ic_torrent
+            DownloadType.VIDEO -> R.drawable.ic_video
+            DownloadType.MUSIC -> R.drawable.ic_music
+            DownloadType.MAGNET -> R.drawable.ic_torrent
+            DownloadType.DIRECT -> {
+                val lower = downloadItem.filename.lowercase()
                 when {
-                    downloadItem.filename.endsWith(".mp4") || 
-                        downloadItem.filename.endsWith(".webm") ||
-                        downloadItem.filename.endsWith(".mkv") -> R.drawable.ic_video
+                    lower.endsWith(".mp3") || lower.endsWith(".flac") ||
+                        lower.endsWith(".wav") || lower.endsWith(".m4a") ||
+                        lower.endsWith(".aac") || lower.endsWith(".ogg") ||
+                        lower.endsWith(".opus") -> R.drawable.ic_music
+                    lower.endsWith(".mp4") || lower.endsWith(".webm") ||
+                        lower.endsWith(".mkv") -> R.drawable.ic_video
                     else -> R.drawable.ic_file
                 }
             }

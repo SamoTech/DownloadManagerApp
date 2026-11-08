@@ -4,10 +4,12 @@
         <item name="colorPrimary">@color/colorPrimary</item>
         <item name="colorPrimaryDark">@color/colorPrimaryDark</item>
         <item name="colorAccent">@color/colorAccent</item>
+        <item name="colorSecondary">@color/colorAccent</item>
         <item name="colorOnPrimary">@color/colorOnPrimary</item>
         <item name="colorSurface">@color/colorSurface</item>
         <item name="colorOnSurface">@color/colorOnSurface</item>
-        <item name="android:statusBarColor">@color/colorPrimaryDark</item>
+        <item name="android:windowBackground">@color/colorBackground</item>
+        <item name="android:statusBarColor">@color/colorHeaderBg</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
 
@@ -18,15 +20,16 @@
     </style>
 
     <style name="AppTheme" parent="Theme.Material3.DayNight">
-        <item name="colorPrimary">@color/purple_500</item>
-        <item name="colorSecondary">@color/teal_200</item>
+        <item name="colorPrimary">@color/colorPrimary</item>
+        <item name="colorSecondary">@color/colorAccent</item>
     </style>
 
     <style name="DownloadItemCard" parent="Widget.Material3.CardView.Elevated">
         <item name="android:padding">16dp</item>
         <item name="android:layout_margin">8dp</item>
         <item name="cardBackgroundColor">@color/colorSurface</item>
-        <item name="cardElevation">4dp</item>
+        <item name="cardElevation">2dp</item>
+        <item name="cardCornerRadius">16dp</item>
     </style>
 
     <style name="DownloadProgressBar">

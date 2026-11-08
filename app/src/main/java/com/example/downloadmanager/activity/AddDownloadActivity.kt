@@ -1,6 +1,8 @@
 package com.example.downloadmanager.activity
 
 import android.app.Activity
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -12,10 +14,12 @@ import android.view.ViewGroup
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.preference.PreferenceManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.example.downloadmanager.R
 import com.example.downloadmanager.databinding.ActivityAddDownloadBinding
 import com.example.downloadmanager.manager.DownloadManager
+import com.example.downloadmanager.manager.MusicDownloadManager
 import com.example.downloadmanager.manager.TorrentDownloadManager
 import com.example.downloadmanager.manager.VideoDownloadManager
 import com.example.downloadmanager.model.DownloadDatabase
@@ -29,6 +33,7 @@ import com.example.downloadmanager.service.DownloadService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.io.File
 import java.io.FileOutputStream
 
@@ -38,6 +43,7 @@ class AddDownloadActivity : AppCompatActivity() {
     private lateinit var downloadManager: DownloadManager
     private lateinit var torrentDownloadManager: TorrentDownloadManager
     private lateinit var videoDownloadManager: VideoDownloadManager
+    private lateinit var musicDownloadManager: MusicDownloadManager
     private lateinit var repository: DownloadRepository
     
     private var downloadType: DownloadType = DownloadType.DIRECT
@@ -45,12 +51,33 @@ class AddDownloadActivity : AppCompatActivity() {
     private var videoStreamInfo: VideoStreamInfo? = null
     private var selectedTorrentFiles: MutableList<Int> = mutableListOf()
     private var selectedVideoFormat: VideoFormat? = null
+    private var selectedMusicFormat: String = "MP3_320"
+    private var isUpdatingChips = false
     
     private val scope = CoroutineScope(Dispatchers.IO)
     
     companion object {
         private const val TAG = "AddDownloadActivity"
         private const val REQUEST_CODE_FILE_PICKER = 1001
+
+        fun normalizeAndValidateUrl(rawInput: String): String? {
+            val trimmed = rawInput.trim()
+            if (trimmed.isEmpty()) return null
+            if (trimmed.startsWith("magnet:?")) return trimmed
+            // Reject email addresses or strings with spaces
+            if (trimmed.contains(" ") || (trimmed.contains("@") && !trimmed.contains("://"))) {
+                return null
+            }
+            val candidate = when {
+                trimmed.startsWith("http://", ignoreCase = true) ||
+                trimmed.startsWith("https://", ignoreCase = true) -> trimmed
+                trimmed.contains(".") && !trimmed.contains("://") -> "https://$trimmed"
+                else -> return null
+            }
+            val parsed = candidate.toHttpUrlOrNull() ?: return null
+            if (!parsed.host.contains(".")) return null
+            return parsed.toString()
+        }
     }
     
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -68,9 +95,29 @@ class AddDownloadActivity : AppCompatActivity() {
         downloadManager = DownloadManager(application, repository)
         torrentDownloadManager = TorrentDownloadManager(application, repository)
         videoDownloadManager = VideoDownloadManager(application, repository)
+        musicDownloadManager = MusicDownloadManager(application, repository)
+
+        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
+        val defaultPath = prefs.getString("default_save_path", null)
+            ?.takeIf { it.isNotBlank() }
+            ?: downloadManager.getDefaultDownloadPath()
+        selectedMusicFormat = prefs.getString("default_music_format", "MP3_320") ?: "MP3_320"
         
-        binding.etSavePath.setText(downloadManager.getDefaultDownloadPath())
+        binding.etSavePath.setText(defaultPath)
+        binding.etTorrentSavePath.setText(defaultPath)
         binding.rvTorrentFiles.layoutManager = LinearLayoutManager(this)
+        binding.rvTorrentFiles.adapter = TorrentFileAdapter(
+            emptyList(),
+            selectedTorrentFiles
+        ) { fileIndex, isSelected ->
+            if (isSelected) {
+                if (!selectedTorrentFiles.contains(fileIndex)) {
+                    selectedTorrentFiles.add(fileIndex)
+                }
+            } else {
+                selectedTorrentFiles.remove(fileIndex)
+            }
+        }
         
         downloadType = intent.getStringExtra("download_type")?.let { typeName ->
             try {
@@ -80,7 +127,21 @@ class AddDownloadActivity : AppCompatActivity() {
             }
         } ?: DownloadType.DIRECT
         
+        setupTypeChips()
+        setupMusicControls()
+        setupQualitySelection()
         setupUIForDownloadType()
+
+        binding.btnPasteUrl.setOnClickListener {
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clipText = clipboard.primaryClip?.getItemAt(0)?.text?.toString()?.trim()
+            if (!clipText.isNullOrBlank()) {
+                binding.etUrl.setText(clipText)
+                binding.etUrl.setSelection(clipText.length)
+            } else {
+                Toast.makeText(this, R.string.clipboard_empty_or_invalid, Toast.LENGTH_SHORT).show()
+            }
+        }
         
         binding.etUrl.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -88,12 +149,17 @@ class AddDownloadActivity : AppCompatActivity() {
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             
             override fun afterTextChanged(s: Editable?) {
-                val url = s.toString().trim()
-                if (url.isNotEmpty()) {
-                    updateUIFromUrl(url)
+                val rawUrl = s.toString().trim()
+                val validUrl = normalizeAndValidateUrl(rawUrl)
+                if (validUrl != null) {
+                    updateUIFromUrl(validUrl)
                 }
             }
         })
+
+        intent.getStringExtra("preset_url")?.let { preset ->
+            binding.etUrl.setText(preset)
+        }
         
         binding.btnBrowse.setOnClickListener {
             showFilePicker()
@@ -106,33 +172,149 @@ class AddDownloadActivity : AppCompatActivity() {
         binding.btnStartDownload.setOnClickListener {
             startDownload()
         }
-        
-        setupQualitySelection()
+    }
+
+    private fun setupTypeChips() {
+        binding.chipTypeDirect.setOnClickListener {
+            if (!isUpdatingChips) {
+                downloadType = DownloadType.DIRECT
+                setupUIForDownloadType()
+            }
+        }
+        binding.chipTypeMusic.setOnClickListener {
+            if (!isUpdatingChips) {
+                downloadType = DownloadType.MUSIC
+                setupUIForDownloadType()
+                val validUrl = normalizeAndValidateUrl(binding.etUrl.text.toString())
+                if (validUrl != null) {
+                    extractMusicInfo(validUrl)
+                }
+            }
+        }
+        binding.chipTypeVideo.setOnClickListener {
+            if (!isUpdatingChips) {
+                downloadType = DownloadType.VIDEO
+                setupUIForDownloadType()
+                val validUrl = normalizeAndValidateUrl(binding.etUrl.text.toString())
+                if (validUrl != null) {
+                    extractVideoInfo(validUrl)
+                }
+            }
+        }
+        binding.chipTypeTorrent.setOnClickListener {
+            if (!isUpdatingChips) {
+                downloadType = DownloadType.TORRENT
+                setupUIForDownloadType()
+            }
+        }
+    }
+
+    private fun setupMusicControls() {
+        when (selectedMusicFormat) {
+            "MP3_320" -> binding.rbMusicMp3320.isChecked = true
+            "MP3_192" -> binding.rbMusicMp3192.isChecked = true
+            "FLAC" -> binding.rbMusicFlac.isChecked = true
+            "M4A" -> binding.rbMusicM4a.isChecked = true
+            "OGG" -> binding.rbMusicOgg.isChecked = true
+        }
+
+        binding.rgMusicFormat.setOnCheckedChangeListener { _, checkedId ->
+            selectedMusicFormat = when (checkedId) {
+                R.id.rbMusicMp3320 -> "MP3_320"
+                R.id.rbMusicMp3192 -> "MP3_192"
+                R.id.rbMusicFlac -> "FLAC"
+                R.id.rbMusicM4a -> "M4A"
+                R.id.rbMusicOgg -> "OGG"
+                else -> "MP3_320"
+            }
+            updateFilenameExtensionForMusicFormat()
+        }
+
+        val sampleTracks = MusicDownloadManager.getSampleMusicTracks()
+        binding.chipSampleSoundCloud.setOnClickListener {
+            applySampleMusicTrack(sampleTracks[0])
+        }
+        binding.chipSampleYtMusic.setOnClickListener {
+            applySampleMusicTrack(sampleTracks[1])
+        }
+        binding.chipSampleBandcamp.setOnClickListener {
+            applySampleMusicTrack(sampleTracks[2])
+        }
+        binding.chipSampleArchive.setOnClickListener {
+            applySampleMusicTrack(sampleTracks[3])
+        }
+    }
+
+    private fun applySampleMusicTrack(track: MusicDownloadManager.SampleTrack) {
+        downloadType = DownloadType.MUSIC
+        setupUIForDownloadType()
+        binding.etArtist.setText(track.artist)
+        val ext = getExtensionForMusicFormat(selectedMusicFormat)
+        binding.etFilename.setText("${track.artist} - ${track.title}.$ext")
+        binding.tvDetectedMusicPlatform.text = "Detected: ${track.platform} • Ready to extract"
+        binding.etUrl.setText(track.url)
+    }
+
+    private fun getExtensionForMusicFormat(formatCode: String): String {
+        return when (formatCode) {
+            "FLAC" -> "flac"
+            "M4A" -> "m4a"
+            "OGG" -> "ogg"
+            else -> "mp3"
+        }
+    }
+
+    private fun updateFilenameExtensionForMusicFormat() {
+        if (downloadType != DownloadType.MUSIC) return
+        val current = binding.etFilename.text?.toString()?.trim().orEmpty()
+        if (current.isBlank()) return
+        val ext = getExtensionForMusicFormat(selectedMusicFormat)
+        val base = current.substringBeforeLast(".")
+        if (base.isNotBlank()) {
+            binding.etFilename.setText("$base.$ext")
+        }
     }
     
     private fun setupUIForDownloadType() {
+        isUpdatingChips = true
         when (downloadType) {
             DownloadType.DIRECT -> {
+                binding.chipTypeDirect.isChecked = true
+                binding.musicOptions.visibility = View.GONE
                 binding.torrentOptions.visibility = View.GONE
                 binding.videoOptions.visibility = View.GONE
                 supportActionBar?.title = getString(R.string.direct_download)
             }
-            DownloadType.TORRENT -> {
-                binding.torrentOptions.visibility = View.VISIBLE
+            DownloadType.MUSIC -> {
+                binding.chipTypeMusic.isChecked = true
+                binding.musicOptions.visibility = View.VISIBLE
+                binding.torrentOptions.visibility = View.GONE
                 binding.videoOptions.visibility = View.GONE
-                supportActionBar?.title = getString(R.string.torrents)
+                supportActionBar?.title = getString(R.string.music_download)
             }
             DownloadType.VIDEO -> {
+                binding.chipTypeVideo.isChecked = true
+                binding.musicOptions.visibility = View.GONE
                 binding.torrentOptions.visibility = View.GONE
                 binding.videoOptions.visibility = View.VISIBLE
-                supportActionBar?.title = getString(R.string.videos)
+                supportActionBar?.title = getString(R.string.video_download)
+            }
+            DownloadType.TORRENT -> {
+                binding.chipTypeTorrent.isChecked = true
+                binding.musicOptions.visibility = View.GONE
+                binding.torrentOptions.visibility = View.VISIBLE
+                binding.videoOptions.visibility = View.GONE
+                supportActionBar?.title = getString(R.string.torrent_download)
             }
             DownloadType.MAGNET -> {
+                binding.chipTypeTorrent.isChecked = true
+                binding.musicOptions.visibility = View.GONE
                 binding.torrentOptions.visibility = View.VISIBLE
                 binding.videoOptions.visibility = View.GONE
                 supportActionBar?.title = getString(R.string.magnet_link)
             }
         }
+        isUpdatingChips = false
     }
     
     private fun updateUIFromUrl(url: String) {
@@ -142,16 +324,18 @@ class AddDownloadActivity : AppCompatActivity() {
                 setupUIForDownloadType()
                 extractMagnetInfo(url)
             }
-            url.endsWith(".torrent") -> {
+            url.endsWith(".torrent", ignoreCase = true) -> {
                 downloadType = DownloadType.TORRENT
                 setupUIForDownloadType()
             }
-            url.contains("youtube.com") || url.contains("youtu.be") -> {
-                downloadType = DownloadType.VIDEO
+            MusicDownloadManager.isMusicUrl(url) || downloadType == DownloadType.MUSIC -> {
+                downloadType = DownloadType.MUSIC
                 setupUIForDownloadType()
-                extractVideoInfo(url)
+                extractMusicInfo(url)
             }
-            url.contains("vimeo.com") -> {
+            url.contains("youtube.com") || url.contains("youtu.be") ||
+            url.contains("vimeo.com") || url.contains("dailymotion.com") ||
+            url.contains("tiktok.com") || url.contains("twitch.tv") -> {
                 downloadType = DownloadType.VIDEO
                 setupUIForDownloadType()
                 extractVideoInfo(url)
@@ -160,6 +344,34 @@ class AddDownloadActivity : AppCompatActivity() {
                 if (binding.etFilename.text.isNullOrBlank()) {
                     binding.etFilename.setText(downloadManager.getFilenameFromUrl(url))
                 }
+            }
+        }
+    }
+
+    private fun extractMusicInfo(url: String) {
+        val platformName = MusicDownloadManager.detectMusicPlatform(url) ?: "Music Stream"
+        binding.tvDetectedMusicPlatform.text = "Detected Platform: $platformName"
+
+        scope.launch {
+            try {
+                val trackInfo = musicDownloadManager.extractMusicInfo(url)
+                runOnUiThread {
+                    if (trackInfo != null) {
+                        val qualityLabel = MusicDownloadManager.formatLabelForCode(selectedMusicFormat)
+                        binding.tvDetectedMusicPlatform.text =
+                            "${trackInfo.platform} • $qualityLabel"
+                        if (binding.etArtist.text.isNullOrBlank()) {
+                            binding.etArtist.setText(trackInfo.artist)
+                        }
+                        val ext = getExtensionForMusicFormat(selectedMusicFormat)
+                        val currentFilename = binding.etFilename.text?.toString().orEmpty()
+                        if (currentFilename.isBlank() || currentFilename.startsWith("download_")) {
+                            binding.etFilename.setText("${trackInfo.artist} - ${trackInfo.title}.$ext")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Error extracting music info", e)
             }
         }
     }
@@ -316,26 +528,31 @@ class AddDownloadActivity : AppCompatActivity() {
     }
     
     private fun startDownload() {
-        val url = binding.etUrl.text.toString().trim()
-        if (url.isEmpty()) {
+        val rawUrl = binding.etUrl.text.toString().trim()
+        val validUrl = normalizeAndValidateUrl(rawUrl)
+        if (validUrl == null) {
+            binding.etUrl.error = getString(R.string.error_invalid_url)
             Toast.makeText(this, R.string.error_invalid_url, Toast.LENGTH_SHORT).show()
             return
         }
         
         val filename = binding.etFilename.text.toString().trim()
-            .ifBlank { downloadManager.getFilenameFromUrl(url) }
+            .ifBlank { downloadManager.getFilenameFromUrl(validUrl) }
         val savePath = binding.etSavePath.text.toString().trim()
             .ifBlank { downloadManager.getDefaultDownloadPath() }
+        val artist = binding.etArtist.text?.toString()?.trim().orEmpty()
         
         binding.btnStartDownload.isEnabled = false
         binding.btnStartDownload.text = getString(R.string.starting_download)
         
         Intent(this@AddDownloadActivity, DownloadService::class.java).apply {
             action = DownloadService.ACTION_START_DOWNLOAD
-            putExtra(DownloadService.EXTRA_URL, url)
+            putExtra(DownloadService.EXTRA_URL, validUrl)
             putExtra(DownloadService.EXTRA_FILENAME, filename)
             putExtra(DownloadService.EXTRA_SAVE_PATH, savePath)
             putExtra(DownloadService.EXTRA_DOWNLOAD_TYPE, downloadType)
+            putExtra(DownloadService.EXTRA_MUSIC_FORMAT, selectedMusicFormat)
+            putExtra(DownloadService.EXTRA_ARTIST, artist)
             startService(this)
         }
         
@@ -351,10 +568,11 @@ class AddDownloadActivity : AppCompatActivity() {
     @Suppress("unused")
     private fun downloadTorrentFile(url: String, savePath: String): File? {
         return try {
-            val filename = downloadManager.getFilenameFromUrl(url)
+            val validUrl = normalizeAndValidateUrl(url) ?: return null
+            val filename = downloadManager.getFilenameFromUrl(validUrl)
             val file = File(savePath, filename)
             
-            val request = okhttp3.Request.Builder().url(url).build()
+            val request = okhttp3.Request.Builder().url(validUrl).build()
             val response = okhttp3.OkHttpClient().newCall(request).execute()
             
             if (response.isSuccessful) {
@@ -368,7 +586,7 @@ class AddDownloadActivity : AppCompatActivity() {
                 null
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error downloading torrent file", e)
+            Log.w(TAG, "Error downloading torrent file", e)
             null
         }
     }

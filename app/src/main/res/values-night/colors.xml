@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Modern Download Manager Palette (Dark Mode) -->
+    <color name="purple_200">#FF38BDF8</color>
+    <color name="purple_500">#FF0EA5E9</color>
+    <color name="purple_700">#FF020617</color>
+    <color name="teal_200">#FF22D3EE</color>
+    <color name="teal_700">#FF06B6D4</color>
+    <color name="black">#FFF8FAFC</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="gray">#FF94A3B8</color>
+    <color name="light_gray">#FF334155</color>
+    <color name="dark_gray">#FFCBD5E1</color>
+    <color name="red">#FFF87171</color>
+    <color name="green">#FF34D399</color>
+    <color name="blue">#FF38BDF8</color>
+    <color name="orange">#FFFBBF24</color>
+    <color name="yellow">#FFFACC15</color>
+
+    <color name="colorPrimary">#FF0EA5E9</color>
+    <color name="colorPrimaryDark">#FF020617</color>
+    <color name="colorAccent">#FF22D3EE</color>
+    <color name="colorBackground">#FF0B1120</color>
+    <color name="colorSurface">#FF1E293B</color>
+    <color name="colorSurfaceVariant">#FF0F172A</color>
+    <color name="colorHeaderBg">#FF020617</color>
+    <color name="colorDashboardCard">#FF1E293B</color>
+    <color name="colorOnPrimary">#FFFFFFFF</color>
+    <color name="colorOnSurface">#FFF8FAFC</color>
+    <color name="colorOnSurfaceSecondary">#FF94A3B8</color>
+    <color name="colorError">#FFF87171</color>
+    <color name="colorBorder">#FF334155</color>
+
+    <!-- Category Accent Colors -->
+    <color name="category_direct">#FF38BDF8</color>
+    <color name="category_music">#FFA78BFA</color>
+    <color name="category_video">#FFF472B6</color>
+    <color name="category_torrent">#FF34D399</color>
+
+    <color name="icon_bg_tint">#FF1E3A8A</color>
+
+    <!-- Status colors -->
+    <color name="status_downloading">#FF38BDF8</color>
+    <color name="status_completed">#FF34D399</color>
+    <color name="status_paused">#FFFBBF24</color>
+    <color name="status_failed">#FFF87171</color>
+    <color name="status_cancelled">#FF94A3B8</color>
+    <color name="status_queued">#FF94A3B8</color>
+</resources>

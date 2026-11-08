@@ -5,6 +5,7 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="@color/colorBackground"
     android:orientation="vertical"
     tools:context=".activity.DownloadDetailActivity">
 
@@ -12,15 +13,16 @@
         android:id="@+id/toolbar"
         android:layout_width="match_parent"
         android:layout_height="?attr/actionBarSize"
-        android:background="?attr/colorPrimary"
+        android:background="@color/colorHeaderBg"
         android:elevation="4dp"
+        app:navigationIconTint="@android:color/white"
         app:titleTextColor="@android:color/white" />
 
     <ScrollView
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:fillViewport="true"
-        android:padding="@dimen/default_margin">
+        android:padding="16dp">
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -31,18 +33,26 @@
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:padding="@dimen/default_padding"
                 android:background="@drawable/card_background"
-                android:elevation="@dimen/card_elevation"
-                android:gravity="center_vertical">
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:padding="16dp">
 
-                <ImageView
-                    android:id="@+id/ivFileType"
-                    android:layout_width="@dimen/large_icon_size"
-                    android:layout_height="@dimen/large_icon_size"
-                    android:layout_marginEnd="@dimen/default_margin"
-                    android:src="@drawable/ic_file" />
+                <FrameLayout
+                    android:layout_width="52dp"
+                    android:layout_height="52dp"
+                    android:layout_marginEnd="16dp"
+                    android:background="@drawable/icon_badge_background">
+
+                    <ImageView
+                        android:id="@+id/ivFileType"
+                        android:layout_width="28dp"
+                        android:layout_height="28dp"
+                        android:layout_gravity="center"
+                        android:contentDescription="@string/download_details"
+                        android:src="@drawable/ic_file"
+                        app:tint="@color/colorPrimary" />
+                </FrameLayout>
 
                 <TextView
                     android:id="@+id/tvFilename"
@@ -50,7 +60,8 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:text="filename"
-                    android:textSize="@dimen/text_size_title"
+                    android:textColor="@color/colorOnSurface"
+                    android:textSize="18sp"
                     android:textStyle="bold" />
             </LinearLayout>
 
@@ -58,66 +69,74 @@
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="@dimen/default_margin"
-                android:orientation="vertical"
-                android:padding="@dimen/default_padding"
+                android:layout_marginTop="14dp"
                 android:background="@drawable/card_background"
-                android:elevation="@dimen/card_elevation">
+                android:orientation="vertical"
+                android:padding="16dp">
 
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:text="@string/downloading"
-                    android:textSize="@dimen/text_size_small" />
+                    android:textColor="@color/gray"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
 
                 <ProgressBar
                     android:id="@+id/progressBar"
                     style="?android:attr/progressBarStyleHorizontal"
                     android:layout_width="match_parent"
-                    android:layout_height="@dimen/progress_bar_height"
-                    android:layout_marginTop="@dimen/small_margin"
+                    android:layout_height="10dp"
+                    android:layout_marginTop="8dp"
                     android:max="100"
-                    android:progress="0" />
+                    android:progress="0"
+                    android:progressDrawable="@drawable/progress_bar_drawable" />
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/small_margin"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical">
+                    android:layout_marginTop="10dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
 
                     <TextView
                         android:id="@+id/tvProgress"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="0%"
-                        android:textSize="@dimen/text_size_medium" />
+                        android:textColor="@color/colorPrimary"
+                        android:textSize="15sp"
+                        android:textStyle="bold" />
 
                     <TextView
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"
                         android:layout_weight="1"
-                        android:layout_marginStart="@dimen/default_margin"
-                        android:text="|" />
+                        android:text="•"
+                        android:textColor="@color/gray" />
 
                     <TextView
                         android:id="@+id/tvDownloadSpeed"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="--" />
+                        android:text="--"
+                        android:textColor="@color/colorOnSurface" />
 
                     <TextView
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"
                         android:layout_weight="1"
-                        android:layout_marginStart="@dimen/default_margin"
-                        android:text="|" />
+                        android:text="•"
+                        android:textColor="@color/gray" />
 
                     <TextView
                         android:id="@+id/tvEta"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="--:--" />
+                        android:text="--:--"
+                        android:textColor="@color/colorOnSurface" />
                 </LinearLayout>
             </LinearLayout>
 
@@ -125,123 +144,95 @@
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="@dimen/default_margin"
-                android:orientation="vertical"
-                android:padding="@dimen/default_padding"
+                android:layout_marginTop="14dp"
                 android:background="@drawable/card_background"
-                android:elevation="@dimen/card_elevation">
+                android:orientation="vertical"
+                android:padding="16dp">
 
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:text="@string/file_information"
-                    android:textSize="@dimen/text_size_large"
+                    android:textColor="@color/colorOnSurface"
+                    android:textSize="16sp"
                     android:textStyle="bold" />
 
                 <com.google.android.material.divider.MaterialDivider
                     android:layout_width="match_parent"
-                    android:layout_height="@dimen/divider_height"
-                    android:layout_marginVertical="@dimen/small_margin" />
+                    android:layout_height="1dp"
+                    android:layout_marginVertical="8dp" />
+
+                <TextView
+                    android:id="@+id/tvFileSize"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="0B"
+                    android:textColor="@color/colorOnSurface"
+                    android:textSize="14sp" />
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="vertical">
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="@dimen/small_margin"
-                        android:orientation="horizontal"
-                        android:gravity="center_vertical">
-
-                        <TextView
-                            android:id="@+id/tvFileSize"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="0B"
-                            android:textSize="@dimen/text_size_medium" />
-                    </LinearLayout>
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="@dimen/small_margin"
-                        android:orientation="horizontal"
-                        android:gravity="center_vertical">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="Downloaded:" />
-
-                        <TextView
-                            android:id="@+id/tvDownloadedSize"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:layout_marginStart="@dimen/default_margin"
-                            android:text="0B" />
-                    </LinearLayout>
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="@dimen/small_margin"
-                        android:orientation="horizontal"
-                        android:gravity="center_vertical">
-
-                        <TextView
-                            android:id="@+id/tvStatus"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="Queued" />
-                    </LinearLayout>
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="@dimen/small_margin"
-                        android:orientation="horizontal"
-                        android:gravity="center_vertical">
-
-                        <TextView
-                            android:id="@+id/tvSavePath"
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="path" />
-                    </LinearLayout>
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="@dimen/small_margin"
-                        android:orientation="horizontal"
-                        android:gravity="center_vertical">
-
-                        <TextView
-                            android:id="@+id/tvAddedDate"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="date" />
-                    </LinearLayout>
+                    android:layout_marginTop="8dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
 
                     <TextView
-                        android:id="@+id/tvCompletedDate"
-                        android:layout_width="match_parent"
+                        android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="@dimen/small_margin"
-                        android:text="@string/completed"
-                        android:visibility="gone" />
+                        android:text="Downloaded:"
+                        android:textColor="@color/gray" />
 
                     <TextView
-                        android:id="@+id/tvErrorMessage"
-                        android:layout_width="match_parent"
+                        android:id="@+id/tvDownloadedSize"
+                        android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="@dimen/small_margin"
-                        android:textColor="@color/red"
-                        android:visibility="gone" />
+                        android:layout_marginStart="8dp"
+                        android:text="0B"
+                        android:textColor="@color/colorOnSurface" />
                 </LinearLayout>
+
+                <TextView
+                    android:id="@+id/tvStatus"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="Queued"
+                    android:textColor="@color/colorOnSurface" />
+
+                <TextView
+                    android:id="@+id/tvSavePath"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="path"
+                    android:textColor="@color/gray" />
+
+                <TextView
+                    android:id="@+id/tvAddedDate"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="date"
+                    android:textColor="@color/gray" />
+
+                <TextView
+                    android:id="@+id/tvCompletedDate"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/completed"
+                    android:textColor="@color/status_completed"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/tvErrorMessage"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:textColor="@color/red"
+                    android:visibility="gone" />
             </LinearLayout>
 
             <!-- Torrent Information -->
@@ -249,24 +240,24 @@
                 android:id="@+id/torrentInfo"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="@dimen/default_margin"
-                android:orientation="vertical"
-                android:padding="@dimen/default_padding"
+                android:layout_marginTop="14dp"
                 android:background="@drawable/card_background"
-                android:elevation="@dimen/card_elevation"
+                android:orientation="vertical"
+                android:padding="16dp"
                 android:visibility="gone">
 
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:text="Torrent Information"
-                    android:textSize="@dimen/text_size_large"
+                    android:textColor="@color/colorOnSurface"
+                    android:textSize="16sp"
                     android:textStyle="bold" />
 
                 <com.google.android.material.divider.MaterialDivider
                     android:layout_width="match_parent"
-                    android:layout_height="@dimen/divider_height"
-                    android:layout_marginVertical="@dimen/small_margin" />
+                    android:layout_height="1dp"
+                    android:layout_marginVertical="8dp" />
 
                 <TextView
                     android:id="@+id/tvPeers"
@@ -278,145 +269,173 @@
                     android:id="@+id/tvSeeds"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/small_margin"
+                    android:layout_marginTop="6dp"
                     android:text="Seeds: 0" />
 
                 <TextView
                     android:id="@+id/tvUploadSpeed"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/small_margin"
+                    android:layout_marginTop="6dp"
                     android:text="Upload: 0B/s" />
             </LinearLayout>
 
-            <!-- Video Information -->
+            <!-- Video & Music Information -->
             <LinearLayout
                 android:id="@+id/videoInfo"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="@dimen/default_margin"
-                android:orientation="vertical"
-                android:padding="@dimen/default_padding"
+                android:layout_marginTop="14dp"
                 android:background="@drawable/card_background"
-                android:elevation="@dimen/card_elevation"
+                android:orientation="vertical"
+                android:padding="16dp"
                 android:visibility="gone">
 
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Video Information"
-                    android:textSize="@dimen/text_size_large"
+                    android:text="Media Information"
+                    android:textColor="@color/colorOnSurface"
+                    android:textSize="16sp"
                     android:textStyle="bold" />
 
                 <com.google.android.material.divider.MaterialDivider
                     android:layout_width="match_parent"
-                    android:layout_height="@dimen/divider_height"
-                    android:layout_marginVertical="@dimen/small_margin" />
+                    android:layout_height="1dp"
+                    android:layout_marginVertical="8dp" />
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical">
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
 
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Title:" />
+                        android:text="Title / Track:"
+                        android:textColor="@color/gray" />
 
                     <TextView
                         android:id="@+id/tvVideoTitle"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:layout_marginStart="@dimen/default_margin"
+                        android:layout_marginStart="12dp"
                         android:layout_weight="1"
-                        android:text="" />
+                        android:text=""
+                        android:textColor="@color/colorOnSurface" />
                 </LinearLayout>
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/small_margin"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical">
+                    android:layout_marginTop="8dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
 
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Quality:" />
+                        android:text="Format / Quality:"
+                        android:textColor="@color/gray" />
 
                     <TextView
                         android:id="@+id/tvVideoQuality"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginStart="@dimen/default_margin"
-                        android:text="" />
+                        android:layout_marginStart="12dp"
+                        android:text=""
+                        android:textColor="@color/colorOnSurface" />
                 </LinearLayout>
             </LinearLayout>
 
-            <!-- URL -->
+            <!-- URL Card with Copy Button -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="@dimen/default_margin"
-                android:orientation="vertical"
-                android:padding="@dimen/default_padding"
+                android:layout_marginTop="14dp"
                 android:background="@drawable/card_background"
-                android:elevation="@dimen/card_elevation">
+                android:orientation="vertical"
+                android:padding="16dp">
 
-                <TextView
+                <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="URL"
-                    android:textSize="@dimen/text_size_large"
-                    android:textStyle="bold" />
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Source URL"
+                        android:textColor="@color/colorOnSurface"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnCopyUrl"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="36dp"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:text="@string/copy_link"
+                        android:textSize="12sp"
+                        app:icon="@drawable/ic_copy"
+                        app:iconSize="16dp" />
+                </LinearLayout>
 
                 <com.google.android.material.divider.MaterialDivider
                     android:layout_width="match_parent"
-                    android:layout_height="@dimen/divider_height"
-                    android:layout_marginVertical="@dimen/small_margin" />
+                    android:layout_height="1dp"
+                    android:layout_marginVertical="8dp" />
 
                 <TextView
                     android:id="@+id/tvUrl"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:text="url"
-                    android:textSize="@dimen/text_size_small" />
+                    android:textColor="@color/gray"
+                    android:textSize="13sp" />
             </LinearLayout>
 
             <!-- Action Buttons -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="@dimen/large_margin"
+                android:layout_marginTop="20dp"
                 android:orientation="horizontal"
-                android:padding="@dimen/default_padding">
+                android:paddingVertical="8dp">
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnAction1"
-                    style="@style/Widget.Material3.Button.ElevatedButton"
+                    style="@style/Widget.Material3.Button.TonalButton"
                     android:layout_width="0dp"
-                    android:layout_height="wrap_content"
+                    android:layout_height="48dp"
                     android:layout_weight="1"
-                    android:text="Action" />
+                    android:text="Action"
+                    app:cornerRadius="12dp" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnAction2"
                     style="@style/Widget.Material3.Button.OutlinedButton"
                     android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="@dimen/default_margin"
+                    android:layout_height="48dp"
+                    android:layout_marginStart="10dp"
                     android:layout_weight="1"
-                    android:text="Action" />
+                    android:text="Action"
+                    app:cornerRadius="12dp" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnAction3"
                     style="@style/Widget.Material3.Button.TextButton"
                     android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="@dimen/default_margin"
+                    android:layout_height="48dp"
+                    android:layout_marginStart="10dp"
                     android:layout_weight="1"
-                    android:text="Action" />
+                    android:text="Action"
+                    app:cornerRadius="12dp" />
             </LinearLayout>
 
         </LinearLayout>

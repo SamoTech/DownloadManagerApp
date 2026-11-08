@@ -53,6 +53,7 @@ enum class DownloadStatus {
 
 enum class DownloadType {
     DIRECT,
+    MUSIC,
     TORRENT,
     VIDEO,
     MAGNET
@@ -66,7 +67,7 @@ class DownloadStatusConverter {
 
     @TypeConverter
     fun toStatus(status: String): DownloadStatus {
-        return DownloadStatus.valueOf(status)
+        return runCatching { DownloadStatus.valueOf(status) }.getOrDefault(DownloadStatus.QUEUED)
     }
 
     @TypeConverter
@@ -99,6 +100,6 @@ class DownloadTypeConverter {
 
     @TypeConverter
     fun toType(type: String): DownloadType {
-        return DownloadType.valueOf(type)
+        return runCatching { DownloadType.valueOf(type) }.getOrDefault(DownloadType.DIRECT)
     }
 }

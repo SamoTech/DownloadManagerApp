@@ -2,6 +2,8 @@ package com.example.downloadmanager.utils
 
 import android.app.Application
 import android.util.Log
+import androidx.appcompat.app.AppCompatDelegate
+import androidx.preference.PreferenceManager
 import com.example.downloadmanager.model.DownloadDatabase
 import com.example.downloadmanager.model.DownloadRepository
 
@@ -21,6 +23,11 @@ class DownloadManagerApp : Application() {
     
     override fun onCreate() {
         super.onCreate()
+        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
+        val isDarkMode = prefs.getBoolean("dark_mode", false)
+        AppCompatDelegate.setDefaultNightMode(
+            if (isDarkMode) AppCompatDelegate.MODE_NIGHT_YES else AppCompatDelegate.MODE_NIGHT_NO
+        )
         Log.d(TAG, "Application created")
     }
 }

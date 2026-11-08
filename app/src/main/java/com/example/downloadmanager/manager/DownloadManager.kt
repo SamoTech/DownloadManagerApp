@@ -10,6 +10,7 @@ import com.example.downloadmanager.model.DownloadType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -113,23 +114,26 @@ class DownloadManager(
         savePath: String? = null,
         downloadType: DownloadType = DownloadType.DIRECT
     ): Long {
+        val validUrl = VideoDownloadManager.normalizeHttpUrl(url)
+            ?: throw IllegalArgumentException("Invalid URL: $url")
+
         return try {
-            val finalFilename = if (filename.isNullOrBlank()) getFilenameFromUrl(url) else filename
+            val finalFilename = if (filename.isNullOrBlank()) getFilenameFromUrl(validUrl) else filename
             val finalSavePath = if (savePath.isNullOrBlank()) getDefaultDownloadPath() else savePath
             
-            val existing = repository.getDownloadByUrl(url)
+            val existing = repository.getDownloadByUrl(validUrl)
             if (existing != null) {
-                Log.w(TAG, "Download already exists: $url")
+                Log.w(TAG, "Download already exists: $validUrl")
                 return existing.id
             }
             
             createDownloadDirectory(finalSavePath)
             
-            val fileSize = getContentLength(url)
-            val mimeType = getMimeType(url)
+            val fileSize = getContentLength(validUrl)
+            val mimeType = getMimeType(validUrl)
             
             val downloadItem = DownloadItem(
-                url = url,
+                url = validUrl,
                 filename = finalFilename,
                 savePath = finalSavePath,
                 fileSize = fileSize,
@@ -138,7 +142,7 @@ class DownloadManager(
                 status = DownloadStatus.QUEUED,
                 downloadType = downloadType,
                 mimeType = mimeType,
-                isResumable = canResumeDownload(url)
+                isResumable = canResumeDownload(validUrl)
             )
             
             val id = repository.insert(downloadItem)
@@ -146,16 +150,7 @@ class DownloadManager(
             id
             
         } catch (e: Exception) {
-            Log.e(TAG, "Error starting download: $url", e)
-            val errorItem = DownloadItem(
-                url = url,
-                filename = if (filename.isNullOrBlank()) getFilenameFromUrl(url) else filename,
-                savePath = if (savePath.isNullOrBlank()) getDefaultDownloadPath() else savePath,
-                status = DownloadStatus.FAILED,
-                errorMessage = e.message ?: "Unknown error",
-                downloadType = downloadType
-            )
-            repository.insert(errorItem)
+            Log.w(TAG, "Error starting download: $validUrl", e)
             throw e
         }
     }
@@ -165,14 +160,13 @@ class DownloadManager(
             if (url.startsWith("magnet:") || url.endsWith(".torrent")) {
                 return 0L
             }
-            
             val connection = URL(url).openConnection() as URLConnection
             connection.connectTimeout = 5000
             connection.readTimeout = 5000
             connection.connect()
             connection.contentLengthLong.coerceAtLeast(0L)
         } catch (e: Exception) {
-            Log.e(TAG, "Error getting content length: $url", e)
+            Log.w(TAG, "Could not determine content length for $url: ${e.message}")
             0L
         }
     }
@@ -182,7 +176,6 @@ class DownloadManager(
             if (url.startsWith("magnet:") || url.endsWith(".torrent")) {
                 return true
             }
-            
             val connection = URL(url).openConnection() as URLConnection
             connection.connectTimeout = 5000
             connection.readTimeout = 5000
@@ -200,20 +193,34 @@ class DownloadManager(
         onError: (DownloadItem, String) -> Unit
     ) {
         scope.launch {
+            val validUrl = VideoDownloadManager.normalizeHttpUrl(downloadItem.url)
+            if (validUrl == null) {
+                val msg = "Invalid URL: must start with http:// or https://"
+                Log.w(TAG, "$msg (${downloadItem.url})")
+                val updatedItem = downloadItem.copy(
+                    status = DownloadStatus.FAILED,
+                    errorMessage = msg
+                )
+                repository.update(updatedItem)
+                onError(updatedItem, msg)
+                return@launch
+            }
+
             try {
-                repository.updateStatus(downloadItem.id, DownloadStatus.DOWNLOADING)
+                val normalizedItem = downloadItem.copy(url = validUrl)
+                repository.updateStatus(normalizedItem.id, DownloadStatus.DOWNLOADING)
                 
-                createDownloadDirectory(downloadItem.savePath)
-                val file = File(downloadItem.savePath, downloadItem.filename)
+                createDownloadDirectory(normalizedItem.savePath)
+                val file = File(normalizedItem.savePath, normalizedItem.filename)
                 
-                if (downloadItem.isResumable && file.exists() && file.length() > 0) {
-                    downloadWithResume(downloadItem, file, onProgress, onComplete, onError)
+                if (normalizedItem.isResumable && file.exists() && file.length() > 0) {
+                    downloadWithResume(normalizedItem, file, onProgress, onComplete, onError)
                 } else {
-                    downloadFresh(downloadItem, file, onProgress, onComplete, onError)
+                    downloadFresh(normalizedItem, file, onProgress, onComplete, onError)
                 }
                 
             } catch (e: Exception) {
-                Log.e(TAG, "Error downloading file: ${downloadItem.url}", e)
+                Log.w(TAG, "Error downloading file: ${downloadItem.url}", e)
                 val updatedItem = downloadItem.copy(
                     status = DownloadStatus.FAILED,
                     errorMessage = e.message ?: "Unknown error"
@@ -233,8 +240,9 @@ class DownloadManager(
     ) {
         scope.launch {
             try {
-                val url = downloadItem.url
-                val request = Request.Builder().url(url).build()
+                val validUrl = downloadItem.url.toHttpUrlOrNull()
+                    ?: throw IOException("Invalid URL: ${downloadItem.url}")
+                val request = Request.Builder().url(validUrl).build()
                 
                 okHttpClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
@@ -295,7 +303,7 @@ class DownloadManager(
                 onComplete(completedItem)
                 
             } catch (e: Exception) {
-                Log.e(TAG, "Error in fresh download: ${downloadItem.url}", e)
+                Log.w(TAG, "Error in fresh download: ${downloadItem.url}", e)
                 file.delete()
                 val errorItem = downloadItem.copy(
                     status = DownloadStatus.FAILED,
@@ -316,11 +324,12 @@ class DownloadManager(
     ) {
         scope.launch {
             try {
-                val url = downloadItem.url
+                val validUrl = downloadItem.url.toHttpUrlOrNull()
+                    ?: throw IOException("Invalid URL: ${downloadItem.url}")
                 val existingSize = file.length()
                 
                 val request = Request.Builder()
-                    .url(url)
+                    .url(validUrl)
                     .header("Range", "bytes=${existingSize}-")
                     .build()
                 
@@ -384,7 +393,7 @@ class DownloadManager(
                 onComplete(completedItem)
                 
             } catch (e: Exception) {
-                Log.e(TAG, "Error in resume download: ${downloadItem.url}", e)
+                Log.w(TAG, "Error in resume download: ${downloadItem.url}", e)
                 val errorItem = downloadItem.copy(
                     status = DownloadStatus.FAILED,
                     errorMessage = e.message ?: "Unknown error"

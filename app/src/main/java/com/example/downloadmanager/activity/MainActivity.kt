@@ -9,7 +9,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.IBinder
+import android.os.StatFs
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
@@ -26,9 +28,11 @@ import com.example.downloadmanager.R
 import com.example.downloadmanager.adapter.DownloadAdapter
 import com.example.downloadmanager.databinding.ActivityMainBinding
 import com.example.downloadmanager.manager.DownloadManager
+import com.example.downloadmanager.manager.MusicDownloadManager
 import com.example.downloadmanager.model.DownloadDatabase
 import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
+import com.example.downloadmanager.model.DownloadStatus
 import com.example.downloadmanager.model.DownloadType
 import com.example.downloadmanager.service.DownloadService
 import com.google.android.material.bottomsheet.BottomSheetDialog
@@ -93,12 +97,40 @@ class MainActivity : AppCompatActivity() {
         binding.fabAdd.setOnClickListener {
             showAddDownloadDialog()
         }
+
+        binding.btnQuickPaste.setOnClickListener {
+            handleQuickPaste()
+        }
         
         setupTabs()
         observeDownloads()
+        updateStorageStat()
         startDownloadService()
         checkPermissions()
         handleIntent(intent)
+    }
+
+    private fun handleQuickPaste() {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clipText = clipboard.primaryClip?.getItemAt(0)?.text?.toString()?.trim()
+        val validUrl = if (!clipText.isNullOrBlank()) {
+            AddDownloadActivity.normalizeAndValidateUrl(clipText)
+        } else {
+            null
+        }
+
+        if (validUrl != null) {
+            val detectedType = detectDownloadType(validUrl)
+            startActivity(Intent(this, AddDownloadActivity::class.java).apply {
+                putExtra("download_type", detectedType.name)
+                putExtra("preset_url", validUrl)
+            })
+        } else {
+            Toast.makeText(this, R.string.clipboard_empty_or_invalid, Toast.LENGTH_SHORT).show()
+            startActivity(Intent(this, AddDownloadActivity::class.java).apply {
+                putExtra("download_type", DownloadType.MUSIC.name)
+            })
+        }
     }
     
     private fun setupTabs() {
@@ -106,8 +138,9 @@ class MainActivity : AppCompatActivity() {
             getString(R.string.all_files),
             getString(R.string.active),
             getString(R.string.completed),
-            getString(R.string.torrents),
-            getString(R.string.videos)
+            getString(R.string.music),
+            getString(R.string.videos),
+            getString(R.string.torrents)
         )
         
         for (title in tabTitles) {
@@ -120,8 +153,9 @@ class MainActivity : AppCompatActivity() {
                     0 -> viewModel.showAllDownloads()
                     1 -> viewModel.showActiveDownloads()
                     2 -> viewModel.showCompletedDownloads()
-                    3 -> viewModel.showTorrentDownloads()
+                    3 -> viewModel.showMusicDownloads()
                     4 -> viewModel.showVideoDownloads()
+                    5 -> viewModel.showTorrentDownloads()
                 }
             }
             
@@ -137,15 +171,57 @@ class MainActivity : AppCompatActivity() {
             updateEmptyState(downloads.isEmpty())
             binding.swipeRefresh.isRefreshing = false
         })
+
+        viewModel.allDownloads.observe(this, Observer { allItems ->
+            updateDashboardStats(allItems)
+        })
+    }
+
+    private fun updateDashboardStats(allItems: List<DownloadItem>) {
+        val activeCount = allItems.count {
+            it.status == DownloadStatus.DOWNLOADING || it.status == DownloadStatus.QUEUED
+        }
+        val completedCount = allItems.count { it.status == DownloadStatus.COMPLETED }
+        val totalSpeed = allItems
+            .filter { it.status == DownloadStatus.DOWNLOADING }
+            .sumOf { it.downloadSpeed }
+
+        binding.tvStatActive.text = activeCount.toString()
+        binding.tvStatCompleted.text = completedCount.toString()
+        binding.tvStatSpeed.text = formatSpeedCompact(totalSpeed)
+        updateStorageStat()
+    }
+
+    private fun updateStorageStat() {
+        try {
+            val path = Environment.getExternalStorageDirectory()
+            val stat = StatFs(path.path)
+            val freeBytes = stat.availableBlocksLong * stat.blockSizeLong
+            val freeGb = freeBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
+            binding.tvStatStorage.text = "%.1f GB".format(freeGb)
+        } catch (e: Exception) {
+            binding.tvStatStorage.text = "-- GB"
+        }
+    }
+
+    private fun formatSpeedCompact(bytesPerSecond: Long): String {
+        if (bytesPerSecond <= 0) return "0 KB/s"
+        val kb = bytesPerSecond / 1024.0
+        return if (kb >= 1024.0) {
+            "%.1f MB/s".format(kb / 1024.0)
+        } else {
+            "%.0f KB/s".format(kb)
+        }
     }
     
     private fun updateEmptyState(isEmpty: Boolean) {
         binding.recyclerView.visibility = if (isEmpty) View.GONE else View.VISIBLE
-        binding.tvEmptyState.visibility = if (isEmpty) View.VISIBLE else View.GONE
+        binding.emptyStateContainer.visibility = if (isEmpty) View.VISIBLE else View.GONE
     }
     
     private fun refreshDownloads() {
         viewModel.refreshDownloads()
+        updateStorageStat()
         binding.swipeRefresh.isRefreshing = false
     }
     
@@ -160,11 +236,11 @@ class MainActivity : AppCompatActivity() {
                 putExtra("download_type", DownloadType.DIRECT.name)
             })
         }
-        
-        view.findViewById<View>(R.id.btnTorrentDownload)?.setOnClickListener {
+
+        view.findViewById<View>(R.id.btnMusicDownload)?.setOnClickListener {
             dialog.dismiss()
             startActivity(Intent(this, AddDownloadActivity::class.java).apply {
-                putExtra("download_type", DownloadType.TORRENT.name)
+                putExtra("download_type", DownloadType.MUSIC.name)
             })
         }
         
@@ -172,6 +248,13 @@ class MainActivity : AppCompatActivity() {
             dialog.dismiss()
             startActivity(Intent(this, AddDownloadActivity::class.java).apply {
                 putExtra("download_type", DownloadType.VIDEO.name)
+            })
+        }
+
+        view.findViewById<View>(R.id.btnTorrentDownload)?.setOnClickListener {
+            dialog.dismiss()
+            startActivity(Intent(this, AddDownloadActivity::class.java).apply {
+                putExtra("download_type", DownloadType.TORRENT.name)
             })
         }
         
@@ -199,7 +282,7 @@ class MainActivity : AppCompatActivity() {
     private fun copyLink(downloadItem: DownloadItem) {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("Download URL", downloadItem.url))
-        Toast.makeText(this, R.string.copy_link, Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, R.string.link_copied, Toast.LENGTH_SHORT).show()
     }
     
     private fun pauseDownload(downloadItem: DownloadItem) {
@@ -409,14 +492,21 @@ class MainActivity : AppCompatActivity() {
                 .show()
         }
     }
-    
-    private fun startDownload(url: String) {
-        val downloadType = when {
+
+    private fun detectDownloadType(url: String): DownloadType {
+        return when {
             url.startsWith("magnet:") -> DownloadType.MAGNET
-            url.endsWith(".torrent") -> DownloadType.TORRENT
-            url.contains("youtube.com") || url.contains("youtu.be") -> DownloadType.VIDEO
+            url.endsWith(".torrent", ignoreCase = true) -> DownloadType.TORRENT
+            MusicDownloadManager.isMusicUrl(url) -> DownloadType.MUSIC
+            url.contains("youtube.com") || url.contains("youtu.be") ||
+                url.contains("vimeo.com") || url.contains("tiktok.com") ||
+                url.contains("dailymotion.com") || url.contains("twitch.tv") -> DownloadType.VIDEO
             else -> DownloadType.DIRECT
         }
+    }
+    
+    private fun startDownload(url: String) {
+        val downloadType = detectDownloadType(url)
         
         val downloadManager = DownloadManager(application, viewModel.repository)
         val filename = downloadManager.getFilenameFromUrl(url)
@@ -431,22 +521,63 @@ class MainActivity : AppCompatActivity() {
             startService(this)
         }
     }
+
+    private fun showSortDialog() {
+        val options = arrayOf(
+            getString(R.string.sort_date_newest),
+            getString(R.string.sort_date_oldest),
+            getString(R.string.sort_name_az),
+            getString(R.string.sort_size_largest),
+            getString(R.string.sort_progress)
+        )
+        val currentOrder = viewModel.sortOrder.value ?: MainViewModel.SortOrder.DATE_DESC
+        val checkedItem = when (currentOrder) {
+            MainViewModel.SortOrder.DATE_DESC -> 0
+            MainViewModel.SortOrder.DATE_ASC -> 1
+            MainViewModel.SortOrder.NAME_ASC -> 2
+            MainViewModel.SortOrder.SIZE_DESC -> 3
+            MainViewModel.SortOrder.PROGRESS_DESC -> 4
+        }
+
+        android.app.AlertDialog.Builder(this)
+            .setTitle(R.string.sort)
+            .setSingleChoiceItems(options, checkedItem) { dialog, which ->
+                val selected = when (which) {
+                    0 -> MainViewModel.SortOrder.DATE_DESC
+                    1 -> MainViewModel.SortOrder.DATE_ASC
+                    2 -> MainViewModel.SortOrder.NAME_ASC
+                    3 -> MainViewModel.SortOrder.SIZE_DESC
+                    4 -> MainViewModel.SortOrder.PROGRESS_DESC
+                    else -> MainViewModel.SortOrder.DATE_DESC
+                }
+                viewModel.setSortOrder(selected)
+                dialog.dismiss()
+            }
+            .show()
+    }
     
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(R.menu.menu_main, menu)
         
         val searchItem = menu.findItem(R.id.action_search)
         val searchView = searchItem?.actionView as? SearchView
+        searchView?.queryHint = getString(R.string.search_downloads)
         
         searchView?.setOnQueryTextListener(object : SearchView.OnQueryTextListener {
             override fun onQueryTextSubmit(query: String): Boolean {
-                handleUrl(query)
+                val trimmed = query.trim()
+                if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("magnet:")) {
+                    handleUrl(trimmed)
+                } else {
+                    viewModel.setSearchQuery(trimmed)
+                }
                 searchView.clearFocus()
                 return true
             }
             
             override fun onQueryTextChange(newText: String): Boolean {
-                return false
+                viewModel.setSearchQuery(newText)
+                return true
             }
         })
         
@@ -455,6 +586,25 @@ class MainActivity : AppCompatActivity() {
     
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
+            R.id.action_sort -> {
+                showSortDialog()
+                true
+            }
+            R.id.action_pause_all -> {
+                downloadService?.pauseAllDownloads()
+                Toast.makeText(this, R.string.all_downloads_paused, Toast.LENGTH_SHORT).show()
+                true
+            }
+            R.id.action_resume_all -> {
+                downloadService?.resumeAllDownloads()
+                Toast.makeText(this, R.string.all_downloads_resumed, Toast.LENGTH_SHORT).show()
+                true
+            }
+            R.id.action_clear_completed -> {
+                viewModel.clearCompletedDownloads()
+                Toast.makeText(this, R.string.completed_cleared, Toast.LENGTH_SHORT).show()
+                true
+            }
             R.id.action_settings -> {
                 startActivity(Intent(this, SettingsActivity::class.java))
                 true

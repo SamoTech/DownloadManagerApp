@@ -10,26 +10,34 @@
     <string name="failed">Failed</string>
     <string name="queued">Queued</string>
     <string name="all_files">All Files</string>
+    <string name="music">Music</string>
     <string name="torrents">Torrents</string>
     <string name="videos">Videos</string>
     <string name="settings">Settings</string>
     <string name="about">About</string>
     <string name="exit">Exit</string>
     
-    <string name="url_hint">Enter URL or magnet link</string>
-    <string name="filename_hint">Filename (optional)</string>
+    <string name="url_hint">Enter URL, music/video link, or magnet URI</string>
+    <string name="filename_hint">Filename / Track title (optional)</string>
+    <string name="artist_hint">Artist / Channel name (optional)</string>
     <string name="save_to">Save to</string>
     <string name="default_download_path">Downloads</string>
     <string name="start_download">Start Download</string>
     <string name="starting_download">Starting download...</string>
     <string name="download_started">Download started</string>
     <string name="browse">Browse</string>
+    <string name="paste_url">Paste</string>
     <string name="select_file">Select Location</string>
     <string name="select_all_files">Select all files</string>
-    <string name="search_hint">Search or enter URL</string>
+    <string name="search_hint">Search downloads or paste URL</string>
     <string name="sort">Sort</string>
+    <string name="sort_by">Sort Downloads By</string>
+    <string name="pause_all">Pause All</string>
+    <string name="resume_all">Resume All</string>
+    <string name="clear_completed">Clear Completed</string>
     <string name="more_options">More options</string>
     <string name="copy_link">Copy Link</string>
+    <string name="link_copied">Link copied to clipboard</string>
     <string name="file_information">File Information</string>
     <string name="app_settings">App Settings</string>
     <string name="pause">Pause</string>
@@ -52,7 +60,7 @@
     <string name="grant_permission">Grant Permission</string>
     <string name="permission_denied">Permission denied. Some features may not work properly.</string>
     
-    <string name="no_downloads">No downloads yet. Tap + to add a download.</string>
+    <string name="no_downloads">No downloads yet. Tap + or Paste URL to start downloading files, music, videos, or torrents.</string>
     <string name="no_active_downloads">No active downloads</string>
     <string name="no_completed_downloads">No completed downloads</string>
     
@@ -63,7 +71,7 @@
     <string name="unknown_speed">--</string>
     <string name="unknown_eta">--:--</string>
     
-    <string name="app_description">Universal Download Manager supports downloading all file types from any website, including torrents and videos.</string>
+    <string name="app_description">Universal Download Manager supports high-speed downloading of all file types, music from all major audio platforms (SoundCloud, YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org, Podcasts, and direct MP3/FLAC), videos, and torrents.</string>
     <string name="version">Version %s</string>
     <string name="developer">Developer</string>
     <string name="privacy_policy">Privacy Policy</string>
@@ -71,7 +79,7 @@
     
     <string name="download_settings">Download Settings</string>
     <string name="max_concurrent_downloads">Max Concurrent Downloads</string>
-    <string name="download_speed_limit">Speed Limit (KB/s)</string>
+    <string name="download_speed_limit">Speed Limit (KB/s, 0 = Unlimited)</string>
     <string name="none">None</string>
     <string name="unlimited">Unlimited</string>
     <string name="save_location">Save Location</string>
@@ -93,12 +101,24 @@
     
     <string name="video_settings">Video Settings</string>
     <string name="video_quality">Video Quality</string>
-    <string name="best">Best</string>
-    <string name="high">High</string>
-    <string name="medium">Medium</string>
-    <string name="low">Low</string>
+    <string name="best">Best (1080p / 4K)</string>
+    <string name="high">High (720p HD)</string>
+    <string name="medium">Medium (480p)</string>
+    <string name="low">Low (360p Data Saver)</string>
     <string name="audio_only">Audio Only</string>
-    <string name="extract_audio">Extract Audio</string>
+    <string name="extract_audio">Extract Audio Track</string>
+
+    <string name="music_settings">Music &amp; Audio Settings</string>
+    <string name="music_download">Music Download</string>
+    <string name="music_format">Audio Format &amp; Bitrate</string>
+    <string name="music_mp3_320">MP3 320 kbps (Studio Quality)</string>
+    <string name="music_mp3_192">MP3 192 kbps (High Quality)</string>
+    <string name="music_flac">FLAC Lossless (Hi-Res Audio)</string>
+    <string name="music_m4a_256">M4A / AAC 256 kbps</string>
+    <string name="music_ogg_192">OGG Vorbis 192 kbps</string>
+    <string name="embed_metadata">Embed ID3 Tags &amp; Cover Art</string>
+    <string name="supported_music_sites">Supported: SoundCloud, YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Apple Music, Deezer, Tidal, Archive.org, Podcasts &amp; Direct Audio</string>
+    <string name="sample_music_tracks">Quick Sample Free Music Tracks</string>
     
     <string name="confirm_delete">Are you sure you want to delete this download?</string>
     <string name="confirm_delete_file">Also delete the downloaded file?</string>
@@ -107,7 +127,7 @@
     <string name="no">No</string>
     <string name="ok">OK</string>
     
-    <string name="error_invalid_url">Invalid URL</string>
+    <string name="error_invalid_url">Invalid URL. Enter a valid http/https or magnet link.</string>
     <string name="error_invalid_download">Invalid download item</string>
     <string name="error_file_not_found">Downloaded file not found</string>
     <string name="error_open_file">Cannot open this file type</string>
@@ -119,6 +139,7 @@
     <string name="error_file_exists">File already exists</string>
     
     <string name="torrent">Torrent</string>
+    <string name="torrent_download">Torrent Download</string>
     <string name="magnet_link">Magnet Link</string>
     <string name="direct_download">Direct Download</string>
     <string name="video_download">Video Download</string>
@@ -136,4 +157,16 @@
     <string name="save_path">Path: %s</string>
     <string name="added_on">Added: %s</string>
     <string name="completed_on">Completed: %s</string>
+    <string name="completed_status">Completed</string>
+    <string name="cancelled">Cancelled</string>
+    <string name="clipboard_empty_or_invalid">No valid URL in clipboard. Enter or select a source below.</string>
+    <string name="search_downloads">Search downloads or paste URL...</string>
+    <string name="sort_date_newest">Date Added (Newest First)</string>
+    <string name="sort_date_oldest">Date Added (Oldest First)</string>
+    <string name="sort_name_az">Filename (A - Z)</string>
+    <string name="sort_size_largest">File Size (Largest First)</string>
+    <string name="sort_progress">Progress (Highest First)</string>
+    <string name="all_downloads_paused">All active downloads paused</string>
+    <string name="all_downloads_resumed">All paused downloads resumed</string>
+    <string name="completed_cleared">Completed downloads cleared</string>
 </resources>

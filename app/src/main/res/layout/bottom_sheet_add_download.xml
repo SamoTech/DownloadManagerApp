@@ -4,56 +4,96 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
+    android:background="@color/colorSurface"
     android:orientation="vertical"
-    android:padding="@dimen/default_padding">
+    android:padding="20dp">
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="@string/add_download"
-        android:textSize="@dimen/text_size_title"
+        android:textColor="@color/colorOnSurface"
+        android:textSize="20sp"
         android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="Choose download type or paste any link"
+        android:textColor="@color/gray"
+        android:textSize="13sp" />
 
     <com.google.android.material.divider.MaterialDivider
         android:layout_width="match_parent"
-        android:layout_height="@dimen/divider_height"
-        android:layout_marginVertical="@dimen/small_margin" />
+        android:layout_height="1dp"
+        android:layout_marginVertical="12dp" />
 
     <com.google.android.material.button.MaterialButton
         android:id="@+id/btnDirectDownload"
         style="@style/Widget.Material3.Button.OutlinedButton"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginVertical="@dimen/small_margin"
+        android:layout_height="54dp"
+        android:layout_marginVertical="4dp"
+        android:gravity="start|center_vertical"
         android:text="@string/direct_download"
+        android:textColor="@color/colorOnSurface"
+        app:cornerRadius="12dp"
         app:icon="@drawable/ic_download"
-        app:iconGravity="start" />
+        app:iconGravity="start"
+        app:iconPadding="14dp"
+        app:iconTint="@color/category_direct" />
 
     <com.google.android.material.button.MaterialButton
-        android:id="@+id/btnTorrentDownload"
+        android:id="@+id/btnMusicDownload"
         style="@style/Widget.Material3.Button.OutlinedButton"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginVertical="@dimen/small_margin"
-        android:text="@string/torrents"
-        app:icon="@drawable/ic_torrent"
-        app:iconGravity="start" />
+        android:layout_height="54dp"
+        android:layout_marginVertical="4dp"
+        android:gravity="start|center_vertical"
+        android:text="@string/music_download"
+        android:textColor="@color/colorOnSurface"
+        app:cornerRadius="12dp"
+        app:icon="@drawable/ic_music"
+        app:iconGravity="start"
+        app:iconPadding="14dp"
+        app:iconTint="@color/category_music" />
 
     <com.google.android.material.button.MaterialButton
         android:id="@+id/btnVideoDownload"
         style="@style/Widget.Material3.Button.OutlinedButton"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginVertical="@dimen/small_margin"
-        android:text="@string/videos"
+        android:layout_height="54dp"
+        android:layout_marginVertical="4dp"
+        android:gravity="start|center_vertical"
+        android:text="@string/video_download"
+        android:textColor="@color/colorOnSurface"
+        app:cornerRadius="12dp"
         app:icon="@drawable/ic_video"
-        app:iconGravity="start" />
+        app:iconGravity="start"
+        app:iconPadding="14dp"
+        app:iconTint="@color/category_video" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnTorrentDownload"
+        style="@style/Widget.Material3.Button.OutlinedButton"
+        android:layout_width="match_parent"
+        android:layout_height="54dp"
+        android:layout_marginVertical="4dp"
+        android:gravity="start|center_vertical"
+        android:text="@string/torrents"
+        android:textColor="@color/colorOnSurface"
+        app:cornerRadius="12dp"
+        app:icon="@drawable/ic_torrent"
+        app:iconGravity="start"
+        app:iconPadding="14dp"
+        app:iconTint="@color/category_torrent" />
 
     <com.google.android.material.button.MaterialButton
         android:id="@+id/btnCancel"
         style="@style/Widget.Material3.Button.TextButton"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="@dimen/default_margin"
+        android:layout_marginTop="8dp"
         android:text="@string/cancel" />
 </LinearLayout>

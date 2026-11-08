@@ -1,9 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@color/colorPrimary" />
+    <background android:drawable="@color/colorPrimaryDark" />
     <foreground>
-        <vector android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
-            <path android:fillColor="#FFFFFF" android:pathData="M19,9h-4V3H9v6H5l7,7 7,-7zM5,18v2h14v-2H5z" />
+        <vector
+            android:width="108dp"
+            android:height="108dp"
+            android:viewportWidth="108"
+            android:viewportHeight="108">
+            <path
+                android:fillColor="#0EA5E9"
+                android:pathData="M54,22c17.67,0 32,14.33 32,32s-14.33,32 -32,32S22,71.67 22,54 36.33,22 54,22z" />
+            <path
+                android:fillColor="#FFFFFF"
+                android:pathData="M64,51h-6V37h-8v14h-6l10,11 10,-11zM40,65v4h28v-4H40z" />
         </vector>
     </foreground>
 </adaptive-icon>

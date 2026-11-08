@@ -1,30 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.cardview.widget.CardView
+<com.google.android.material.card.MaterialCardView
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_margin="@dimen/small_margin"
-    app:cardCornerRadius="8dp"
-    app:cardElevation="@dimen/card_elevation">
+    android:layout_marginVertical="6dp"
+    android:layout_marginHorizontal="4dp"
+    app:cardBackgroundColor="@color/colorSurface"
+    app:cardCornerRadius="16dp"
+    app:cardElevation="2dp"
+    app:strokeColor="@color/colorBorder"
+    app:strokeWidth="1dp">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="@dimen/default_padding">
+        android:padding="16dp">
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:gravity="center_vertical"
             android:orientation="horizontal">
 
-            <ImageView
-                android:id="@+id/ivFileType"
-                android:layout_width="@dimen/large_icon_size"
-                android:layout_height="@dimen/large_icon_size"
-                android:layout_marginEnd="@dimen/default_margin"
-                android:src="@drawable/ic_file" />
+            <FrameLayout
+                android:layout_width="46dp"
+                android:layout_height="46dp"
+                android:layout_marginEnd="14dp"
+                android:background="@drawable/icon_badge_background">
+
+                <ImageView
+                    android:id="@+id/ivFileType"
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:layout_gravity="center"
+                    android:contentDescription="@string/downloads"
+                    android:src="@drawable/ic_file"
+                    app:tint="@color/colorPrimary" />
+            </FrameLayout>
 
             <LinearLayout
                 android:layout_width="0dp"
@@ -32,19 +46,51 @@
                 android:layout_weight="1"
                 android:orientation="vertical">
 
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/tvCategoryBadge"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="8dp"
+                        android:background="@drawable/icon_badge_background"
+                        android:paddingHorizontal="6dp"
+                        android:paddingVertical="2dp"
+                        android:text="FILE"
+                        android:textColor="@color/colorPrimary"
+                        android:textSize="10sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tvStatus"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/queued"
+                        android:textColor="@color/gray"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
                 <TextView
                     android:id="@+id/tvFilename"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:maxLines="1"
+                    android:layout_marginTop="4dp"
                     android:ellipsize="end"
-                    android:textSize="@dimen/text_size_large"
+                    android:maxLines="1"
+                    android:textColor="@color/colorOnSurface"
+                    android:textSize="15sp"
                     android:textStyle="bold" />
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/tiny_margin"
+                    android:layout_marginTop="4dp"
+                    android:gravity="center_vertical"
                     android:orientation="horizontal">
 
                     <TextView
@@ -52,66 +98,66 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="0%"
-                        android:textSize="@dimen/text_size_medium" />
+                        android:textColor="@color/colorPrimary"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
 
                     <TextView
                         android:id="@+id/tvSize"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginStart="@dimen/default_margin"
+                        android:layout_marginStart="10dp"
                         android:text="0B"
-                        android:textSize="@dimen/text_size_medium" />
+                        android:textColor="@color/gray"
+                        android:textSize="12sp" />
 
                     <TextView
                         android:id="@+id/tvSpeed"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginStart="@dimen/default_margin"
+                        android:layout_marginStart="10dp"
                         android:text="--"
-                        android:textSize="@dimen/text_size_small" />
+                        android:textColor="@color/gray"
+                        android:textSize="12sp" />
 
                     <TextView
                         android:id="@+id/tvEta"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginStart="@dimen/default_margin"
+                        android:layout_marginStart="10dp"
                         android:text="--:--"
-                        android:textSize="@dimen/text_size_small" />
+                        android:textColor="@color/gray"
+                        android:textSize="12sp" />
                 </LinearLayout>
-
-                <TextView
-                    android:id="@+id/tvStatus"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/tiny_margin"
-                    android:text="@string/queued"
-                    android:textColor="@color/gray"
-                    android:textSize="@dimen/text_size_small" />
             </LinearLayout>
 
             <ImageView
                 android:id="@+id/ivMore"
-                android:layout_width="@dimen/icon_size"
-                android:layout_height="@dimen/icon_size"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/more_options"
+                android:padding="8dp"
                 android:src="@drawable/ic_more_vert"
-                android:contentDescription="@string/more_options" />
+                app:tint="@color/gray" />
         </LinearLayout>
 
         <ProgressBar
             android:id="@+id/progressBar"
             style="?android:attr/progressBarStyleHorizontal"
             android:layout_width="match_parent"
-            android:layout_height="@dimen/progress_bar_height"
-            android:layout_marginTop="@dimen/default_margin"
+            android:layout_height="8dp"
+            android:layout_marginTop="12dp"
             android:max="100"
-            android:progress="0" />
+            android:progress="0"
+            android:progressDrawable="@drawable/progress_bar_drawable" />
 
         <!-- Torrent specific info -->
         <LinearLayout
             android:id="@+id/torrentInfo"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="@dimen/small_margin"
+            android:layout_marginTop="8dp"
             android:orientation="horizontal"
             android:visibility="gone">
 
@@ -120,62 +166,77 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Peers: 0"
-                android:textSize="@dimen/text_size_small" />
+                android:textColor="@color/gray"
+                android:textSize="12sp" />
 
             <TextView
                 android:id="@+id/tvSeeds"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="@dimen/default_margin"
+                android:layout_marginStart="16dp"
                 android:text="Seeds: 0"
-                android:textSize="@dimen/text_size_small" />
+                android:textColor="@color/gray"
+                android:textSize="12sp" />
 
             <TextView
                 android:id="@+id/tvUploadSpeed"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="@dimen/default_margin"
+                android:layout_marginStart="16dp"
                 android:text="Upload: 0B/s"
-                android:textSize="@dimen/text_size_small" />
+                android:textColor="@color/gray"
+                android:textSize="12sp" />
         </LinearLayout>
 
         <!-- Action buttons -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="@dimen/default_margin"
+            android:layout_marginTop="10dp"
             android:orientation="horizontal">
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnAction1"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+                style="@style/Widget.Material3.Button.TonalButton"
                 android:layout_width="0dp"
-                android:layout_height="wrap_content"
+                android:layout_height="40dp"
                 android:layout_weight="1"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
                 android:text="@string/pause"
-                android:visibility="gone" />
+                android:textSize="12sp"
+                android:visibility="gone"
+                app:cornerRadius="10dp" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnAction2"
                 style="@style/Widget.Material3.Button.OutlinedButton"
                 android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="@dimen/small_margin"
+                android:layout_height="40dp"
+                android:layout_marginStart="8dp"
                 android:layout_weight="1"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
                 android:text="@string/resume"
-                android:visibility="gone" />
+                android:textSize="12sp"
+                android:visibility="gone"
+                app:cornerRadius="10dp" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnAction3"
                 style="@style/Widget.Material3.Button.OutlinedButton"
                 android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="@dimen/small_margin"
+                android:layout_height="40dp"
+                android:layout_marginStart="8dp"
                 android:layout_weight="1"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
                 android:text="@string/retry"
-                android:visibility="gone" />
+                android:textSize="12sp"
+                android:visibility="gone"
+                app:cornerRadius="10dp" />
         </LinearLayout>
 
     </LinearLayout>
 
-</androidx.cardview.widget.CardView>
+</com.google.android.material.card.MaterialCardView>

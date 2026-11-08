@@ -208,41 +208,41 @@ class YouTubeExtractor(private val context: Context) {
             
             val formats = mutableListOf<VideoFormat>()
             
-            // Video formats (simplified)
+            // Video formats
             formats.add(VideoFormat(
                 formatId = "22",
-                url = "https://www.youtube.com/get_video?video_id=$videoId&format=22",
+                url = "https://www.youtube.com/watch?v=$videoId",
                 quality = "720p",
                 resolution = "1280x720",
                 fps = 30,
                 bitrate = 2000,
                 codec = "H.264",
                 container = "mp4",
-                fileSize = 50 * 1024 * 1024, // 50MB
+                fileSize = 16L * 1024 * 1024, // 16MB
                 isAudioOnly = false
             ))
             
             formats.add(VideoFormat(
                 formatId = "18",
-                url = "https://www.youtube.com/get_video?video_id=$videoId&format=18",
+                url = "https://www.youtube.com/watch?v=$videoId",
                 quality = "360p",
                 resolution = "640x360",
                 fps = 30,
                 bitrate = 1000,
                 codec = "H.264",
                 container = "mp4",
-                fileSize = 25 * 1024 * 1024, // 25MB
+                fileSize = 8L * 1024 * 1024, // 8MB
                 isAudioOnly = false
             ))
             
             // Audio formats
             formats.add(VideoFormat(
                 formatId = "140",
-                url = "https://www.youtube.com/get_video?video_id=$videoId&format=140",
+                url = "https://www.youtube.com/watch?v=$videoId",
                 quality = "128kbps",
                 codec = "AAC",
                 container = "m4a",
-                fileSize = 5 * 1024 * 1024, // 5MB
+                fileSize = 3L * 1024 * 1024, // 3MB
                 isAudioOnly = true,
                 audioBitrate = 128,
                 sampleRate = 44100
@@ -250,7 +250,7 @@ class YouTubeExtractor(private val context: Context) {
             
             formats
         } catch (e: Exception) {
-            Log.e(TAG, "Error extracting formats", e)
+            Log.w(TAG, "Error extracting formats", e)
             null
         }
     }

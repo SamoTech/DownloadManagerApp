@@ -13,9 +13,11 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.Observer
+import androidx.preference.PreferenceManager
 import com.example.downloadmanager.R
 import com.example.downloadmanager.activity.MainActivity
 import com.example.downloadmanager.manager.DownloadManager
+import com.example.downloadmanager.manager.MusicDownloadManager
 import com.example.downloadmanager.manager.TorrentDownloadManager
 import com.example.downloadmanager.manager.VideoDownloadManager
 import com.example.downloadmanager.model.DownloadDatabase
@@ -34,6 +36,7 @@ class DownloadService : Service() {
     private lateinit var downloadManager: DownloadManager
     private lateinit var torrentDownloadManager: TorrentDownloadManager
     private lateinit var videoDownloadManager: VideoDownloadManager
+    private lateinit var musicDownloadManager: MusicDownloadManager
     
     private val binder = LocalBinder()
     private val executor = Executors.newFixedThreadPool(4)
@@ -62,6 +65,8 @@ class DownloadService : Service() {
         const val EXTRA_FILENAME = "filename"
         const val EXTRA_SAVE_PATH = "save_path"
         const val EXTRA_DOWNLOAD_TYPE = "download_type"
+        const val EXTRA_MUSIC_FORMAT = "music_format"
+        const val EXTRA_ARTIST = "artist"
     }
     
     inner class LocalBinder : Binder() {
@@ -79,9 +84,21 @@ class DownloadService : Service() {
         downloadManager = DownloadManager(application, repository)
         torrentDownloadManager = TorrentDownloadManager(application, repository)
         videoDownloadManager = VideoDownloadManager(application, repository)
+        musicDownloadManager = MusicDownloadManager(application, repository)
         
         createNotificationChannel()
+        cleanupInvalidDownloads()
         observeActiveDownloads()
+    }
+
+    private fun cleanupInvalidDownloads() {
+        scope.launch {
+            try {
+                repository.deleteInvalidDownloads()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error cleaning up invalid downloads", e)
+            }
+        }
     }
     
     override fun onBind(intent: Intent?): IBinder {
@@ -104,12 +121,14 @@ class DownloadService : Service() {
                 val url = intent.getStringExtra(EXTRA_URL) ?: return
                 val filename = intent.getStringExtra(EXTRA_FILENAME)
                 val savePath = intent.getStringExtra(EXTRA_SAVE_PATH)
+                val musicFormat = intent.getStringExtra(EXTRA_MUSIC_FORMAT)
+                val artist = intent.getStringExtra(EXTRA_ARTIST)
                 @Suppress("DEPRECATION")
                 val downloadType = intent.getSerializableExtra(EXTRA_DOWNLOAD_TYPE) as? DownloadType
                     ?: DownloadType.DIRECT
                 
                 scope.launch {
-                    startDownloadInternal(url, filename, savePath, downloadType)
+                    startDownloadInternal(url, filename, savePath, downloadType, musicFormat, artist)
                 }
             }
             
@@ -147,27 +166,57 @@ class DownloadService : Service() {
         url: String,
         filename: String? = null,
         savePath: String? = null,
-        downloadType: DownloadType = DownloadType.DIRECT
+        downloadType: DownloadType = DownloadType.DIRECT,
+        musicFormat: String? = null,
+        artist: String? = null
     ) {
+        val validUrl = if (url.startsWith("magnet:?")) {
+            url
+        } else {
+            VideoDownloadManager.normalizeHttpUrl(url)
+        }
+        if (validUrl == null) {
+            Log.w(TAG, "Ignoring startDownloadInternal for invalid URL: $url")
+            return
+        }
+
+        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
+        val defaultPath = prefs.getString("default_save_path", null)
+            ?.takeIf { it.isNotBlank() }
+            ?: downloadManager.getDefaultDownloadPath()
+        val resolvedSavePath = if (savePath.isNullOrBlank()) defaultPath else savePath
+
         try {
             val downloadId = when (downloadType) {
                 DownloadType.TORRENT, DownloadType.MAGNET -> torrentDownloadManager.startTorrentDownload(
                     DownloadItem(
-                        url = url,
-                        filename = if (filename.isNullOrBlank()) downloadManager.getFilenameFromUrl(url) else filename,
-                        savePath = if (savePath.isNullOrBlank()) downloadManager.getDefaultDownloadPath() else savePath,
+                        url = validUrl,
+                        filename = if (filename.isNullOrBlank()) downloadManager.getFilenameFromUrl(validUrl) else filename,
+                        savePath = resolvedSavePath,
                         downloadType = downloadType
                     )
                 )
                 DownloadType.VIDEO -> videoDownloadManager.startVideoDownload(
                     DownloadItem(
-                        url = url,
-                        filename = if (filename.isNullOrBlank()) downloadManager.getFilenameFromUrl(url) else filename,
-                        savePath = if (savePath.isNullOrBlank()) downloadManager.getDefaultDownloadPath() else savePath,
+                        url = validUrl,
+                        filename = if (filename.isNullOrBlank()) downloadManager.getFilenameFromUrl(validUrl) else filename,
+                        savePath = resolvedSavePath,
                         downloadType = downloadType
                     )
                 )
-                else -> downloadManager.startDownload(url, filename, savePath, downloadType)
+                DownloadType.MUSIC -> {
+                    val formatPref = musicFormat ?: prefs.getString("default_music_format", "MP3_320") ?: "MP3_320"
+                    val baseItem = DownloadItem(
+                        url = validUrl,
+                        filename = if (filename.isNullOrBlank()) downloadManager.getFilenameFromUrl(validUrl) else filename,
+                        savePath = resolvedSavePath,
+                        downloadType = DownloadType.MUSIC,
+                        videoTitle = artist?.takeIf { it.isNotBlank() },
+                        videoQuality = formatPref
+                    )
+                    musicDownloadManager.startMusicDownload(baseItem, formatPref)
+                }
+                DownloadType.DIRECT -> downloadManager.startDownload(validUrl, filename, resolvedSavePath, downloadType)
             }
             
             if (downloadType != DownloadType.TORRENT && downloadType != DownloadType.MAGNET) {
@@ -175,7 +224,7 @@ class DownloadService : Service() {
             }
             
         } catch (e: Exception) {
-            Log.e(TAG, "Error starting download", e)
+            Log.w(TAG, "Error starting download", e)
         }
     }
     
@@ -192,6 +241,9 @@ class DownloadService : Service() {
                 }
                 DownloadType.VIDEO -> {
                     startVideoDownload(downloadItem)
+                }
+                DownloadType.MUSIC -> {
+                    startMusicDownload(downloadItem)
                 }
                 DownloadType.MAGNET -> {
                     startMagnetDownload(downloadItem)
@@ -232,6 +284,21 @@ class DownloadService : Service() {
     
     private fun startVideoDownload(downloadItem: DownloadItem) {
         videoDownloadManager.downloadVideo(
+            downloadItem = downloadItem,
+            onProgress = { downloaded, total, progress, speed ->
+                updateProgress(downloadItem.id, downloaded, total, progress, speed)
+            },
+            onComplete = { completedItem ->
+                onDownloadComplete(completedItem)
+            },
+            onError = { errorItem, error ->
+                onDownloadError(errorItem, error)
+            }
+        )
+    }
+
+    private fun startMusicDownload(downloadItem: DownloadItem) {
+        musicDownloadManager.downloadMusic(
             downloadItem = downloadItem,
             onProgress = { downloaded, total, progress, speed ->
                 updateProgress(downloadItem.id, downloaded, total, progress, speed)
@@ -305,6 +372,7 @@ class DownloadService : Service() {
                 DownloadType.DIRECT -> downloadManager.pauseDownload(downloadItem)
                 DownloadType.TORRENT -> torrentDownloadManager.pauseTorrentDownload(downloadId)
                 DownloadType.VIDEO -> videoDownloadManager.pauseVideoDownload(downloadItem)
+                DownloadType.MUSIC -> musicDownloadManager.pauseMusicDownload(downloadItem)
                 DownloadType.MAGNET -> torrentDownloadManager.pauseTorrentDownload(downloadId)
             }
         }
@@ -324,6 +392,10 @@ class DownloadService : Service() {
                     videoDownloadManager.resumeVideoDownload(downloadItem)
                     startDownloadWorker(downloadId)
                 }
+                DownloadType.MUSIC -> {
+                    musicDownloadManager.resumeMusicDownload(downloadItem)
+                    startDownloadWorker(downloadId)
+                }
                 DownloadType.MAGNET -> torrentDownloadManager.resumeTorrentDownload(downloadId)
             }
         }
@@ -340,6 +412,7 @@ class DownloadService : Service() {
                     downloadManager.cancelDownload(downloadItem)
                 }
                 DownloadType.VIDEO -> videoDownloadManager.cancelVideoDownload(downloadItem)
+                DownloadType.MUSIC -> musicDownloadManager.cancelMusicDownload(downloadItem)
                 DownloadType.MAGNET -> {
                     torrentDownloadManager.stopTorrentDownload(downloadId)
                     downloadManager.cancelDownload(downloadItem)
@@ -366,6 +439,7 @@ class DownloadService : Service() {
                     downloadManager.retryDownload(downloadItem)
                 }
                 DownloadType.VIDEO -> videoDownloadManager.retryDownload(downloadItem)
+                DownloadType.MUSIC -> musicDownloadManager.retryMusicDownload(downloadItem)
                 DownloadType.MAGNET -> {
                     torrentDownloadManager.stopTorrentDownload(downloadId)
                     downloadManager.retryDownload(downloadItem)
@@ -390,11 +464,31 @@ class DownloadService : Service() {
                     videoDownloadManager.cancelVideoDownload(downloadItem)
                     downloadManager.deleteDownload(downloadItem, deleteFile)
                 }
+                DownloadType.MUSIC -> {
+                    musicDownloadManager.cancelMusicDownload(downloadItem)
+                    downloadManager.deleteDownload(downloadItem, deleteFile)
+                }
                 DownloadType.MAGNET -> {
                     torrentDownloadManager.stopTorrentDownload(downloadId)
                     downloadManager.deleteDownload(downloadItem, deleteFile)
                 }
             }
+        }
+    }
+
+    fun pauseAllDownloads() {
+        scope.launch {
+            val items = repository.getAllDownloadsList()
+            items.filter { it.status == DownloadStatus.DOWNLOADING || it.status == DownloadStatus.QUEUED }
+                .forEach { pauseDownload(it.id) }
+        }
+    }
+
+    fun resumeAllDownloads() {
+        scope.launch {
+            val items = repository.getAllDownloadsList()
+            items.filter { it.status == DownloadStatus.PAUSED }
+                .forEach { resumeDownload(it.id) }
         }
     }
     
@@ -456,6 +550,11 @@ class DownloadService : Service() {
         foregroundNotification = createNotification()
         notificationManager?.notify(NOTIFICATION_ID, foregroundNotification)
     }
+
+    private fun isNotificationsEnabled(): Boolean {
+        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
+        return prefs.getBoolean("enable_notifications", true)
+    }
     
     private fun createNotification(): Notification {
         val channelId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -492,6 +591,7 @@ class DownloadService : Service() {
     }
     
     private fun showCompletionNotification(downloadItem: DownloadItem) {
+        if (!isNotificationsEnabled()) return
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         
         val intent = Intent(this, MainActivity::class.java).apply {
@@ -516,6 +616,7 @@ class DownloadService : Service() {
     }
     
     private fun showErrorNotification(downloadItem: DownloadItem, error: String) {
+        if (!isNotificationsEnabled()) return
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         
         val intent = Intent(this, MainActivity::class.java).apply {

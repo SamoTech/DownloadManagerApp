@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
 
     <PreferenceCategory
         android:title="@string/download_settings"
@@ -9,18 +10,21 @@
             android:key="max_concurrent_downloads"
             android:title="@string/max_concurrent_downloads"
             android:defaultValue="4"
-            android:inputType="number" />
+            android:inputType="number"
+            app:useSimpleSummaryProvider="true" />
 
         <EditTextPreference
             android:key="download_speed_limit"
             android:title="@string/download_speed_limit"
             android:defaultValue="0"
-            android:inputType="number" />
+            android:inputType="number"
+            app:useSimpleSummaryProvider="true" />
 
         <EditTextPreference
             android:key="default_save_path"
             android:title="@string/save_location"
-            android:defaultValue="" />
+            android:defaultValue=""
+            app:useSimpleSummaryProvider="true" />
 
         <SwitchPreferenceCompat
             android:key="use_mobile_data"
@@ -39,39 +43,21 @@
     </PreferenceCategory>
 
     <PreferenceCategory
-        android:title="@string/torrent_settings"
-        android:key="torrent_settings_category">
+        android:title="@string/music_settings"
+        android:key="music_settings_category">
 
-        <EditTextPreference
-            android:key="max_upload_speed"
-            android:title="@string/max_upload_speed"
-            android:defaultValue="0"
-            android:inputType="number" />
-
-        <EditTextPreference
-            android:key="max_connections"
-            android:title="@string/max_connections"
-            android:defaultValue="100"
-            android:inputType="number" />
+        <ListPreference
+            android:key="default_music_format"
+            android:title="@string/music_format"
+            android:defaultValue="mp3_320"
+            android:entries="@array/music_formats"
+            android:entryValues="@array/music_format_values"
+            app:useSimpleSummaryProvider="true" />
 
         <SwitchPreferenceCompat
-            android:key="enable_seeding"
-            android:title="@string/enable_seeding"
+            android:key="embed_music_metadata"
+            android:title="@string/embed_metadata"
             android:defaultValue="true" />
-
-        <ListPreference
-            android:key="seed_ratio"
-            android:title="@string/seed_ratio"
-            android:defaultValue="1.0"
-            android:entries="@array/seed_ratios"
-            android:entryValues="@array/seed_ratio_values" />
-
-        <ListPreference
-            android:key="seed_until"
-            android:title="@string/seed_until"
-            android:defaultValue="forever"
-            android:entries="@array/seed_until_options"
-            android:entryValues="@array/seed_until_values" />
     </PreferenceCategory>
 
     <PreferenceCategory
@@ -83,12 +69,53 @@
             android:title="@string/video_quality"
             android:defaultValue="best"
             android:entries="@array/video_qualities"
-            android:entryValues="@array/video_quality_values" />
+            android:entryValues="@array/video_quality_values"
+            app:useSimpleSummaryProvider="true" />
 
         <SwitchPreferenceCompat
             android:key="extract_audio_default"
             android:title="@string/extract_audio"
             android:defaultValue="false" />
+    </PreferenceCategory>
+
+    <PreferenceCategory
+        android:title="@string/torrent_settings"
+        android:key="torrent_settings_category">
+
+        <EditTextPreference
+            android:key="max_upload_speed"
+            android:title="@string/max_upload_speed"
+            android:defaultValue="0"
+            android:inputType="number"
+            app:useSimpleSummaryProvider="true" />
+
+        <EditTextPreference
+            android:key="max_connections"
+            android:title="@string/max_connections"
+            android:defaultValue="100"
+            android:inputType="number"
+            app:useSimpleSummaryProvider="true" />
+
+        <SwitchPreferenceCompat
+            android:key="enable_seeding"
+            android:title="@string/enable_seeding"
+            android:defaultValue="true" />
+
+        <ListPreference
+            android:key="seed_ratio"
+            android:title="@string/seed_ratio"
+            android:defaultValue="1.0"
+            android:entries="@array/seed_ratios"
+            android:entryValues="@array/seed_ratio_values"
+            app:useSimpleSummaryProvider="true" />
+
+        <ListPreference
+            android:key="seed_until"
+            android:title="@string/seed_until"
+            android:defaultValue="forever"
+            android:entries="@array/seed_until_options"
+            android:entryValues="@array/seed_until_values"
+            app:useSimpleSummaryProvider="true" />
     </PreferenceCategory>
 
     <PreferenceCategory
@@ -105,7 +132,8 @@
             android:title="@string/language"
             android:defaultValue="system"
             android:entries="@array/languages"
-            android:entryValues="@array/language_values" />
+            android:entryValues="@array/language_values"
+            app:useSimpleSummaryProvider="true" />
     </PreferenceCategory>
 
 </PreferenceScreen>

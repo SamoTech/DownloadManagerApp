@@ -1,6 +1,6 @@
 package com.example.downloadmanager.adapter
 
-import android.graphics.Color
+import android.content.res.ColorStateList
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -8,12 +8,15 @@ import android.widget.ImageView
 import android.widget.PopupMenu
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.core.content.ContextCompat
+import androidx.core.widget.ImageViewCompat
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.example.downloadmanager.R
 import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadStatus
+import com.example.downloadmanager.model.DownloadType
 import com.google.android.material.button.MaterialButton
 
 class DownloadAdapter(
@@ -36,6 +39,7 @@ class DownloadAdapter(
         
         private val ivFileType: ImageView = itemView.findViewById(R.id.ivFileType)
         private val tvFilename: TextView = itemView.findViewById(R.id.tvFilename)
+        private val tvCategoryBadge: TextView = itemView.findViewById(R.id.tvCategoryBadge)
         private val tvProgress: TextView = itemView.findViewById(R.id.tvProgress)
         private val tvSize: TextView = itemView.findViewById(R.id.tvSize)
         private val tvSpeed: TextView = itemView.findViewById(R.id.tvSpeed)
@@ -57,7 +61,13 @@ class DownloadAdapter(
             onActionClick: (DownloadItem, String) -> Unit
         ) {
             ivFileType.setImageResource(getFileTypeIcon(downloadItem))
+            val categoryColor = getCategoryColor(downloadItem)
+            ImageViewCompat.setImageTintList(ivFileType, ColorStateList.valueOf(categoryColor))
+
             tvFilename.text = downloadItem.filename
+            tvCategoryBadge.text = getCategoryLabel(downloadItem)
+            tvCategoryBadge.setTextColor(categoryColor)
+
             tvProgress.text = "${downloadItem.progress}%"
             progressBar.progress = downloadItem.progress
             tvSize.text = formatFileSize(downloadItem.fileSize)
@@ -77,8 +87,8 @@ class DownloadAdapter(
             tvStatus.text = getStatusText(downloadItem.status)
             tvStatus.setTextColor(getStatusColor(downloadItem.status))
             
-            if (downloadItem.downloadType == com.example.downloadmanager.model.DownloadType.TORRENT ||
-                downloadItem.downloadType == com.example.downloadmanager.model.DownloadType.MAGNET) {
+            if (downloadItem.downloadType == DownloadType.TORRENT ||
+                downloadItem.downloadType == DownloadType.MAGNET) {
                 torrentInfo.visibility = View.VISIBLE
                 tvPeers.text = itemView.context.getString(R.string.peers, downloadItem.peers)
                 tvSeeds.text = itemView.context.getString(R.string.seeds, downloadItem.seeds)
@@ -102,22 +112,53 @@ class DownloadAdapter(
         
         private fun getFileTypeIcon(downloadItem: DownloadItem): Int {
             return when (downloadItem.downloadType) {
-                com.example.downloadmanager.model.DownloadType.TORRENT -> R.drawable.ic_torrent
-                com.example.downloadmanager.model.DownloadType.VIDEO -> R.drawable.ic_video
-                com.example.downloadmanager.model.DownloadType.MAGNET -> R.drawable.ic_torrent
-                else -> {
+                DownloadType.TORRENT -> R.drawable.ic_torrent
+                DownloadType.VIDEO -> R.drawable.ic_video
+                DownloadType.MUSIC -> R.drawable.ic_music
+                DownloadType.MAGNET -> R.drawable.ic_torrent
+                DownloadType.DIRECT -> {
+                    val lower = downloadItem.filename.lowercase()
                     when {
-                        downloadItem.filename.endsWith(".mp4") || 
-                            downloadItem.filename.endsWith(".webm") ||
-                            downloadItem.filename.endsWith(".mkv") -> R.drawable.ic_video
+                        lower.endsWith(".mp3") || lower.endsWith(".flac") ||
+                            lower.endsWith(".wav") || lower.endsWith(".m4a") ||
+                            lower.endsWith(".aac") || lower.endsWith(".ogg") ||
+                            lower.endsWith(".opus") -> R.drawable.ic_music
+                        lower.endsWith(".mp4") || lower.endsWith(".webm") ||
+                            lower.endsWith(".mkv") -> R.drawable.ic_video
                         else -> R.drawable.ic_file
                     }
                 }
             }
         }
+
+        private fun getCategoryLabel(downloadItem: DownloadItem): String {
+            return when (downloadItem.downloadType) {
+                DownloadType.MUSIC -> {
+                    val quality = downloadItem.videoQuality
+                    if (!quality.isNullOrBlank()) "MUSIC • ${quality.substringBefore(" •")}" else "MUSIC"
+                }
+                DownloadType.VIDEO -> {
+                    val quality = downloadItem.videoQuality
+                    if (!quality.isNullOrBlank()) "VIDEO • $quality" else "VIDEO"
+                }
+                DownloadType.TORRENT -> "TORRENT"
+                DownloadType.MAGNET -> "MAGNET"
+                DownloadType.DIRECT -> "DIRECT"
+            }
+        }
+
+        private fun getCategoryColor(downloadItem: DownloadItem): Int {
+            val context = itemView.context
+            return when (downloadItem.downloadType) {
+                DownloadType.MUSIC -> ContextCompat.getColor(context, R.color.category_music)
+                DownloadType.VIDEO -> ContextCompat.getColor(context, R.color.category_video)
+                DownloadType.TORRENT, DownloadType.MAGNET -> ContextCompat.getColor(context, R.color.category_torrent)
+                DownloadType.DIRECT -> ContextCompat.getColor(context, R.color.category_direct)
+            }
+        }
         
         private fun formatFileSize(bytes: Long): String {
-            if (bytes <= 0) return "0B"
+            if (bytes <= 0) return "0 B"
             
             val units = arrayOf("B", "KB", "MB", "GB", "TB")
             var size = bytes.toDouble()
@@ -132,7 +173,7 @@ class DownloadAdapter(
         }
         
         private fun formatSpeed(bytesPerSecond: Long): String {
-            if (bytesPerSecond <= 0) return "0B/s"
+            if (bytesPerSecond <= 0) return "0 B/s"
             
             val units = arrayOf("B/s", "KB/s", "MB/s", "GB/s")
             var speed = bytesPerSecond.toDouble()
@@ -163,23 +204,24 @@ class DownloadAdapter(
         
         private fun getStatusText(status: DownloadStatus): String {
             return when (status) {
-                DownloadStatus.QUEUED -> "Queued"
-                DownloadStatus.DOWNLOADING -> "Downloading"
-                DownloadStatus.PAUSED -> "Paused"
-                DownloadStatus.COMPLETED -> "Completed"
-                DownloadStatus.FAILED -> "Failed"
-                DownloadStatus.CANCELLED -> "Cancelled"
+                DownloadStatus.QUEUED -> itemView.context.getString(R.string.queued)
+                DownloadStatus.DOWNLOADING -> itemView.context.getString(R.string.downloading)
+                DownloadStatus.PAUSED -> itemView.context.getString(R.string.paused)
+                DownloadStatus.COMPLETED -> itemView.context.getString(R.string.completed_status)
+                DownloadStatus.FAILED -> itemView.context.getString(R.string.failed)
+                DownloadStatus.CANCELLED -> itemView.context.getString(R.string.cancelled)
             }
         }
         
         private fun getStatusColor(status: DownloadStatus): Int {
+            val context = itemView.context
             return when (status) {
-                DownloadStatus.DOWNLOADING -> Color.parseColor("#2196F3")
-                DownloadStatus.COMPLETED -> Color.parseColor("#4CAF50")
-                DownloadStatus.PAUSED -> Color.parseColor("#FF9800")
-                DownloadStatus.FAILED -> Color.parseColor("#F44336")
-                DownloadStatus.CANCELLED -> Color.GRAY
-                DownloadStatus.QUEUED -> Color.GRAY
+                DownloadStatus.DOWNLOADING -> ContextCompat.getColor(context, R.color.status_downloading)
+                DownloadStatus.COMPLETED -> ContextCompat.getColor(context, R.color.status_completed)
+                DownloadStatus.PAUSED -> ContextCompat.getColor(context, R.color.status_paused)
+                DownloadStatus.FAILED -> ContextCompat.getColor(context, R.color.status_failed)
+                DownloadStatus.CANCELLED -> ContextCompat.getColor(context, R.color.status_cancelled)
+                DownloadStatus.QUEUED -> ContextCompat.getColor(context, R.color.status_queued)
             }
         }
         
