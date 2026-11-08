@@ -277,6 +277,22 @@ class DownloadDetailActivity : AppCompatActivity() {
     }
     
     private fun openFile(downloadItem: DownloadItem) {
+        val lower = downloadItem.filename.lowercase()
+        val isMedia = downloadItem.downloadType == DownloadType.MUSIC ||
+            downloadItem.downloadType == DownloadType.VIDEO ||
+            lower.endsWith(".mp3") || lower.endsWith(".flac") ||
+            lower.endsWith(".wav") || lower.endsWith(".m4a") ||
+            lower.endsWith(".ogg") || lower.endsWith(".aac") ||
+            lower.endsWith(".mp4") || lower.endsWith(".webm") ||
+            lower.endsWith(".mkv")
+
+        if (isMedia) {
+            startActivity(Intent(this, MediaPlayerActivity::class.java).apply {
+                putExtra("download_id", downloadItem.id)
+            })
+            return
+        }
+
         try {
             val file = File(downloadItem.savePath, downloadItem.filename)
             if (file.exists()) {

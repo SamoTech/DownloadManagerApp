@@ -101,6 +101,14 @@ class MainActivity : AppCompatActivity() {
         binding.btnQuickPaste.setOnClickListener {
             handleQuickPaste()
         }
+
+        binding.btnOpenBrowser.setOnClickListener {
+            startActivity(Intent(this, BrowserActivity::class.java))
+        }
+
+        binding.btnOpenPlayer.setOnClickListener {
+            startActivity(Intent(this, MediaPlayerActivity::class.java))
+        }
         
         setupTabs()
         observeDownloads()
@@ -229,6 +237,11 @@ class MainActivity : AppCompatActivity() {
         val dialog = BottomSheetDialog(this)
         val view = layoutInflater.inflate(R.layout.bottom_sheet_add_download, null)
         dialog.setContentView(view)
+
+        view.findViewById<View>(R.id.btnBrowserDownload)?.setOnClickListener {
+            dialog.dismiss()
+            startActivity(Intent(this, BrowserActivity::class.java))
+        }
         
         view.findViewById<View>(R.id.btnDirectDownload)?.setOnClickListener {
             dialog.dismiss()
@@ -326,6 +339,22 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun openFile(downloadItem: DownloadItem) {
+        val lower = downloadItem.filename.lowercase()
+        val isMedia = downloadItem.downloadType == DownloadType.MUSIC ||
+            downloadItem.downloadType == DownloadType.VIDEO ||
+            lower.endsWith(".mp3") || lower.endsWith(".flac") ||
+            lower.endsWith(".wav") || lower.endsWith(".m4a") ||
+            lower.endsWith(".ogg") || lower.endsWith(".aac") ||
+            lower.endsWith(".mp4") || lower.endsWith(".webm") ||
+            lower.endsWith(".mkv")
+
+        if (isMedia) {
+            startActivity(Intent(this, MediaPlayerActivity::class.java).apply {
+                putExtra("download_id", downloadItem.id)
+            })
+            return
+        }
+
         try {
             val file = File(downloadItem.savePath, downloadItem.filename)
             if (file.exists()) {
@@ -586,6 +615,14 @@ class MainActivity : AppCompatActivity() {
     
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
+            R.id.action_browser -> {
+                startActivity(Intent(this, BrowserActivity::class.java))
+                true
+            }
+            R.id.action_media_player -> {
+                startActivity(Intent(this, MediaPlayerActivity::class.java))
+                true
+            }
             R.id.action_sort -> {
                 showSortDialog()
                 true

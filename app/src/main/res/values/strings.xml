@@ -169,4 +169,10 @@
     <string name="all_downloads_paused">All active downloads paused</string>
     <string name="all_downloads_resumed">All paused downloads resumed</string>
     <string name="completed_cleared">Completed downloads cleared</string>
+    <string name="smart_browser">Smart Browser</string>
+    <string name="browser_sniff_links">Browse &amp; Detect Downloadable Links</string>
+    <string name="browser_url_hint">Enter website URL or search query...</string>
+    <string name="detected_links">Detected Downloadable Links</string>
+    <string name="download_all">Download All</string>
+    <string name="media_player">Media Player</string>
 </resources>

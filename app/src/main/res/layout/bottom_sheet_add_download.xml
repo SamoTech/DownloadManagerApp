@@ -30,6 +30,22 @@
         android:layout_marginVertical="12dp" />
 
     <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnBrowserDownload"
+        style="@style/Widget.Material3.Button.TonalButton"
+        android:layout_width="match_parent"
+        android:layout_height="54dp"
+        android:layout_marginVertical="4dp"
+        android:gravity="start|center_vertical"
+        android:text="@string/browser_sniff_links"
+        android:textColor="@android:color/white"
+        app:backgroundTint="@color/colorPrimary"
+        app:cornerRadius="12dp"
+        app:icon="@drawable/ic_browser"
+        app:iconGravity="start"
+        app:iconPadding="14dp"
+        app:iconTint="@android:color/white" />
+
+    <com.google.android.material.button.MaterialButton
         android:id="@+id/btnDirectDownload"
         style="@style/Widget.Material3.Button.OutlinedButton"
         android:layout_width="match_parent"

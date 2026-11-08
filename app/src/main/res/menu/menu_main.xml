@@ -10,6 +10,18 @@
         app:showAsAction="ifRoom|collapseActionView" />
 
     <item
+        android:id="@+id/action_browser"
+        android:icon="@drawable/ic_browser"
+        android:title="@string/smart_browser"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/action_media_player"
+        android:icon="@drawable/ic_player"
+        android:title="@string/media_player"
+        app:showAsAction="ifRoom" />
+
+    <item
         android:id="@+id/action_sort"
         android:icon="@drawable/ic_sort"
         android:title="@string/sort"

@@ -136,6 +136,50 @@
                     app:iconTint="@android:color/white" />
             </LinearLayout>
 
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnOpenBrowser"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="0dp"
+                    android:layout_height="38dp"
+                    android:layout_marginEnd="6dp"
+                    android:layout_weight="1"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:text="@string/smart_browser"
+                    android:textColor="@android:color/white"
+                    android:textSize="11sp"
+                    app:backgroundTint="#334155"
+                    app:cornerRadius="10dp"
+                    app:icon="@drawable/ic_browser"
+                    app:iconSize="15dp"
+                    app:iconTint="@color/colorAccent" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnOpenPlayer"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="0dp"
+                    android:layout_height="38dp"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:text="@string/media_player"
+                    android:textColor="@android:color/white"
+                    android:textSize="11sp"
+                    app:backgroundTint="#334155"
+                    app:cornerRadius="10dp"
+                    app:icon="@drawable/ic_player"
+                    app:iconSize="15dp"
+                    app:iconTint="#A78BFA" />
+            </LinearLayout>
+
             <TextView
                 android:id="@+id/tvStatStorage"
                 android:layout_width="match_parent"
