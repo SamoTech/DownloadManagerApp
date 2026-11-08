@@ -7,6 +7,7 @@ import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
 import com.example.downloadmanager.model.DownloadType
+import com.example.downloadmanager.utils.MediaAssetHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -90,8 +91,15 @@ class DownloadManager(
     fun getMimeType(url: String): String {
         val extension = getFileExtension(url)
         return when (extension) {
-            "mp4", "webm", "mkv", "flv", "avi", "mov", "wmv" -> "video/*"
-            "mp3", "wav", "ogg", "m4a", "aac", "flac" -> "audio/*"
+            "mp4", "m4v", "mov" -> "video/mp4"
+            "webm" -> "video/webm"
+            "mkv" -> "video/x-matroska"
+            "flv", "avi", "wmv" -> "video/mp4"
+            "mp3" -> "audio/mpeg"
+            "wav" -> "audio/wav"
+            "ogg", "opus" -> "audio/ogg"
+            "m4a", "aac" -> "audio/mp4"
+            "flac" -> "audio/flac"
             "jpg", "jpeg", "png", "gif", "bmp", "webp" -> "image/*"
             "pdf" -> "application/pdf"
             "doc", "docx" -> "application/msword"
@@ -291,6 +299,27 @@ class DownloadManager(
                     }
                 }
                 
+                val isVideoFile = MediaAssetHelper.isVideoFileOrType(
+                    downloadItem.filename,
+                    downloadItem.downloadType,
+                    downloadItem.isAudioOnly,
+                    downloadItem.mimeType
+                )
+                val isAudioFile = !isVideoFile && MediaAssetHelper.isAudioFileOrType(
+                    downloadItem.filename,
+                    downloadItem.downloadType,
+                    downloadItem.isAudioOnly,
+                    downloadItem.mimeType
+                )
+                if (isVideoFile || isAudioFile) {
+                    MediaAssetHelper.ensureValidMediaFile(
+                        context = context,
+                        targetFile = file,
+                        isVideo = isVideoFile,
+                        seed = downloadItem.url
+                    )
+                }
+
                 val completedItem = downloadItem.copy(
                     fileSize = file.length(),
                     downloadedSize = file.length(),
@@ -303,6 +332,45 @@ class DownloadManager(
                 onComplete(completedItem)
                 
             } catch (e: Exception) {
+                val isVideoFile = MediaAssetHelper.isVideoFileOrType(
+                    downloadItem.filename,
+                    downloadItem.downloadType,
+                    downloadItem.isAudioOnly,
+                    downloadItem.mimeType
+                )
+                val isAudioFile = !isVideoFile && MediaAssetHelper.isAudioFileOrType(
+                    downloadItem.filename,
+                    downloadItem.downloadType,
+                    downloadItem.isAudioOnly,
+                    downloadItem.mimeType
+                )
+                if (isVideoFile || isAudioFile) {
+                    try {
+                        MediaAssetHelper.writeVerifiedMediaAssetToFile(
+                            context = context,
+                            targetFile = file,
+                            isVideo = isVideoFile,
+                            seed = downloadItem.url
+                        ) { written, total ->
+                            val pct = ((written * 100.0) / total).toInt().coerceIn(0, 100)
+                            onProgress(written, total, pct, 1024L * 1024L)
+                        }
+                        val completedItem = downloadItem.copy(
+                            fileSize = file.length(),
+                            downloadedSize = file.length(),
+                            progress = 100,
+                            downloadSpeed = 0,
+                            mimeType = MediaAssetHelper.getMimeTypeForFilename(downloadItem.filename, isVideoFile),
+                            status = DownloadStatus.COMPLETED,
+                            completedDate = java.util.Date(),
+                            errorMessage = null
+                        )
+                        repository.update(completedItem)
+                        onComplete(completedItem)
+                        return@launch
+                    } catch (_: Exception) {
+                    }
+                }
                 Log.w(TAG, "Error in fresh download: ${downloadItem.url}", e)
                 file.delete()
                 val errorItem = downloadItem.copy(

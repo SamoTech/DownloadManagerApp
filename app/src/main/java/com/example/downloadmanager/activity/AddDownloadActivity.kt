@@ -13,9 +13,11 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.preference.PreferenceManager
 import androidx.recyclerview.widget.LinearLayoutManager
+import kotlin.math.abs
 import com.example.downloadmanager.R
 import com.example.downloadmanager.databinding.ActivityAddDownloadBinding
 import com.example.downloadmanager.manager.DownloadManager
@@ -55,10 +57,21 @@ class AddDownloadActivity : AppCompatActivity() {
     private var isUpdatingChips = false
     
     private val scope = CoroutineScope(Dispatchers.IO)
+
+    private val directoryPickerLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            result.data?.data?.let { uri ->
+                val path = getPathFromUri(uri) ?: downloadManager.getDefaultDownloadPath()
+                binding.etSavePath.setText(path)
+                binding.etTorrentSavePath.setText(path)
+            }
+        }
+    }
     
     companion object {
         private const val TAG = "AddDownloadActivity"
-        private const val REQUEST_CODE_FILE_PICKER = 1001
 
         fun normalizeAndValidateUrl(rawInput: String): String? {
             val trimmed = rawInput.trim()
@@ -415,7 +428,14 @@ class AddDownloadActivity : AppCompatActivity() {
                 
                 runOnUiThread {
                     if (videoStreamInfo != null) {
-                        binding.etFilename.setText(videoStreamInfo?.video?.title)
+                        val rawTitle = videoStreamInfo?.video?.title
+                            ?.replace(Regex("[^a-zA-Z0-9 _\\-()]"), "_")
+                            ?.trim()
+                            .orEmpty()
+                        if (rawTitle.isNotBlank()) {
+                            val withExt = if (rawTitle.lowercase().endsWith(".mp4")) rawTitle else "$rawTitle.mp4"
+                            binding.etFilename.setText(withExt)
+                        }
                         selectedVideoFormat = videoStreamInfo?.formats?.maxByOrNull { 
                             it.fileSize ?: 0L 
                         }
@@ -484,7 +504,7 @@ class AddDownloadActivity : AppCompatActivity() {
             R.id.rbBestQuality -> selectedVideoFormat = videoStreamInfo?.formats?.maxByOrNull { it.fileSize ?: 0L }
             R.id.rbHighQuality -> selectedVideoFormat = videoStreamInfo?.formats?.filter { !it.isAudioOnly }?.maxByOrNull { it.fileSize ?: 0L }
             R.id.rbMediumQuality -> selectedVideoFormat = videoStreamInfo?.formats?.filter { !it.isAudioOnly }?.minByOrNull { 
-                Math.abs((it.fileSize ?: 0L) - 50 * 1024 * 1024)
+                abs((it.fileSize ?: 0L) - 50L * 1024 * 1024)
             }
             R.id.rbLowQuality -> selectedVideoFormat = videoStreamInfo?.formats?.filter { !it.isAudioOnly }?.minByOrNull { it.fileSize ?: 0L }
             R.id.rbAudioOnly -> selectedVideoFormat = videoStreamInfo?.formats?.filter { it.isAudioOnly }?.maxByOrNull { it.audioBitrate ?: 0 }
@@ -494,20 +514,9 @@ class AddDownloadActivity : AppCompatActivity() {
     private fun showFilePicker() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
         try {
-            startActivityForResult(intent, REQUEST_CODE_FILE_PICKER)
+            directoryPickerLauncher.launch(intent)
         } catch (e: Exception) {
             Toast.makeText(this, downloadManager.getDefaultDownloadPath(), Toast.LENGTH_SHORT).show()
-        }
-    }
-    
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        
-        if (requestCode == REQUEST_CODE_FILE_PICKER && resultCode == Activity.RESULT_OK) {
-            data?.data?.let { uri ->
-                val path = getPathFromUri(uri) ?: downloadManager.getDefaultDownloadPath()
-                binding.etSavePath.setText(path)
-            }
         }
     }
     

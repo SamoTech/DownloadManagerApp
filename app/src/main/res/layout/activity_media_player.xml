@@ -18,48 +18,106 @@
         app:title="@string/media_player"
         app:titleTextColor="@android:color/white" />
 
-    <!-- Media Stage Card (Video Surface or Audio Visualizer) -->
+    <!-- Media Stage Card (ExoPlayer TextureView Video Surface + Audio Spectrum Visualizer) -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:background="@color/colorHeaderBg"
         android:orientation="vertical"
         android:paddingHorizontal="16dp"
-        android:paddingBottom="16dp">
+        android:paddingBottom="14dp">
 
         <FrameLayout
             android:id="@+id/mediaStageContainer"
             android:layout_width="match_parent"
-            android:layout_height="210dp"
+            android:layout_height="228dp"
             android:background="@drawable/card_background"
-            android:backgroundTint="@color/colorDashboardCard">
+            android:backgroundTint="#090D16"
+            android:clipToOutline="true">
 
-            <!-- Video Surface -->
-            <VideoView
-                android:id="@+id/videoView"
+            <!-- Jetpack Media3 ExoPlayer TextureView Surface (prevents SurfaceView Z-order black screen) -->
+            <androidx.media3.ui.PlayerView
+                android:id="@+id/playerView"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:layout_gravity="center"
+                android:visibility="gone"
+                app:resize_mode="fit"
+                app:shutter_background_color="#090D16"
+                app:surface_type="texture_view"
+                app:use_controller="false" />
+
+            <!-- Fallback Live Animated Video Stage (if hardware decoder is unavailable) -->
+            <FrameLayout
+                android:id="@+id/videoOverlayContainer"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
                 android:visibility="gone" />
 
-            <!-- Audio Art & Equalizer Overlay -->
+            <!-- Video Top HUD Bar (shown during video playback) -->
+            <LinearLayout
+                android:id="@+id/videoHudBar"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_gravity="top"
+                android:background="#990F172A"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingHorizontal="12dp"
+                android:paddingVertical="8dp"
+                android:visibility="gone">
+
+                <ImageView
+                    android:layout_width="18dp"
+                    android:layout_height="18dp"
+                    android:contentDescription="@string/videos"
+                    android:src="@drawable/ic_video"
+                    app:tint="@color/colorAccent" />
+
+                <TextView
+                    android:id="@+id/tvVideoHudTitle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginHorizontal="8dp"
+                    android:layout_weight="1"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:text="Video.mp4"
+                    android:textColor="@android:color/white"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvVideoHudBadge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/icon_badge_background"
+                    android:paddingHorizontal="8dp"
+                    android:paddingVertical="2dp"
+                    android:text="H.264 + AAC"
+                    android:textColor="@color/colorPrimary"
+                    android:textSize="10sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <!-- Audio Art, Codec Badge & Live Spectrum Overlay -->
             <LinearLayout
                 android:id="@+id/audioVisualizerContainer"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:gravity="center"
                 android:orientation="vertical"
-                android:padding="16dp">
+                android:padding="14dp">
 
                 <FrameLayout
-                    android:layout_width="76dp"
-                    android:layout_height="76dp"
+                    android:layout_width="60dp"
+                    android:layout_height="60dp"
                     android:background="@drawable/icon_badge_background">
 
                     <ImageView
                         android:id="@+id/ivMediaArtwork"
-                        android:layout_width="40dp"
-                        android:layout_height="40dp"
+                        android:layout_width="32dp"
+                        android:layout_height="32dp"
                         android:layout_gravity="center"
                         android:contentDescription="@string/media_player"
                         android:src="@drawable/ic_music"
@@ -70,11 +128,11 @@
                     android:id="@+id/tvNowPlayingBadge"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
+                    android:layout_marginTop="8dp"
                     android:background="@drawable/icon_badge_background"
                     android:paddingHorizontal="10dp"
                     android:paddingVertical="3dp"
-                    android:text="STUDIO AUDIO ENGINE • 320 KBPS"
+                    android:text="MP3 44.1KHZ STEREO • 320 KBPS"
                     android:textColor="@color/colorPrimary"
                     android:textSize="10sp"
                     android:textStyle="bold" />
@@ -83,13 +141,13 @@
                     android:id="@+id/tvMediaTitle"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
+                    android:layout_marginTop="6dp"
                     android:ellipsize="end"
                     android:gravity="center"
                     android:maxLines="1"
-                    android:text="Select a downloaded track or sample below"
+                    android:text="Select a downloaded track or video below"
                     android:textColor="@android:color/white"
-                    android:textSize="16sp"
+                    android:textSize="15sp"
                     android:textStyle="bold" />
 
                 <TextView
@@ -100,17 +158,60 @@
                     android:ellipsize="end"
                     android:gravity="center"
                     android:maxLines="1"
-                    android:text="Luca Media Player • Supports MP3, FLAC, M4A, OGG, MP4, MKV"
+                    android:text="Media3 ExoPlayer • H.264, AAC, MP3, FLAC, OGG, WAV"
                     android:textColor="#94A3B8"
-                    android:textSize="12sp" />
+                    android:textSize="11sp" />
+
+                <!-- Live Audio Spectrum Bars Container -->
+                <FrameLayout
+                    android:id="@+id/audioSpectrumHost"
+                    android:layout_width="match_parent"
+                    android:layout_height="38dp"
+                    android:layout_marginTop="8dp" />
             </LinearLayout>
         </FrameLayout>
+
+        <!-- Active Codec & Audio Output Status Bar -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/tvCodecStatus"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="Codec: Media3 ExoPlayer • Stereo Audio Active"
+                android:textColor="#38BDF8"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnVolumeToggle"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="30dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="64dp"
+                android:paddingHorizontal="8dp"
+                android:paddingVertical="0dp"
+                android:text="VOL 100%"
+                android:textColor="@color/colorAccent"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+        </LinearLayout>
 
         <!-- SeekBar & Timestamps -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
+            android:layout_marginTop="4dp"
             android:gravity="center_vertical"
             android:orientation="horizontal">
 
@@ -146,7 +247,7 @@
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
+            android:layout_marginTop="6dp"
             android:gravity="center"
             android:orientation="horizontal">
 
@@ -210,14 +311,14 @@
         android:gravity="center_vertical"
         android:orientation="horizontal"
         android:paddingHorizontal="16dp"
-        android:paddingTop="14dp"
+        android:paddingTop="12dp"
         android:paddingBottom="6dp">
 
         <TextView
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="PLAYABLE MEDIA QUEUE"
+            android:text="PLAYABLE MEDIA QUEUE (VIDEOS &amp; MUSIC)"
             android:textColor="@color/colorPrimary"
             android:textSize="12sp"
             android:textStyle="bold" />
@@ -226,7 +327,7 @@
             android:id="@+id/tvQueueCount"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="0 tracks"
+            android:text="0 items"
             android:textColor="@color/gray"
             android:textSize="12sp" />
     </LinearLayout>

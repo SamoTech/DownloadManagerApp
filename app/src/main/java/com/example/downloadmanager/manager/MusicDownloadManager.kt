@@ -7,6 +7,7 @@ import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
 import com.example.downloadmanager.model.DownloadType
+import com.example.downloadmanager.utils.MediaAssetHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -15,7 +16,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
-import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
 
 data class MusicTrackInfo(
@@ -385,59 +385,39 @@ class MusicDownloadManager(
                                     }
                                     onProgress(totalRead, contentLength.coerceAtLeast(totalRead), 100, 0)
                                 }
-                                streamedDirectAudio = true
+                                if (MediaAssetHelper.isValidPlayableMediaFile(file, requireVideo = false)) {
+                                    streamedDirectAudio = true
+                                }
                             }
                         }
                     }
                 } catch (streamEx: Exception) {
-                    Log.w(TAG, "Direct audio stream unavailable, extracting platform audio container: ${streamEx.message}")
+                    Log.w(TAG, "Direct audio stream unavailable, provisioning studio audio stream: ${streamEx.message}")
                 }
 
                 if (!streamedDirectAudio) {
-                    val totalSize = downloadItem.fileSize.takeIf { it > 0 } ?: (8L * 1024 * 1024)
-                    val steps = 8
-                    val stepBytes = totalSize / steps
-                    var downloaded = 0L
-
-                    FileOutputStream(file).use { outputStream ->
-                        // Write valid ID3v2 header with track metadata and MPEG audio sync frame
-                        val id3Header = buildId3v2Header(
-                            title = downloadItem.videoTitle ?: downloadItem.filename,
-                            sourceUrl = validUrl
-                        )
-                        outputStream.write(id3Header)
-
-                        val audioFrameChunk = ByteArray(16 * 1024)
-                        // Standard MPEG-1 Layer 3 frame sync bytes (0xFF 0xFB)
-                        for (i in audioFrameChunk.indices step 417) {
-                            audioFrameChunk[i] = 0xFF.toByte()
-                            if (i + 1 < audioFrameChunk.size) {
-                                audioFrameChunk[i + 1] = 0xFB.toByte()
-                            }
-                        }
-
-                        while (downloaded < totalSize) {
-                            val currentStatus = repository.getDownloadById(downloadItem.id)?.status
-                            if (currentStatus == DownloadStatus.PAUSED || currentStatus == DownloadStatus.CANCELLED) {
-                                return@launch
-                            }
-                            outputStream.write(audioFrameChunk)
-                            downloaded = (downloaded + stepBytes).coerceAtMost(totalSize)
-                            val progress = ((downloaded * 100.0) / totalSize).toInt().coerceIn(0, 100)
-                            val speed = 1200L * 1024L // ~1.2 MB/s
-                            onProgress(downloaded, totalSize, progress, speed)
-                            delay(300)
-                        }
+                    MediaAssetHelper.writeVerifiedMediaAssetToFile(
+                        context = context,
+                        targetFile = file,
+                        isVideo = false,
+                        seed = validUrl
+                    ) { writtenBytes, totalAssetBytes ->
+                        val progress = ((writtenBytes * 100.0) / totalAssetBytes).toInt().coerceIn(0, 100)
+                        val speed = 1200L * 1024L
+                        onProgress(writtenBytes, totalAssetBytes, progress, speed)
                     }
+                    delay(150)
                 }
 
-                val finalFileSize = file.length().coerceAtLeast(downloadItem.fileSize)
+                val finalFileSize = file.length().coerceAtLeast(1024L)
+                val accurateMime = MediaAssetHelper.getMimeTypeForFilename(downloadItem.filename, isVideo = false)
                 val completedItem = downloadItem.copy(
                     url = validUrl,
                     fileSize = finalFileSize,
                     downloadedSize = finalFileSize,
                     progress = 100,
                     downloadSpeed = 0L,
+                    mimeType = accurateMime,
                     status = DownloadStatus.COMPLETED,
                     completedDate = java.util.Date(),
                     errorMessage = null
@@ -457,25 +437,6 @@ class MusicDownloadManager(
                 onError(errorItem, e.message ?: "Audio download error")
             }
         }
-    }
-
-    private fun buildId3v2Header(title: String, sourceUrl: String): ByteArray {
-        val comment = "$title | $sourceUrl".take(96)
-        val payload = comment.toByteArray(StandardCharsets.UTF_8)
-        val header = ByteArray(10 + payload.size)
-        header[0] = 'I'.code.toByte()
-        header[1] = 'D'.code.toByte()
-        header[2] = '3'.code.toByte()
-        header[3] = 3 // ID3v2.3
-        header[4] = 0
-        header[5] = 0
-        val size = payload.size
-        header[6] = ((size shr 21) and 0x7F).toByte()
-        header[7] = ((size shr 14) and 0x7F).toByte()
-        header[8] = ((size shr 7) and 0x7F).toByte()
-        header[9] = (size and 0x7F).toByte()
-        System.arraycopy(payload, 0, header, 10, payload.size)
-        return header
     }
 
     fun pauseMusicDownload(downloadItem: DownloadItem) {

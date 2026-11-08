@@ -20,6 +20,7 @@ import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
 import com.example.downloadmanager.model.DownloadType
 import com.example.downloadmanager.service.DownloadService
+import com.example.downloadmanager.utils.MediaAssetHelper
 import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
@@ -277,16 +278,20 @@ class DownloadDetailActivity : AppCompatActivity() {
     }
     
     private fun openFile(downloadItem: DownloadItem) {
-        val lower = downloadItem.filename.lowercase()
-        val isMedia = downloadItem.downloadType == DownloadType.MUSIC ||
-            downloadItem.downloadType == DownloadType.VIDEO ||
-            lower.endsWith(".mp3") || lower.endsWith(".flac") ||
-            lower.endsWith(".wav") || lower.endsWith(".m4a") ||
-            lower.endsWith(".ogg") || lower.endsWith(".aac") ||
-            lower.endsWith(".mp4") || lower.endsWith(".webm") ||
-            lower.endsWith(".mkv")
+        val isVideo = MediaAssetHelper.isVideoFileOrType(
+            downloadItem.filename,
+            downloadItem.downloadType,
+            downloadItem.isAudioOnly,
+            downloadItem.mimeType
+        )
+        val isAudio = !isVideo && MediaAssetHelper.isAudioFileOrType(
+            downloadItem.filename,
+            downloadItem.downloadType,
+            downloadItem.isAudioOnly,
+            downloadItem.mimeType
+        )
 
-        if (isMedia) {
+        if (isVideo || isAudio) {
             startActivity(Intent(this, MediaPlayerActivity::class.java).apply {
                 putExtra("download_id", downloadItem.id)
             })
@@ -312,11 +317,33 @@ class DownloadDetailActivity : AppCompatActivity() {
     
     private fun shareFile(downloadItem: DownloadItem) {
         try {
-            val file = File(downloadItem.savePath, downloadItem.filename)
+            val rawFile = File(downloadItem.savePath, downloadItem.filename)
+            val isVideo = MediaAssetHelper.isVideoFileOrType(
+                downloadItem.filename,
+                downloadItem.downloadType,
+                downloadItem.isAudioOnly,
+                downloadItem.mimeType
+            )
+            val isAudio = !isVideo && MediaAssetHelper.isAudioFileOrType(
+                downloadItem.filename,
+                downloadItem.downloadType,
+                downloadItem.isAudioOnly,
+                downloadItem.mimeType
+            )
+            val file = if (isVideo || isAudio) {
+                MediaAssetHelper.ensureValidMediaFile(this, rawFile, isVideo, downloadItem.url)
+            } else {
+                rawFile
+            }
             if (file.exists()) {
                 val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
+                val mime = if (isVideo || isAudio) {
+                    MediaAssetHelper.getMimeTypeForFilename(file.name, isVideo)
+                } else {
+                    downloadItem.mimeType.ifBlank { "*/*" }
+                }
                 val intent = Intent(Intent.ACTION_SEND).apply {
-                    type = downloadItem.mimeType.ifBlank { "*/*" }
+                    type = mime
                     putExtra(Intent.EXTRA_STREAM, uri)
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }

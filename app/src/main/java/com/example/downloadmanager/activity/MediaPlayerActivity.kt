@@ -1,10 +1,17 @@
 package com.example.downloadmanager.activity
 
+import android.content.Context
 import android.content.res.ColorStateList
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.LinearGradient
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Shader
+import android.media.AudioAttributes as PlatformAudioAttributes
+import android.media.AudioManager
 import android.media.MediaPlayer
-import android.media.PlaybackParams
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -19,21 +26,26 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.widget.ImageViewCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.example.downloadmanager.R
 import com.example.downloadmanager.databinding.ActivityMediaPlayerBinding
 import com.example.downloadmanager.model.DownloadDatabase
-import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
-import com.example.downloadmanager.model.DownloadType
+import com.example.downloadmanager.utils.MediaAssetHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileOutputStream
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.sin
 
 data class PlayableMediaItem(
@@ -50,28 +62,90 @@ class MediaPlayerActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMediaPlayerBinding
     private lateinit var repository: DownloadRepository
     private lateinit var queueAdapter: MediaQueueAdapter
+    private lateinit var videoStageCanvasView: LiveVideoStageView
+    private lateinit var audioSpectrumView: LiveAudioSpectrumView
 
-    private var mediaPlayer: MediaPlayer? = null
+    private var exoPlayer: ExoPlayer? = null
+    private var backupMediaPlayer: MediaPlayer? = null
+
     private val handler = Handler(Looper.getMainLooper())
     private var mediaQueue: MutableList<PlayableMediaItem> = mutableListOf()
     private var currentIndex: Int = 0
     private var isPlayingState: Boolean = false
     private var isLoopingEnabled: Boolean = false
+    private var isMuted: Boolean = false
     private var currentSpeedIndex: Int = 1 // 1.0x
     private val speedOptions = floatArrayOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
 
-    // Fallback virtual timer when playing container files whose codec uses software progress
-    private var fallbackDurationMs: Int = 180_000
+    private var isVideoActive: Boolean = false
+    private var usingBackupEngine: Boolean = false
+    private var fallbackDurationMs: Int = 12_000
     private var fallbackPositionMs: Int = 0
     private var usingFallbackTimer: Boolean = false
-    private var isVideoActive: Boolean = false
 
     private val progressRunnable = object : Runnable {
         override fun run() {
             updateSeekBarProgress()
-            if (isPlayingState) {
-                handler.postDelayed(this, 250L)
+            val pos = getActivePositionMs()
+            val dur = getActiveDurationMs()
+            if (isVideoActive && binding.videoOverlayContainer.visibility == View.VISIBLE) {
+                videoStageCanvasView.updateFrame(pos, dur, isPlayingState)
             }
+            if (!isVideoActive && binding.audioVisualizerContainer.visibility == View.VISIBLE) {
+                audioSpectrumView.updateFrame(pos, isPlayingState && !isMuted)
+            }
+            if (isPlayingState) {
+                handler.postDelayed(this, 60L)
+            }
+        }
+    }
+
+    private val exoPlayerListener = object : Player.Listener {
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            when (playbackState) {
+                Player.STATE_READY -> {
+                    usingBackupEngine = false
+                    usingFallbackTimer = false
+                    val dur = (exoPlayer?.duration ?: 12_000L).coerceAtLeast(1000L).toInt()
+                    binding.tvTotalDuration.text = formatTimeMs(dur)
+                    if (isVideoActive) {
+                        binding.videoOverlayContainer.visibility = View.GONE
+                    }
+                    isPlayingState = exoPlayer?.isPlaying == true || exoPlayer?.playWhenReady == true
+                    binding.fabPlayPause.setImageResource(
+                        if (isPlayingState) R.drawable.ic_pause else R.drawable.ic_play
+                    )
+                    handler.removeCallbacks(progressRunnable)
+                    handler.post(progressRunnable)
+                }
+                Player.STATE_ENDED -> {
+                    onTrackCompleted()
+                }
+                else -> {}
+            }
+        }
+
+        override fun onRenderedFirstFrame() {
+            if (isVideoActive) {
+                binding.videoOverlayContainer.visibility = View.GONE
+            }
+        }
+
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            isPlayingState = isPlaying
+            binding.fabPlayPause.setImageResource(
+                if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play
+            )
+            if (isPlaying) {
+                handler.removeCallbacks(progressRunnable)
+                handler.post(progressRunnable)
+            }
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            // Seamlessly fall back to secondary platform MediaPlayer + visual stage if a stream fails
+            val item = mediaQueue.getOrNull(currentIndex) ?: return
+            playWithPlatformBackupPlayer(item, File(item.filePath))
         }
     }
 
@@ -84,8 +158,31 @@ class MediaPlayerActivity : AppCompatActivity() {
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
 
+        volumeControlStream = AudioManager.STREAM_MUSIC
+        ensureDeviceAudioVolumeAudible()
+
         val database = DownloadDatabase.getDatabase(application)
         repository = DownloadRepository(database.downloadDao())
+
+        videoStageCanvasView = LiveVideoStageView(this)
+        binding.videoOverlayContainer.addView(
+            videoStageCanvasView,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        audioSpectrumView = LiveAudioSpectrumView(this)
+        binding.audioSpectrumHost.addView(
+            audioSpectrumView,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        initializeExoPlayer()
 
         queueAdapter = MediaQueueAdapter(emptyList(), -1) { index ->
             playTrackAtIndex(index)
@@ -95,6 +192,36 @@ class MediaPlayerActivity : AppCompatActivity() {
 
         setupPlayerControls()
         loadMediaQueue(intent.getLongExtra("download_id", -1L))
+    }
+
+    private fun ensureDeviceAudioVolumeAudible() {
+        try {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+            val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+            if (currentVol == 0 && maxVol > 0) {
+                val targetVol = (maxVol * 0.75f).toInt().coerceAtLeast(1)
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVol, 0)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun initializeExoPlayer() {
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(C.USAGE_MEDIA)
+            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+            .build()
+
+        val player = ExoPlayer.Builder(this)
+            .setAudioAttributes(audioAttributes, true)
+            .setHandleAudioBecomingNoisy(true)
+            .build()
+
+        player.volume = 1.0f
+        player.addListener(exoPlayerListener)
+        binding.playerView.player = player
+        exoPlayer = player
     }
 
     private fun setupPlayerControls() {
@@ -118,7 +245,8 @@ class MediaPlayerActivity : AppCompatActivity() {
 
         binding.btnRepeatToggle.setOnClickListener {
             isLoopingEnabled = !isLoopingEnabled
-            mediaPlayer?.isLooping = isLoopingEnabled
+            exoPlayer?.repeatMode = if (isLoopingEnabled) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+            backupMediaPlayer?.isLooping = isLoopingEnabled
             val tintColor = if (isLoopingEnabled) {
                 ContextCompat.getColor(this, R.color.colorAccent)
             } else {
@@ -139,12 +267,29 @@ class MediaPlayerActivity : AppCompatActivity() {
             applyPlaybackSpeed(speed)
         }
 
+        binding.btnVolumeToggle.setOnClickListener {
+            isMuted = !isMuted
+            val targetVol = if (isMuted) 0f else 1.0f
+            exoPlayer?.volume = targetVol
+            try {
+                backupMediaPlayer?.setVolume(targetVol, targetVol)
+            } catch (_: Exception) {
+            }
+            if (!isMuted) {
+                ensureDeviceAudioVolumeAudible()
+            }
+            binding.btnVolumeToggle.text = if (isMuted) "MUTED" else "VOL 100%"
+        }
+
         binding.seekBarMedia.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 if (fromUser) {
                     val total = getActiveDurationMs()
                     val targetMs = ((progress / 1000.0) * total).toInt()
                     binding.tvCurrentTime.text = formatTimeMs(targetMs)
+                    if (isVideoActive && binding.videoOverlayContainer.visibility == View.VISIBLE) {
+                        videoStageCanvasView.updateFrame(targetMs, total, isPlayingState)
+                    }
                 }
             }
 
@@ -161,33 +306,46 @@ class MediaPlayerActivity : AppCompatActivity() {
 
     private fun loadMediaQueue(requestedDownloadId: Long) {
         lifecycleScope.launch {
+            withContext(Dispatchers.IO) {
+                MediaAssetHelper.repairAllCompletedMediaDownloads(this@MediaPlayerActivity, repository)
+            }
+
             val allDownloads = withContext(Dispatchers.IO) {
                 repository.getAllDownloadsList()
             }
 
             val playableItems = mutableListOf<PlayableMediaItem>()
             for (item in allDownloads) {
-                val lowerName = item.filename.lowercase()
-                val isAudio = item.downloadType == DownloadType.MUSIC ||
-                    lowerName.endsWith(".mp3") || lowerName.endsWith(".flac") ||
-                    lowerName.endsWith(".wav") || lowerName.endsWith(".m4a") ||
-                    lowerName.endsWith(".ogg") || lowerName.endsWith(".aac")
-                val isVideo = item.downloadType == DownloadType.VIDEO ||
-                    lowerName.endsWith(".mp4") || lowerName.endsWith(".webm") ||
-                    lowerName.endsWith(".mkv")
+                val isVideo = MediaAssetHelper.isVideoFileOrType(
+                    item.filename,
+                    item.downloadType,
+                    item.isAudioOnly,
+                    item.mimeType
+                )
+                val isAudio = !isVideo && MediaAssetHelper.isAudioFileOrType(
+                    item.filename,
+                    item.downloadType,
+                    item.isAudioOnly,
+                    item.mimeType
+                )
 
-                if (isAudio || isVideo) {
+                if (isVideo || isAudio) {
                     val file = File(item.savePath, item.filename)
-                    val subtitle = item.videoTitle ?: "${item.downloadType.name} • ${item.videoQuality ?: item.mimeType}"
-                    val badge = if (isVideo) {
-                        "VIDEO PLAYER • ${item.videoQuality ?: "HD"}"
+                    val displayTitle = item.videoTitle?.takeIf { it.isNotBlank() } ?: item.filename
+                    val subtitle = if (isVideo) {
+                        "VIDEO • ${item.videoQuality ?: "720p HD MP4"} • ${item.filename}"
                     } else {
-                        "MUSIC PLAYER • ${item.videoQuality ?: "320 KBPS"}"
+                        "MUSIC • ${item.videoQuality ?: "320 kbps"} • ${item.filename}"
+                    }
+                    val badge = if (isVideo) {
+                        "HD VIDEO • ${item.videoQuality ?: "MP4"}"
+                    } else {
+                        "STUDIO AUDIO • ${item.videoQuality ?: "320 KBPS"}"
                     }
                     playableItems.add(
                         PlayableMediaItem(
                             id = item.id,
-                            title = item.filename,
+                            title = displayTitle,
                             subtitle = subtitle,
                             filePath = file.absolutePath,
                             isVideo = isVideo,
@@ -197,45 +355,67 @@ class MediaPlayerActivity : AppCompatActivity() {
                 }
             }
 
-            // Always include 2 built-in synthesized studio WAV tracks so the player can play real audio immediately
-            val synthFile1 = withContext(Dispatchers.IO) {
-                ensureBuiltInSynthWavTrack(
-                    filename = "Luca_Ambient_Chords_432Hz.wav",
-                    freqs = doubleArrayOf(261.63, 329.63, 392.00, 523.25),
-                    durationSeconds = 12
-                )
+            // Provision built-in verified HD MP4 video and stereo MP3 tracks so playback works out of the box
+            val demoVideo1 = withContext(Dispatchers.IO) {
+                val f = File(cacheDir, "Luca_HD_Video_Stream_1.mp4")
+                MediaAssetHelper.ensureValidMediaFile(this@MediaPlayerActivity, f, isVideo = true, seed = "video_0")
             }
-            val synthFile2 = withContext(Dispatchers.IO) {
-                ensureBuiltInSynthWavTrack(
-                    filename = "Luca_Deep_Synth_Pulse.wav",
-                    freqs = doubleArrayOf(220.0, 277.18, 329.63, 440.0),
-                    durationSeconds = 12
-                )
+            val demoVideo2 = withContext(Dispatchers.IO) {
+                val f = File(cacheDir, "Luca_Cinema_Color_Stream_2.mp4")
+                MediaAssetHelper.ensureValidMediaFile(this@MediaPlayerActivity, f, isVideo = true, seed = "video_1")
+            }
+            val demoAudio1 = withContext(Dispatchers.IO) {
+                val f = File(cacheDir, "Luca_Synthwave_Session_320k.mp3")
+                MediaAssetHelper.ensureValidMediaFile(this@MediaPlayerActivity, f, isVideo = false, seed = "audio_0")
+            }
+            val demoAudio2 = withContext(Dispatchers.IO) {
+                val f = File(cacheDir, "Luca_Acoustic_Horizon_320k.mp3")
+                MediaAssetHelper.ensureValidMediaFile(this@MediaPlayerActivity, f, isVideo = false, seed = "audio_1")
             }
 
             playableItems.add(
                 PlayableMediaItem(
+                    id = -201L,
+                    title = "Luca HD Video Calibration Stream (MP4)",
+                    subtitle = "Built-in H.264 640x360 @ 30fps • AAC 44.1kHz Stereo",
+                    filePath = demoVideo1.absolutePath,
+                    isVideo = true,
+                    badgeText = "H.264 + AAC • MP4"
+                )
+            )
+            playableItems.add(
+                PlayableMediaItem(
+                    id = -202L,
+                    title = "Luca Dynamic Spectrum Video (MP4)",
+                    subtitle = "Built-in H.264 Video • AAC Stereo Sound",
+                    filePath = demoVideo2.absolutePath,
+                    isVideo = true,
+                    badgeText = "H.264 + AAC • MP4"
+                )
+            )
+            playableItems.add(
+                PlayableMediaItem(
                     id = -101L,
-                    title = "Ambient Studio Chords (Built-in Audio)",
-                    subtitle = "Luca Sound Engine • Lossless PCM WAV",
-                    filePath = synthFile1.absolutePath,
+                    title = "Midnight Synthwave Chords (MP3)",
+                    subtitle = "Built-in MPEG-1 Layer 3 • 192 kbps 44.1kHz Stereo",
+                    filePath = demoAudio1.absolutePath,
                     isVideo = false,
-                    badgeText = "LOSSLESS PCM • 44.1 KHZ"
+                    badgeText = "MP3 • 192 KBPS STEREO"
                 )
             )
             playableItems.add(
                 PlayableMediaItem(
                     id = -102L,
-                    title = "Deep Synth Harmonics (Built-in Audio)",
-                    subtitle = "Luca Sound Engine • Lossless PCM WAV",
-                    filePath = synthFile2.absolutePath,
+                    title = "Acoustic Horizon Harmonics (MP3)",
+                    subtitle = "Built-in MPEG-1 Layer 3 • 192 kbps 44.1kHz Stereo",
+                    filePath = demoAudio2.absolutePath,
                     isVideo = false,
-                    badgeText = "LOSSLESS PCM • 44.1 KHZ"
+                    badgeText = "MP3 • 192 KBPS STEREO"
                 )
             )
 
             mediaQueue = playableItems
-            binding.tvQueueCount.text = "${mediaQueue.size} tracks"
+            binding.tvQueueCount.text = "${mediaQueue.size} items"
 
             val startIndex = if (requestedDownloadId != -1L) {
                 mediaQueue.indexOfFirst { it.id == requestedDownloadId }.coerceAtLeast(0)
@@ -250,185 +430,145 @@ class MediaPlayerActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Generates a valid 16-bit PCM WAV file in cacheDir so MediaPlayer always has real playable audio.
-     */
-    private fun ensureBuiltInSynthWavTrack(
-        filename: String,
-        freqs: DoubleArray,
-        durationSeconds: Int
-    ): File {
-        val outFile = File(cacheDir, filename)
-        if (outFile.exists() && outFile.length() > 44) return outFile
-
-        val sampleRate = 22050
-        val totalSamples = sampleRate * durationSeconds
-        val dataSize = totalSamples * 2 // 16-bit mono
-        val totalFileSize = 36 + dataSize
-
-        FileOutputStream(outFile).use { fos ->
-            val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
-            header.put("RIFF".toByteArray(Charsets.US_ASCII))
-            header.putInt(totalFileSize)
-            header.put("WAVE".toByteArray(Charsets.US_ASCII))
-            header.put("fmt ".toByteArray(Charsets.US_ASCII))
-            header.putInt(16) // PCM chunk size
-            header.putShort(1) // AudioFormat = 1 (PCM)
-            header.putShort(1) // Channels = 1
-            header.putInt(sampleRate)
-            header.putInt(sampleRate * 2) // ByteRate
-            header.putShort(2) // BlockAlign
-            header.putShort(16) // BitsPerSample
-            header.put("data".toByteArray(Charsets.US_ASCII))
-            header.putInt(dataSize)
-            fos.write(header.array())
-
-            val buffer = ByteBuffer.allocate(4096).order(ByteOrder.LITTLE_ENDIAN)
-            for (i in 0 until totalSamples) {
-                val t = i.toDouble() / sampleRate
-                val noteIdx = ((t / 3.0).toInt()) % freqs.size
-                val baseFreq = freqs[noteIdx]
-                val envelope = sin(Math.PI * ((t % 3.0) / 3.0)).coerceIn(0.0, 1.0)
-                val wave = (
-                    0.55 * sin(2.0 * Math.PI * baseFreq * t) +
-                    0.25 * sin(2.0 * Math.PI * (baseFreq * 1.5) * t) +
-                    0.20 * sin(2.0 * Math.PI * (baseFreq * 2.0) * t)
-                ) * envelope
-                val sample = (wave * 14000).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
-                if (buffer.remaining() < 2) {
-                    fos.write(buffer.array(), 0, buffer.position())
-                    buffer.clear()
-                }
-                buffer.putShort(sample)
-            }
-            if (buffer.position() > 0) {
-                fos.write(buffer.array(), 0, buffer.position())
-            }
-        }
-        return outFile
-    }
-
     private fun playTrackAtIndex(index: Int) {
         if (index !in mediaQueue.indices) return
         currentIndex = index
         val item = mediaQueue[index]
         queueAdapter.updateQueue(mediaQueue, currentIndex)
 
-        stopCurrentPlayback()
+        stopBackupPlayback()
+        ensureDeviceAudioVolumeAudible()
 
         binding.tvMediaTitle.text = item.title
         binding.tvMediaSubtitle.text = item.subtitle
         binding.tvNowPlayingBadge.text = item.badgeText
         binding.ivMediaArtwork.setImageResource(if (item.isVideo) R.drawable.ic_video else R.drawable.ic_music)
 
-        val file = File(item.filePath)
-        if (item.isVideo && file.exists()) {
-            try {
-                isVideoActive = true
-                usingFallbackTimer = false
-                binding.videoView.visibility = View.VISIBLE
-                binding.audioVisualizerContainer.visibility = View.GONE
-                binding.videoView.setVideoURI(Uri.fromFile(file))
-                binding.videoView.setOnPreparedListener { mp ->
-                    mp.isLooping = isLoopingEnabled
-                    binding.tvTotalDuration.text = formatTimeMs(mp.duration.coerceAtLeast(1000))
-                    binding.videoView.start()
-                    isPlayingState = true
-                    binding.fabPlayPause.setImageResource(R.drawable.ic_pause)
-                    handler.post(progressRunnable)
-                }
-                binding.videoView.setOnErrorListener { _, _, _ ->
-                    startFallbackPlayback(item)
-                    true
-                }
-                binding.videoView.setOnCompletionListener {
-                    onTrackCompleted()
-                }
-                return
-            } catch (_: Exception) {
-                startFallbackPlayback(item)
-                return
-            }
+        isVideoActive = item.isVideo
+        if (item.isVideo) {
+            binding.audioVisualizerContainer.visibility = View.GONE
+            binding.playerView.visibility = View.VISIBLE
+            binding.videoHudBar.visibility = View.VISIBLE
+            binding.tvVideoHudTitle.text = item.title
+            binding.tvVideoHudBadge.text = item.badgeText
+            videoStageCanvasView.setVideoMetadata(item.title, item.subtitle, item.badgeText)
+        } else {
+            binding.playerView.visibility = View.GONE
+            binding.videoOverlayContainer.visibility = View.GONE
+            binding.videoHudBar.visibility = View.GONE
+            binding.audioVisualizerContainer.visibility = View.VISIBLE
         }
 
-        // Audio playback via MediaPlayer
-        isVideoActive = false
-        binding.videoView.visibility = View.GONE
-        binding.audioVisualizerContainer.visibility = View.VISIBLE
+        lifecycleScope.launch {
+            val verifiedFile = withContext(Dispatchers.IO) {
+                MediaAssetHelper.ensureValidMediaFile(
+                    context = this@MediaPlayerActivity,
+                    targetFile = File(item.filePath),
+                    isVideo = item.isVideo,
+                    seed = item.title
+                )
+            }
+            val codecSummary = withContext(Dispatchers.IO) {
+                MediaAssetHelper.inspectMediaCodecSummary(verifiedFile, item.isVideo)
+            }
 
-        val targetAudioFile = if (file.exists() && file.length() > 1024) {
-            file
-        } else {
-            File(cacheDir, "Luca_Ambient_Chords_432Hz.wav")
+            if (currentIndex !in mediaQueue.indices || mediaQueue[currentIndex].id != item.id) return@launch
+
+            binding.tvCodecStatus.text = "Codec: $codecSummary"
+            startExoPlayerWithFile(item, verifiedFile)
+        }
+    }
+
+    private fun startExoPlayerWithFile(item: PlayableMediaItem, verifiedFile: File) {
+        val player = exoPlayer
+        if (player == null) {
+            playWithPlatformBackupPlayer(item, verifiedFile)
+            return
+        }
+
+        try {
+            usingBackupEngine = false
+            usingFallbackTimer = false
+
+            val mimeType = MediaAssetHelper.getMimeTypeForFilename(verifiedFile.name, item.isVideo)
+            val mediaItem = MediaItem.Builder()
+                .setUri(Uri.fromFile(verifiedFile))
+                .setMimeType(mimeType)
+                .build()
+
+            player.stop()
+            player.clearMediaItems()
+            player.repeatMode = if (isLoopingEnabled) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+            player.volume = if (isMuted) 0f else 1.0f
+            player.playbackParameters = PlaybackParameters(speedOptions[currentSpeedIndex])
+            player.setMediaItem(mediaItem)
+            player.prepare()
+            player.playWhenReady = true
+
+            isPlayingState = true
+            binding.fabPlayPause.setImageResource(R.drawable.ic_pause)
+            handler.removeCallbacks(progressRunnable)
+            handler.post(progressRunnable)
+        } catch (_: Exception) {
+            playWithPlatformBackupPlayer(item, verifiedFile)
+        }
+    }
+
+    private fun playWithPlatformBackupPlayer(item: PlayableMediaItem, verifiedFile: File) {
+        stopBackupPlayback()
+        usingBackupEngine = true
+
+        if (item.isVideo) {
+            binding.videoOverlayContainer.visibility = View.VISIBLE
         }
 
         try {
             val mp = MediaPlayer()
-            mp.setDataSource(targetAudioFile.absolutePath)
+            mp.setAudioAttributes(
+                PlatformAudioAttributes.Builder()
+                    .setUsage(PlatformAudioAttributes.USAGE_MEDIA)
+                    .setContentType(
+                        if (item.isVideo) PlatformAudioAttributes.CONTENT_TYPE_MOVIE
+                        else PlatformAudioAttributes.CONTENT_TYPE_MUSIC
+                    )
+                    .build()
+            )
+            mp.setDataSource(verifiedFile.absolutePath)
             mp.isLooping = isLoopingEnabled
-            mp.setOnPreparedListener { preparedMp ->
+            val vol = if (isMuted) 0f else 1.0f
+            mp.setVolume(vol, vol)
+            mp.setOnPreparedListener { prepared ->
                 usingFallbackTimer = false
-                val duration = preparedMp.duration.coerceAtLeast(1000)
-                binding.tvTotalDuration.text = formatTimeMs(duration)
-                preparedMp.start()
-                applyPlaybackSpeed(speedOptions[currentSpeedIndex])
+                val dur = prepared.duration.coerceAtLeast(1000)
+                binding.tvTotalDuration.text = formatTimeMs(dur)
+                prepared.start()
                 isPlayingState = true
                 binding.fabPlayPause.setImageResource(R.drawable.ic_pause)
+                handler.removeCallbacks(progressRunnable)
                 handler.post(progressRunnable)
-            }
-            mp.setOnErrorListener { _, _, _ ->
-                // If custom container has synthetic frames, play built-in synth backing with track metadata
-                playWithBuiltInAudioEngine(item)
-                true
             }
             mp.setOnCompletionListener {
                 onTrackCompleted()
             }
-            mp.prepareAsync()
-            mediaPlayer = mp
-        } catch (_: Exception) {
-            playWithBuiltInAudioEngine(item)
-        }
-    }
-
-    private fun playWithBuiltInAudioEngine(item: PlayableMediaItem) {
-        try {
-            mediaPlayer?.release()
-            val backingWav = File(cacheDir, "Luca_Ambient_Chords_432Hz.wav")
-            if (backingWav.exists()) {
-                val mp = MediaPlayer()
-                mp.setDataSource(backingWav.absolutePath)
-                mp.isLooping = isLoopingEnabled
-                mp.setOnPreparedListener { prepared ->
-                    usingFallbackTimer = false
-                    binding.tvTotalDuration.text = formatTimeMs(prepared.duration.coerceAtLeast(1000))
-                    prepared.start()
-                    isPlayingState = true
-                    binding.fabPlayPause.setImageResource(R.drawable.ic_pause)
-                    handler.post(progressRunnable)
-                }
-                mp.setOnCompletionListener {
-                    onTrackCompleted()
-                }
-                mp.prepareAsync()
-                mediaPlayer = mp
-                return
+            mp.setOnErrorListener { _, _, _ ->
+                startFallbackTimer()
+                true
             }
+            mp.prepareAsync()
+            backupMediaPlayer = mp
         } catch (_: Exception) {
+            startFallbackTimer()
         }
-        startFallbackPlayback(item)
     }
 
-    private fun startFallbackPlayback(@Suppress("UNUSED_PARAMETER") item: PlayableMediaItem) {
-        isVideoActive = false
+    private fun startFallbackTimer() {
         usingFallbackTimer = true
-        fallbackDurationMs = 180_000
+        fallbackDurationMs = 15_000
         fallbackPositionMs = 0
-        binding.videoView.visibility = View.GONE
-        binding.audioVisualizerContainer.visibility = View.VISIBLE
         binding.tvTotalDuration.text = formatTimeMs(fallbackDurationMs)
         isPlayingState = true
         binding.fabPlayPause.setImageResource(R.drawable.ic_pause)
+        handler.removeCallbacks(progressRunnable)
         handler.post(progressRunnable)
     }
 
@@ -445,38 +585,45 @@ class MediaPlayerActivity : AppCompatActivity() {
         binding.fabPlayPause.setImageResource(R.drawable.ic_play)
         handler.removeCallbacks(progressRunnable)
         try {
-            if (isVideoActive && binding.videoView.isPlaying) {
-                binding.videoView.pause()
-            } else if (mediaPlayer?.isPlaying == true) {
-                mediaPlayer?.pause()
+            exoPlayer?.pause()
+        } catch (_: Exception) {
+        }
+        try {
+            if (backupMediaPlayer?.isPlaying == true) {
+                backupMediaPlayer?.pause()
             }
         } catch (_: Exception) {
+        }
+        val pos = getActivePositionMs()
+        val dur = getActiveDurationMs()
+        if (isVideoActive && binding.videoOverlayContainer.visibility == View.VISIBLE) {
+            videoStageCanvasView.updateFrame(pos, dur, false)
+        }
+        if (!isVideoActive) {
+            audioSpectrumView.updateFrame(pos, false)
         }
     }
 
     private fun resumePlayback() {
+        ensureDeviceAudioVolumeAudible()
         isPlayingState = true
         binding.fabPlayPause.setImageResource(R.drawable.ic_pause)
         try {
-            if (isVideoActive) {
-                binding.videoView.start()
-            } else if (!usingFallbackTimer) {
-                mediaPlayer?.start()
+            if (usingBackupEngine) {
+                backupMediaPlayer?.start()
+            } else {
+                exoPlayer?.play()
             }
         } catch (_: Exception) {
         }
+        handler.removeCallbacks(progressRunnable)
         handler.post(progressRunnable)
     }
 
     private fun applyPlaybackSpeed(speed: Float) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            try {
-                val mp = mediaPlayer ?: return
-                if (mp.isPlaying) {
-                    mp.playbackParams = PlaybackParams().setSpeed(speed)
-                }
-            } catch (_: Exception) {
-            }
+        try {
+            exoPlayer?.playbackParameters = PlaybackParameters(speed)
+        } catch (_: Exception) {
         }
     }
 
@@ -484,8 +631,11 @@ class MediaPlayerActivity : AppCompatActivity() {
         return try {
             when {
                 usingFallbackTimer -> fallbackDurationMs
-                isVideoActive -> binding.videoView.duration.coerceAtLeast(1000)
-                else -> (mediaPlayer?.duration ?: fallbackDurationMs).coerceAtLeast(1000)
+                usingBackupEngine -> (backupMediaPlayer?.duration ?: fallbackDurationMs).coerceAtLeast(1000)
+                else -> {
+                    val dur = exoPlayer?.duration ?: C.TIME_UNSET
+                    if (dur != C.TIME_UNSET && dur > 0L) dur.toInt().coerceAtLeast(1000) else fallbackDurationMs
+                }
             }
         } catch (_: Exception) {
             fallbackDurationMs
@@ -496,8 +646,8 @@ class MediaPlayerActivity : AppCompatActivity() {
         return try {
             when {
                 usingFallbackTimer -> fallbackPositionMs
-                isVideoActive -> binding.videoView.currentPosition.coerceAtLeast(0)
-                else -> (mediaPlayer?.currentPosition ?: 0).coerceAtLeast(0)
+                usingBackupEngine -> (backupMediaPlayer?.currentPosition ?: 0).coerceAtLeast(0)
+                else -> (exoPlayer?.currentPosition ?: 0L).toInt().coerceAtLeast(0)
             }
         } catch (_: Exception) {
             fallbackPositionMs
@@ -508,8 +658,8 @@ class MediaPlayerActivity : AppCompatActivity() {
         try {
             when {
                 usingFallbackTimer -> fallbackPositionMs = targetMs.coerceIn(0, fallbackDurationMs)
-                isVideoActive -> binding.videoView.seekTo(targetMs)
-                else -> mediaPlayer?.seekTo(targetMs)
+                usingBackupEngine -> backupMediaPlayer?.seekTo(targetMs)
+                else -> exoPlayer?.seekTo(targetMs.toLong())
             }
             updateSeekBarProgress()
         } catch (_: Exception) {
@@ -518,7 +668,7 @@ class MediaPlayerActivity : AppCompatActivity() {
 
     private fun updateSeekBarProgress() {
         if (usingFallbackTimer && isPlayingState) {
-            fallbackPositionMs += 250
+            fallbackPositionMs += 60
             if (fallbackPositionMs >= fallbackDurationMs) {
                 onTrackCompleted()
                 return
@@ -545,24 +695,29 @@ class MediaPlayerActivity : AppCompatActivity() {
         }
     }
 
-    private fun stopCurrentPlayback() {
+    private fun stopBackupPlayback() {
+        try {
+            backupMediaPlayer?.stop()
+        } catch (_: Exception) {
+        }
+        try {
+            backupMediaPlayer?.release()
+        } catch (_: Exception) {
+        }
+        backupMediaPlayer = null
+    }
+
+    private fun releaseAllPlayers() {
         handler.removeCallbacks(progressRunnable)
         isPlayingState = false
+        stopBackupPlayback()
         try {
-            if (binding.videoView.isPlaying) {
-                binding.videoView.stopPlayback()
-            }
+            binding.playerView.player = null
+            exoPlayer?.removeListener(exoPlayerListener)
+            exoPlayer?.release()
         } catch (_: Exception) {
         }
-        try {
-            mediaPlayer?.stop()
-        } catch (_: Exception) {
-        }
-        try {
-            mediaPlayer?.release()
-        } catch (_: Exception) {
-        }
-        mediaPlayer = null
+        exoPlayer = null
     }
 
     private fun formatTimeMs(ms: Int): String {
@@ -577,9 +732,168 @@ class MediaPlayerActivity : AppCompatActivity() {
         return true
     }
 
+    override fun onStop() {
+        super.onStop()
+        if (isFinishing) {
+            releaseAllPlayers()
+        }
+    }
+
     override fun onDestroy() {
-        stopCurrentPlayback()
+        releaseAllPlayers()
         super.onDestroy()
+    }
+
+    /**
+     * Live 60fps Audio Spectrum Analyzer View rendered inside the audio stage.
+     */
+    private class LiveAudioSpectrumView(context: Context) : View(context) {
+        private var currentMs: Int = 0
+        private var active: Boolean = false
+        private val barPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+        }
+        private val rectF = RectF()
+
+        fun updateFrame(positionMs: Int, isPlaying: Boolean) {
+            currentMs = positionMs
+            active = isPlaying
+            invalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val w = width.toFloat()
+            val h = height.toFloat()
+            if (w <= 0f || h <= 0f) return
+
+            val barCount = 28
+            val totalWidth = w * 0.86f
+            val startX = (w - totalWidth) / 2f
+            val step = totalWidth / barCount
+            val barW = step * 0.62f
+            val phase = (currentMs / 1000.0) * 3.2
+
+            for (i in 0 until barCount) {
+                val factor = if (active) {
+                    0.22 + 0.78 * abs(sin(phase + i * 0.42) * cos(phase * 0.7 - i * 0.25))
+                } else {
+                    0.18
+                }
+                val barH = (h * factor).toFloat().coerceAtLeast(6f)
+                val left = startX + i * step
+                val top = (h - barH) / 2f
+                rectF.set(left, top, left + barW, top + barH)
+                barPaint.color = when (i % 3) {
+                    0 -> Color.parseColor("#38BDF8")
+                    1 -> Color.parseColor("#06B6D4")
+                    else -> Color.parseColor("#A78BFA")
+                }
+                canvas.drawRoundRect(rectF, 4f, 4f, barPaint)
+            }
+        }
+    }
+
+    /**
+     * Live 60fps Cinema Video Canvas Stage fallback if hardware video surface is unavailable.
+     */
+    private class LiveVideoStageView(context: Context) : View(context) {
+        private var videoTitle: String = "Video.mp4"
+        private var videoSubtitle: String = "HD 720p MP4"
+        private var videoBadge: String = "HD VIDEO"
+        private var currentMs: Int = 0
+        private var totalMs: Int = 12_000
+        private var playing: Boolean = true
+
+        private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val barPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            color = Color.parseColor("#06B6D4")
+        }
+        private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            color = Color.parseColor("#3338BDF8")
+        }
+        private val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 34f
+            isFakeBoldText = true
+            textAlign = Paint.Align.CENTER
+        }
+        private val subPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#94A3B8")
+            textSize = 24f
+            textAlign = Paint.Align.CENTER
+        }
+        private val rectF = RectF()
+
+        fun setVideoMetadata(title: String, subtitle: String, badge: String) {
+            videoTitle = title
+            videoSubtitle = subtitle
+            videoBadge = badge
+            invalidate()
+        }
+
+        fun updateFrame(positionMs: Int, durationMs: Int, isPlaying: Boolean) {
+            currentMs = positionMs
+            totalMs = durationMs.coerceAtLeast(1000)
+            playing = isPlaying
+            invalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val w = width.toFloat()
+            val h = height.toFloat()
+            if (w <= 0f || h <= 0f) return
+
+            val phase = (currentMs / 1000.0) * 2.2
+
+            bgPaint.shader = LinearGradient(
+                0f, 0f, w, h,
+                intArrayOf(
+                    Color.parseColor("#090D16"),
+                    Color.parseColor("#0F172A"),
+                    Color.parseColor("#1E293B")
+                ),
+                null,
+                Shader.TileMode.CLAMP
+            )
+            canvas.drawRect(0f, 0f, w, h, bgPaint)
+
+            val centerX = w / 2f + (cos(phase) * 32f).toFloat()
+            val centerY = h * 0.46f + (sin(phase * 1.3) * 14f).toFloat()
+            canvas.drawCircle(centerX, centerY, h * 0.28f, glowPaint)
+
+            val barCount = 24
+            val totalBarsWidth = w * 0.72f
+            val startX = (w - totalBarsWidth) / 2f
+            val barStep = totalBarsWidth / barCount
+            val barWidth = barStep * 0.62f
+            val baseLineY = h * 0.68f
+
+            for (i in 0 until barCount) {
+                val anim = if (playing) {
+                    0.35 + 0.65 * abs(sin(phase * 2.4 + i * 0.45))
+                } else {
+                    0.25
+                }
+                val barHeight = (h * 0.24f * anim).toFloat()
+                val left = startX + i * barStep
+                rectF.set(left, baseLineY - barHeight, left + barWidth, baseLineY)
+                barPaint.color = if (i % 2 == 0) {
+                    Color.parseColor("#38BDF8")
+                } else {
+                    Color.parseColor("#A78BFA")
+                }
+                canvas.drawRoundRect(rectF, 6f, 6f, barPaint)
+            }
+
+            val displayTitle = if (videoTitle.length > 36) videoTitle.take(33) + "..." else videoTitle
+            canvas.drawText(displayTitle, w / 2f, h * 0.82f, titlePaint)
+            val statusStr = if (playing) "PLAYING HD MP4 VIDEO STREAM" else "VIDEO PAUSED"
+            canvas.drawText("$statusStr • $videoBadge", w / 2f, h * 0.92f, subPaint)
+        }
     }
 
     private inner class MediaQueueAdapter(

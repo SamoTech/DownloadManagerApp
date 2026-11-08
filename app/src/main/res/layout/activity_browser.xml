@@ -89,6 +89,15 @@
                     app:singleLine="true">
 
                     <com.google.android.material.chip.Chip
+                        android:id="@+id/chipSiteSampleHub"
+                        style="@style/Widget.Material3.Chip.Assist"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Discovery Hub"
+                        android:textColor="@android:color/white"
+                        app:chipBackgroundColor="@color/colorPrimary" />
+
+                    <com.google.android.material.chip.Chip
                         android:id="@+id/chipSiteArchiveAudio"
                         style="@style/Widget.Material3.Chip.Assist"
                         android:layout_width="wrap_content"
@@ -120,18 +129,9 @@
                         style="@style/Widget.Material3.Chip.Assist"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Wikimedia Audio/Video"
+                        android:text="Wikimedia Media"
                         android:textColor="@android:color/white"
                         app:chipBackgroundColor="@color/colorDashboardCard" />
-
-                    <com.google.android.material.chip.Chip
-                        android:id="@+id/chipSiteSampleHub"
-                        style="@style/Widget.Material3.Chip.Assist"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Built-in Media Test Page"
-                        android:textColor="@android:color/white"
-                        app:chipBackgroundColor="@color/colorPrimary" />
                 </com.google.android.material.chip.ChipGroup>
             </HorizontalScrollView>
         </LinearLayout>
@@ -141,16 +141,91 @@
             style="?android:attr/progressBarStyleHorizontal"
             android:layout_width="match_parent"
             android:layout_height="3dp"
+            android:indeterminate="false"
             android:max="100"
             android:progressDrawable="@drawable/progress_bar_drawable"
             android:visibility="gone" />
 
-        <!-- WebView Content -->
-        <WebView
-            android:id="@+id/webView"
+        <!-- Native Smart Browser Viewport (Page Header + Interactive Links & Media Stream Inspector) -->
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="0dp"
-            android:layout_weight="1" />
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <!-- Current Page Info Banner -->
+            <LinearLayout
+                android:id="@+id/pageSummaryCard"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginHorizontal="12dp"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/card_background"
+                android:orientation="vertical"
+                android:padding="14dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <ImageView
+                        android:layout_width="20dp"
+                        android:layout_height="20dp"
+                        android:contentDescription="@string/smart_browser"
+                        android:src="@drawable/ic_browser"
+                        app:tint="@color/colorPrimary" />
+
+                    <TextView
+                        android:id="@+id/tvPageTitle"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
+                        android:ellipsize="end"
+                        android:maxLines="1"
+                        android:text="Luca Smart Browser &amp; Link Sniffer"
+                        android:textColor="@color/colorOnSurface"
+                        android:textSize="15sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tvPageBadge"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/icon_badge_background"
+                        android:paddingHorizontal="8dp"
+                        android:paddingVertical="3dp"
+                        android:text="SNIFFER READY"
+                        android:textColor="@color/colorPrimary"
+                        android:textSize="10sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/tvPageDescription"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:ellipsize="end"
+                    android:maxLines="2"
+                    android:text="Automatically inspects webpages to extract downloadable music, video streams, torrents, and direct files."
+                    android:textColor="@color/gray"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- RecyclerView of Page Elements & Discovered Downloadable Links -->
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/rvBrowserContent"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="6dp"
+                android:layout_weight="1"
+                android:clipToPadding="false"
+                android:paddingHorizontal="12dp"
+                android:paddingBottom="84dp" />
+        </LinearLayout>
 
         <!-- Bottom Browser Navigation & Link Sniffer Status Bar -->
         <LinearLayout

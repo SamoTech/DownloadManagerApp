@@ -25,6 +25,7 @@ import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
 import com.example.downloadmanager.model.DownloadType
+import com.example.downloadmanager.utils.MediaAssetHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -95,6 +96,7 @@ class DownloadService : Service() {
         scope.launch {
             try {
                 repository.deleteInvalidDownloads()
+                MediaAssetHelper.repairAllCompletedMediaDownloads(application, repository)
             } catch (e: Exception) {
                 Log.w(TAG, "Error cleaning up invalid downloads", e)
             }

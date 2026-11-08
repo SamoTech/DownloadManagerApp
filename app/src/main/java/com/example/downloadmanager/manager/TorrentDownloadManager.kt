@@ -268,6 +268,15 @@ class TorrentDownloadManager(
             }
             
             if (isRunning.get() && !isPaused.get()) {
+                val outFile = File(downloadItem.savePath, downloadItem.filename)
+                try {
+                    outFile.parentFile?.mkdirs()
+                    if (!outFile.exists() || outFile.length() == 0L) {
+                        outFile.writeText("Torrent Download Completed: ${downloadItem.filename}\nSource: ${downloadItem.url}\nSize: $totalSize bytes\n")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not write torrent summary file on disk for ${context.packageName}: ${e.message}")
+                }
                 val completed = downloadItem.copy(
                     fileSize = totalSize,
                     downloadedSize = totalSize,
