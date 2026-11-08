@@ -1,16 +1,15 @@
 package com.example.downloadmanager.activity
 
 import android.Manifest
-import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.util.Log
+import android.os.IBinder
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
@@ -19,10 +18,10 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SearchView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.recyclerview.widget.StaggeredGridLayoutManager
 import com.example.downloadmanager.R
 import com.example.downloadmanager.adapter.DownloadAdapter
 import com.example.downloadmanager.databinding.ActivityMainBinding
@@ -30,17 +29,10 @@ import com.example.downloadmanager.manager.DownloadManager
 import com.example.downloadmanager.model.DownloadDatabase
 import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
-import com.example.downloadmanager.model.DownloadStatus
 import com.example.downloadmanager.model.DownloadType
 import com.example.downloadmanager.service.DownloadService
 import com.google.android.material.bottomsheet.BottomSheetDialog
-import com.google.android.material.snackbar.Snackbar
-import com.karumi.dexter.Dexter
-import com.karumi.dexter.PermissionToken
-import com.karumi.dexter.listener.PermissionDeniedResponse
-import com.karumi.dexter.listener.PermissionGrantedResponse
-import com.karumi.dexter.listener.PermissionRequest
-import com.karumi.dexter.listener.single.PermissionListener
+import java.io.File
 
 class MainActivity : AppCompatActivity() {
     
@@ -63,9 +55,7 @@ class MainActivity : AppCompatActivity() {
     }
     
     companion object {
-        private const val TAG = "MainActivity"
         private const val REQUEST_CODE_STORAGE_PERMISSION = 1001
-        private const val REQUEST_CODE_PICK_FILE = 1002
         private const val REQUEST_CODE_NOTIFICATION_PERMISSION = 1003
     }
     
@@ -75,15 +65,12 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         
-        // Set up toolbar
         setSupportActionBar(binding.toolbar)
         
-        // Initialize ViewModel
         val database = DownloadDatabase.getDatabase(application)
         val repository = DownloadRepository(database.downloadDao())
         viewModel = ViewModelProvider(this, MainViewModelFactory(repository)).get(MainViewModel::class.java)
         
-        // Initialize adapter
         downloadAdapter = DownloadAdapter(
             onItemClick = { downloadItem ->
                 openDownloadDetails(downloadItem)
@@ -93,36 +80,24 @@ class MainActivity : AppCompatActivity() {
             }
         )
         
-        // Set up RecyclerView
         binding.recyclerView.apply {
             layoutManager = LinearLayoutManager(this@MainActivity)
             adapter = downloadAdapter
             setHasFixedSize(true)
         }
         
-        // Set up SwipeRefreshLayout
         binding.swipeRefresh.setOnRefreshListener {
             refreshDownloads()
         }
         
-        // Set up FAB
         binding.fabAdd.setOnClickListener {
             showAddDownloadDialog()
         }
         
-        // Set up tabs
         setupTabs()
-        
-        // Observe downloads
         observeDownloads()
-        
-        // Start DownloadService
         startDownloadService()
-        
-        // Check permissions
         checkPermissions()
-        
-        // Handle intent
         handleIntent(intent)
     }
     
@@ -166,41 +141,41 @@ class MainActivity : AppCompatActivity() {
     
     private fun updateEmptyState(isEmpty: Boolean) {
         binding.recyclerView.visibility = if (isEmpty) View.GONE else View.VISIBLE
-        // You could add an empty state view here
+        binding.tvEmptyState.visibility = if (isEmpty) View.VISIBLE else View.GONE
     }
     
     private fun refreshDownloads() {
         viewModel.refreshDownloads()
+        binding.swipeRefresh.isRefreshing = false
     }
     
     private fun showAddDownloadDialog() {
         val dialog = BottomSheetDialog(this)
-        val view = layoutInflater.inflate(R.layout.activity_add_download, null)
+        val view = layoutInflater.inflate(R.layout.bottom_sheet_add_download, null)
         dialog.setContentView(view)
         
-        // Set up buttons
-        view.findViewById<View>(R.id.btnDirectDownload).setOnClickListener {
+        view.findViewById<View>(R.id.btnDirectDownload)?.setOnClickListener {
             dialog.dismiss()
             startActivity(Intent(this, AddDownloadActivity::class.java).apply {
                 putExtra("download_type", DownloadType.DIRECT.name)
             })
         }
         
-        view.findViewById<View>(R.id.btnTorrentDownload).setOnClickListener {
+        view.findViewById<View>(R.id.btnTorrentDownload)?.setOnClickListener {
             dialog.dismiss()
             startActivity(Intent(this, AddDownloadActivity::class.java).apply {
                 putExtra("download_type", DownloadType.TORRENT.name)
             })
         }
         
-        view.findViewById<View>(R.id.btnVideoDownload).setOnClickListener {
+        view.findViewById<View>(R.id.btnVideoDownload)?.setOnClickListener {
             dialog.dismiss()
             startActivity(Intent(this, AddDownloadActivity::class.java).apply {
                 putExtra("download_type", DownloadType.VIDEO.name)
             })
         }
         
-        view.findViewById<View>(R.id.btnCancel).setOnClickListener {
+        view.findViewById<View>(R.id.btnCancel)?.setOnClickListener {
             dialog.dismiss()
         }
         
@@ -216,7 +191,15 @@ class MainActivity : AppCompatActivity() {
             "delete" -> showDeleteConfirmation(downloadItem)
             "open" -> openFile(downloadItem)
             "share" -> shareFile(downloadItem)
+            "copy_link" -> copyLink(downloadItem)
+            "details" -> openDownloadDetails(downloadItem)
         }
+    }
+
+    private fun copyLink(downloadItem: DownloadItem) {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Download URL", downloadItem.url))
+        Toast.makeText(this, R.string.copy_link, Toast.LENGTH_SHORT).show()
     }
     
     private fun pauseDownload(downloadItem: DownloadItem) {
@@ -255,21 +238,19 @@ class MainActivity : AppCompatActivity() {
         if (isBound) {
             downloadService?.deleteDownload(downloadItem.id, true)
         } else {
-            // For now, just delete from database
             viewModel.deleteDownload(downloadItem.id)
         }
     }
     
     private fun openFile(downloadItem: DownloadItem) {
         try {
-            val file = java.io.File(downloadItem.savePath, downloadItem.filename)
+            val file = File(downloadItem.savePath, downloadItem.filename)
             if (file.exists()) {
-                val intent = Intent(Intent.ACTION_VIEW)
-                intent.setDataAndType(
-                    Uri.fromFile(file),
-                    downloadItem.mimeType
-                )
-                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, downloadItem.mimeType.ifBlank { "*/*" })
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
                 startActivity(intent)
             } else {
                 Toast.makeText(this, R.string.error_file_not_found, Toast.LENGTH_SHORT).show()
@@ -281,11 +262,14 @@ class MainActivity : AppCompatActivity() {
     
     private fun shareFile(downloadItem: DownloadItem) {
         try {
-            val file = java.io.File(downloadItem.savePath, downloadItem.filename)
+            val file = File(downloadItem.savePath, downloadItem.filename)
             if (file.exists()) {
-                val intent = Intent(Intent.ACTION_SEND)
-                intent.type = downloadItem.mimeType
-                intent.putExtra(Intent.EXTRA_STREAM, Uri.fromFile(file))
+                val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = downloadItem.mimeType.ifBlank { "*/*" }
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
                 startActivity(Intent.createChooser(intent, getString(R.string.share)))
             } else {
                 Toast.makeText(this, R.string.error_file_not_found, Toast.LENGTH_SHORT).show()
@@ -324,12 +308,10 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun startDownloadService() {
-        // Start the service
         Intent(this, DownloadService::class.java).apply {
             startService(this)
         }
         
-        // Bind to the service
         bindService(
             Intent(this, DownloadService::class.java),
             serviceConnection,
@@ -339,7 +321,6 @@ class MainActivity : AppCompatActivity() {
     
     private fun checkPermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // Check notification permission
             if (ContextCompat.checkSelfPermission(
                     this,
                     Manifest.permission.POST_NOTIFICATIONS
@@ -347,39 +328,29 @@ class MainActivity : AppCompatActivity() {
             ) {
                 requestNotificationPermission()
             }
+        } else if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                    REQUEST_CODE_STORAGE_PERMISSION
+                )
+            }
         }
-        
-        // Check storage permission
-        Dexter.withContext(this)
-            .withPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-            .withListener(object : PermissionListener {
-                override fun onPermissionGranted(response: PermissionGrantedResponse) {
-                    // Permission granted
-                }
-                
-                override fun onPermissionDenied(response: PermissionDeniedResponse) {
-                    Toast.makeText(
-                        this@MainActivity,
-                        R.string.storage_permission_rationale,
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-                
-                override fun onPermissionRationaleShouldBeShown(
-                    permission: PermissionRequest,
-                    token: PermissionToken
-                ) {
-                    token.continuePermissionRequest()
-                }
-            }).check()
     }
     
     private fun requestNotificationPermission() {
-        ActivityCompat.requestPermissions(
-            this,
-            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-            REQUEST_CODE_NOTIFICATION_PERMISSION
-        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                REQUEST_CODE_NOTIFICATION_PERMISSION
+            )
+        }
     }
     
     override fun onRequestPermissionsResult(
@@ -391,13 +362,20 @@ class MainActivity : AppCompatActivity() {
         
         when (requestCode) {
             REQUEST_CODE_NOTIFICATION_PERMISSION -> {
-                if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                    // Permission granted
-                } else {
+                if (grantResults.isEmpty() || grantResults[0] != PackageManager.PERMISSION_GRANTED) {
                     Toast.makeText(
                         this,
                         R.string.notification_permission_rationale,
                         Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+            REQUEST_CODE_STORAGE_PERMISSION -> {
+                if (grantResults.isEmpty() || grantResults[0] != PackageManager.PERMISSION_GRANTED) {
+                    Toast.makeText(
+                        this,
+                        R.string.storage_permission_rationale,
+                        Toast.LENGTH_LONG
                     ).show()
                 }
             }
@@ -418,7 +396,6 @@ class MainActivity : AppCompatActivity() {
     
     private fun handleUrl(url: String) {
         if (url.startsWith("http") || url.startsWith("https") || url.startsWith("magnet:")) {
-            // Show dialog to confirm download
             android.app.AlertDialog.Builder(this)
                 .setTitle(R.string.add_download)
                 .setMessage(getString(R.string.download_url_confirmation, url))
@@ -441,41 +418,27 @@ class MainActivity : AppCompatActivity() {
             else -> DownloadType.DIRECT
         }
         
-        if (isBound) {
-            // Use the service directly
-            val downloadManager = DownloadManager(application, viewModel.repository)
-            val filename = downloadManager.getFilenameFromUrl(url)
-            val savePath = downloadManager.getDefaultDownloadPath()
-            
-            downloadService?.let { service ->
-                Intent(service, DownloadService::class.java).apply {
-                    action = DownloadService.ACTION_START_DOWNLOAD
-                    putExtra(DownloadService.EXTRA_URL, url)
-                    putExtra(DownloadService.EXTRA_FILENAME, filename)
-                    putExtra(DownloadService.EXTRA_SAVE_PATH, savePath)
-                    putExtra(DownloadService.EXTRA_DOWNLOAD_TYPE, downloadType)
-                    service.startService(this)
-                }
-            }
-        } else {
-            // Start via intent
-            Intent(this, DownloadService::class.java).apply {
-                action = DownloadService.ACTION_START_DOWNLOAD
-                putExtra(DownloadService.EXTRA_URL, url)
-                putExtra(DownloadService.EXTRA_DOWNLOAD_TYPE, downloadType)
-                startService(this)
-            }
+        val downloadManager = DownloadManager(application, viewModel.repository)
+        val filename = downloadManager.getFilenameFromUrl(url)
+        val savePath = downloadManager.getDefaultDownloadPath()
+
+        Intent(this, DownloadService::class.java).apply {
+            action = DownloadService.ACTION_START_DOWNLOAD
+            putExtra(DownloadService.EXTRA_URL, url)
+            putExtra(DownloadService.EXTRA_FILENAME, filename)
+            putExtra(DownloadService.EXTRA_SAVE_PATH, savePath)
+            putExtra(DownloadService.EXTRA_DOWNLOAD_TYPE, downloadType)
+            startService(this)
         }
     }
     
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(R.menu.menu_main, menu)
         
-        // Set up search
         val searchItem = menu.findItem(R.id.action_search)
-        val searchView = searchItem.actionView as SearchView
+        val searchView = searchItem?.actionView as? SearchView
         
-        searchView.setOnQueryTextListener(object : SearchView.OnQueryTextListener {
+        searchView?.setOnQueryTextListener(object : SearchView.OnQueryTextListener {
             override fun onQueryTextSubmit(query: String): Boolean {
                 handleUrl(query)
                 searchView.clearFocus()
@@ -506,7 +469,6 @@ class MainActivity : AppCompatActivity() {
     
     override fun onStart() {
         super.onStart()
-        // Bind to service
         bindService(
             Intent(this, DownloadService::class.java),
             serviceConnection,
@@ -516,7 +478,6 @@ class MainActivity : AppCompatActivity() {
     
     override fun onStop() {
         super.onStop()
-        // Unbind from service
         if (isBound) {
             unbindService(serviceConnection)
             isBound = false
@@ -525,7 +486,6 @@ class MainActivity : AppCompatActivity() {
     
     override fun onDestroy() {
         super.onDestroy()
-        // Clean up
         if (isBound) {
             unbindService(serviceConnection)
             isBound = false

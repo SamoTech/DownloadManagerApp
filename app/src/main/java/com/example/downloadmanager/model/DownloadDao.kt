@@ -33,6 +33,9 @@ interface DownloadDao {
     
     @Query("SELECT * FROM downloads WHERE id = :id")
     suspend fun getDownloadById(id: Long): DownloadItem?
+
+    @Query("SELECT * FROM downloads WHERE id = :id")
+    fun observeDownloadById(id: Long): LiveData<DownloadItem?>
     
     @Query("SELECT * FROM downloads WHERE status IN (:statuses) ORDER BY addedDate DESC")
     fun getActiveDownloads(statuses: List<DownloadStatus>): LiveData<List<DownloadItem>>

@@ -84,12 +84,12 @@ class YouTubeExtractor(private val context: Context) {
                 videoId = videoId,
                 title = videoInfo.title,
                 url = "https://www.youtube.com/watch?v=$videoId",
-                thumbnailUrl = videoInfo.thumbnailUrl,
+                thumbnailUrl = videoInfo.thumbnailUrl ?: "",
                 duration = videoInfo.duration,
-                viewCount = videoInfo.viewCount,
-                author = videoInfo.author,
-                uploadDate = videoInfo.uploadDate,
-                description = videoInfo.description,
+                viewCount = videoInfo.views,
+                author = videoInfo.author ?: "Unknown",
+                uploadDate = videoInfo.uploadDate ?: "Unknown",
+                description = videoInfo.description ?: "",
                 formats = formats,
                 subtitles = subtitles
             )

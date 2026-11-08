@@ -14,9 +14,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.example.downloadmanager.R
 import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadStatus
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.google.android.material.button.MaterialButton
 
 class DownloadAdapter(
     private val onItemClick: (DownloadItem) -> Unit,
@@ -45,9 +43,9 @@ class DownloadAdapter(
         private val tvStatus: TextView = itemView.findViewById(R.id.tvStatus)
         private val progressBar: ProgressBar = itemView.findViewById(R.id.progressBar)
         private val ivMore: ImageView = itemView.findViewById(R.id.ivMore)
-        private val btnAction1: View = itemView.findViewById(R.id.btnAction1)
-        private val btnAction2: View = itemView.findViewById(R.id.btnAction2)
-        private val btnAction3: View = itemView.findViewById(R.id.btnAction3)
+        private val btnAction1: MaterialButton = itemView.findViewById(R.id.btnAction1)
+        private val btnAction2: MaterialButton = itemView.findViewById(R.id.btnAction2)
+        private val btnAction3: MaterialButton = itemView.findViewById(R.id.btnAction3)
         private val torrentInfo: View = itemView.findViewById(R.id.torrentInfo)
         private val tvPeers: TextView = itemView.findViewById(R.id.tvPeers)
         private val tvSeeds: TextView = itemView.findViewById(R.id.tvSeeds)
@@ -58,39 +56,29 @@ class DownloadAdapter(
             onItemClick: (DownloadItem) -> Unit,
             onActionClick: (DownloadItem, String) -> Unit
         ) {
-            // Set file type icon
             ivFileType.setImageResource(getFileTypeIcon(downloadItem))
-            
-            // Set filename
             tvFilename.text = downloadItem.filename
-            
-            // Set progress
             tvProgress.text = "${downloadItem.progress}%"
             progressBar.progress = downloadItem.progress
-            
-            // Set size
             tvSize.text = formatFileSize(downloadItem.fileSize)
             
-            // Set speed
             if (downloadItem.downloadSpeed > 0) {
                 tvSpeed.text = formatSpeed(downloadItem.downloadSpeed)
             } else {
                 tvSpeed.text = itemView.context.getString(R.string.unknown_speed)
             }
             
-            // Set ETA
             if (downloadItem.eta > 0) {
                 tvEta.text = formatDuration(downloadItem.eta * 1000)
             } else {
                 tvEta.text = itemView.context.getString(R.string.unknown_eta)
             }
             
-            // Set status
             tvStatus.text = getStatusText(downloadItem.status)
             tvStatus.setTextColor(getStatusColor(downloadItem.status))
             
-            // Show/hide torrent info
-            if (downloadItem.downloadType == com.example.downloadmanager.model.DownloadType.TORRENT) {
+            if (downloadItem.downloadType == com.example.downloadmanager.model.DownloadType.TORRENT ||
+                downloadItem.downloadType == com.example.downloadmanager.model.DownloadType.MAGNET) {
                 torrentInfo.visibility = View.VISIBLE
                 tvPeers.text = itemView.context.getString(R.string.peers, downloadItem.peers)
                 tvSeeds.text = itemView.context.getString(R.string.seeds, downloadItem.seeds)
@@ -106,10 +94,8 @@ class DownloadAdapter(
                 torrentInfo.visibility = View.GONE
             }
             
-            // Set action buttons based on status
             setupActionButtons(downloadItem, onActionClick)
             
-            // Set click listeners
             itemView.setOnClickListener { onItemClick(downloadItem) }
             ivMore.setOnClickListener { showOverflowMenu(downloadItem, onActionClick) }
         }
@@ -124,15 +110,6 @@ class DownloadAdapter(
                         downloadItem.filename.endsWith(".mp4") || 
                             downloadItem.filename.endsWith(".webm") ||
                             downloadItem.filename.endsWith(".mkv") -> R.drawable.ic_video
-                        downloadItem.filename.endsWith(".mp3") ||
-                            downloadItem.filename.endsWith(".wav") ||
-                            downloadItem.filename.endsWith(".ogg") -> R.drawable.ic_file
-                        downloadItem.filename.endsWith(".pdf") -> R.drawable.ic_file
-                        downloadItem.filename.endsWith(".jpg") ||
-                            downloadItem.filename.endsWith(".png") ||
-                            downloadItem.filename.endsWith(".gif") -> R.drawable.ic_file
-                        downloadItem.filename.endsWith(".zip") ||
-                            downloadItem.filename.endsWith(".rar") -> R.drawable.ic_file
                         else -> R.drawable.ic_file
                     }
                 }
@@ -197,10 +174,10 @@ class DownloadAdapter(
         
         private fun getStatusColor(status: DownloadStatus): Int {
             return when (status) {
-                DownloadStatus.DOWNLOADING -> Color.BLUE
-                DownloadStatus.COMPLETED -> Color.GREEN
-                DownloadStatus.PAUSED -> Color.parseColor("#FFA500") // Orange
-                DownloadStatus.FAILED -> Color.RED
+                DownloadStatus.DOWNLOADING -> Color.parseColor("#2196F3")
+                DownloadStatus.COMPLETED -> Color.parseColor("#4CAF50")
+                DownloadStatus.PAUSED -> Color.parseColor("#FF9800")
+                DownloadStatus.FAILED -> Color.parseColor("#F44336")
                 DownloadStatus.CANCELLED -> Color.GRAY
                 DownloadStatus.QUEUED -> Color.GRAY
             }
@@ -213,7 +190,7 @@ class DownloadAdapter(
             when (downloadItem.status) {
                 DownloadStatus.DOWNLOADING -> {
                     btnAction1.visibility = View.VISIBLE
-                    btnAction1.text = "Pause"
+                    btnAction1.text = itemView.context.getString(R.string.pause)
                     btnAction1.setOnClickListener { onActionClick(downloadItem, "pause") }
                     
                     btnAction2.visibility = View.GONE
@@ -222,19 +199,19 @@ class DownloadAdapter(
                 
                 DownloadStatus.PAUSED -> {
                     btnAction1.visibility = View.VISIBLE
-                    btnAction1.text = "Resume"
+                    btnAction1.text = itemView.context.getString(R.string.resume)
                     btnAction1.setOnClickListener { onActionClick(downloadItem, "resume") }
                     
                     btnAction2.visibility = View.VISIBLE
-                    btnAction2.text = "Cancel"
+                    btnAction2.text = itemView.context.getString(R.string.cancel)
                     btnAction2.setOnClickListener { onActionClick(downloadItem, "cancel") }
                     
                     btnAction3.visibility = View.GONE
                 }
                 
-                DownloadStatus.FAILED -> {
+                DownloadStatus.FAILED, DownloadStatus.CANCELLED -> {
                     btnAction1.visibility = View.VISIBLE
-                    btnAction1.text = "Retry"
+                    btnAction1.text = itemView.context.getString(R.string.retry)
                     btnAction1.setOnClickListener { onActionClick(downloadItem, "retry") }
                     
                     btnAction2.visibility = View.GONE
@@ -243,11 +220,11 @@ class DownloadAdapter(
                 
                 DownloadStatus.COMPLETED -> {
                     btnAction1.visibility = View.VISIBLE
-                    btnAction1.text = "Open"
+                    btnAction1.text = itemView.context.getString(R.string.open)
                     btnAction1.setOnClickListener { onActionClick(downloadItem, "open") }
                     
                     btnAction2.visibility = View.VISIBLE
-                    btnAction2.text = "Share"
+                    btnAction2.text = itemView.context.getString(R.string.share)
                     btnAction2.setOnClickListener { onActionClick(downloadItem, "share") }
                     
                     btnAction3.visibility = View.GONE
@@ -268,22 +245,21 @@ class DownloadAdapter(
             val popupMenu = PopupMenu(itemView.context, ivMore)
             popupMenu.menuInflater.inflate(R.menu.menu_download_item, popupMenu.menu)
             
-            // Hide/show menu items based on status
-            popupMenu.menu.findItem(R.id.action_pause).isVisible = 
+            popupMenu.menu.findItem(R.id.action_pause)?.isVisible = 
                 downloadItem.status == DownloadStatus.DOWNLOADING
-            popupMenu.menu.findItem(R.id.action_resume).isVisible = 
+            popupMenu.menu.findItem(R.id.action_resume)?.isVisible = 
                 downloadItem.status == DownloadStatus.PAUSED
-            popupMenu.menu.findItem(R.id.action_cancel).isVisible = 
+            popupMenu.menu.findItem(R.id.action_cancel)?.isVisible = 
                 downloadItem.status == DownloadStatus.DOWNLOADING || 
                 downloadItem.status == DownloadStatus.PAUSED ||
                 downloadItem.status == DownloadStatus.QUEUED
-            popupMenu.menu.findItem(R.id.action_retry).isVisible = 
+            popupMenu.menu.findItem(R.id.action_retry)?.isVisible = 
                 downloadItem.status == DownloadStatus.FAILED ||
                 downloadItem.status == DownloadStatus.CANCELLED
-            popupMenu.menu.findItem(R.id.action_open).isVisible = 
+            popupMenu.menu.findItem(R.id.action_open)?.isVisible = 
                 downloadItem.status == DownloadStatus.COMPLETED
-            popupMenu.menu.findItem(R.id.action_delete).isVisible = true
-            popupMenu.menu.findItem(R.id.action_share).isVisible = 
+            popupMenu.menu.findItem(R.id.action_delete)?.isVisible = true
+            popupMenu.menu.findItem(R.id.action_share)?.isVisible = 
                 downloadItem.status == DownloadStatus.COMPLETED
             
             popupMenu.setOnMenuItemClickListener { menuItem ->
@@ -314,6 +290,14 @@ class DownloadAdapter(
                     }
                     R.id.action_share -> {
                         onActionClick(downloadItem, "share")
+                        true
+                    }
+                    R.id.action_copy_link -> {
+                        onActionClick(downloadItem, "copy_link")
+                        true
+                    }
+                    R.id.action_details -> {
+                        onActionClick(downloadItem, "details")
                         true
                     }
                     else -> false

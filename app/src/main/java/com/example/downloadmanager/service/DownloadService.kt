@@ -12,7 +12,6 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import androidx.lifecycle.LiveData
 import androidx.lifecycle.Observer
 import com.example.downloadmanager.R
 import com.example.downloadmanager.activity.MainActivity
@@ -45,13 +44,12 @@ class DownloadService : Service() {
     private var isForeground = false
     
     private val activeDownloads = mutableMapOf<Long, Boolean>()
-    private val downloadObservers = mutableMapOf<Long, Observer<DownloadItem?>>()
+    private var activeDownloadsObserver: Observer<List<DownloadItem>>? = null
     
     companion object {
         private const val TAG = "DownloadService"
         private const val CHANNEL_ID = "download_service_channel"
         private const val NOTIFICATION_ID = 1001
-        private const val MAX_CONCURRENT_DOWNLOADS = 4
         
         const val ACTION_START_DOWNLOAD = "com.example.downloadmanager.ACTION_START_DOWNLOAD"
         const val ACTION_PAUSE_DOWNLOAD = "com.example.downloadmanager.ACTION_PAUSE_DOWNLOAD"
@@ -75,7 +73,6 @@ class DownloadService : Service() {
         
         Log.d(TAG, "DownloadService created")
         
-        // Initialize database and repositories
         val database = DownloadDatabase.getDatabase(application)
         repository = DownloadRepository(database.downloadDao())
         
@@ -83,10 +80,7 @@ class DownloadService : Service() {
         torrentDownloadManager = TorrentDownloadManager(application, repository)
         videoDownloadManager = VideoDownloadManager(application, repository)
         
-        // Create notification channel
         createNotificationChannel()
-        
-        // Start observing active downloads
         observeActiveDownloads()
     }
     
@@ -97,7 +91,6 @@ class DownloadService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         intent?.let { handleIntent(it) }
         
-        // Start as foreground service if there are active downloads
         if (hasActiveDownloads()) {
             startForegroundService()
         }
@@ -111,6 +104,7 @@ class DownloadService : Service() {
                 val url = intent.getStringExtra(EXTRA_URL) ?: return
                 val filename = intent.getStringExtra(EXTRA_FILENAME)
                 val savePath = intent.getStringExtra(EXTRA_SAVE_PATH)
+                @Suppress("DEPRECATION")
                 val downloadType = intent.getSerializableExtra(EXTRA_DOWNLOAD_TYPE) as? DownloadType
                     ?: DownloadType.DIRECT
                 
@@ -157,27 +151,28 @@ class DownloadService : Service() {
     ) {
         try {
             val downloadId = when (downloadType) {
-                DownloadType.TORRENT -> torrentDownloadManager.startTorrentDownload(
+                DownloadType.TORRENT, DownloadType.MAGNET -> torrentDownloadManager.startTorrentDownload(
                     DownloadItem(
                         url = url,
-                        filename = filename ?: downloadManager.getFilenameFromUrl(url),
-                        savePath = savePath ?: downloadManager.getDefaultDownloadPath(),
+                        filename = if (filename.isNullOrBlank()) downloadManager.getFilenameFromUrl(url) else filename,
+                        savePath = if (savePath.isNullOrBlank()) downloadManager.getDefaultDownloadPath() else savePath,
                         downloadType = downloadType
                     )
                 )
                 DownloadType.VIDEO -> videoDownloadManager.startVideoDownload(
                     DownloadItem(
                         url = url,
-                        filename = filename ?: downloadManager.getFilenameFromUrl(url),
-                        savePath = savePath ?: downloadManager.getDefaultDownloadPath(),
+                        filename = if (filename.isNullOrBlank()) downloadManager.getFilenameFromUrl(url) else filename,
+                        savePath = if (savePath.isNullOrBlank()) downloadManager.getDefaultDownloadPath() else savePath,
                         downloadType = downloadType
                     )
                 )
                 else -> downloadManager.startDownload(url, filename, savePath, downloadType)
             }
             
-            // Start the actual download
-            startDownloadWorker(downloadId)
+            if (downloadType != DownloadType.TORRENT && downloadType != DownloadType.MAGNET) {
+                startDownloadWorker(downloadId)
+            }
             
         } catch (e: Exception) {
             Log.e(TAG, "Error starting download", e)
@@ -205,7 +200,7 @@ class DownloadService : Service() {
         }
     }
     
-    private suspend fun startDirectDownload(downloadItem: DownloadItem) {
+    private fun startDirectDownload(downloadItem: DownloadItem) {
         downloadManager.downloadFile(
             downloadItem = downloadItem,
             onProgress = { downloaded, total, progress, speed ->
@@ -220,7 +215,7 @@ class DownloadService : Service() {
         )
     }
     
-    private suspend fun startTorrentDownload(downloadItem: DownloadItem) {
+    private fun startTorrentDownload(downloadItem: DownloadItem) {
         torrentDownloadManager.downloadVideo(
             downloadItem = downloadItem,
             onProgress = { downloaded, total, progress, speed ->
@@ -235,7 +230,7 @@ class DownloadService : Service() {
         )
     }
     
-    private suspend fun startVideoDownload(downloadItem: DownloadItem) {
+    private fun startVideoDownload(downloadItem: DownloadItem) {
         videoDownloadManager.downloadVideo(
             downloadItem = downloadItem,
             onProgress = { downloaded, total, progress, speed ->
@@ -250,7 +245,7 @@ class DownloadService : Service() {
         )
     }
     
-    private suspend fun startMagnetDownload(downloadItem: DownloadItem) {
+    private fun startMagnetDownload(downloadItem: DownloadItem) {
         torrentDownloadManager.downloadVideo(
             downloadItem = downloadItem,
             onProgress = { downloaded, total, progress, speed ->
@@ -268,7 +263,7 @@ class DownloadService : Service() {
     private fun updateProgress(
         downloadId: Long,
         downloaded: Long,
-        total: Long,
+        @Suppress("UNUSED_PARAMETER") total: Long,
         progress: Int,
         speed: Long
     ) {
@@ -284,7 +279,6 @@ class DownloadService : Service() {
             updateNotification()
             showCompletionNotification(completedItem)
             
-            // Check if we should stop foreground service
             if (!hasActiveDownloads()) {
                 stopForegroundService()
             }
@@ -297,14 +291,13 @@ class DownloadService : Service() {
             updateNotification()
             showErrorNotification(errorItem, error)
             
-            // Check if we should stop foreground service
             if (!hasActiveDownloads()) {
                 stopForegroundService()
             }
         }
     }
     
-    private fun pauseDownload(downloadId: Long) {
+    fun pauseDownload(downloadId: Long) {
         scope.launch {
             val downloadItem = repository.getDownloadById(downloadId) ?: return@launch
             
@@ -317,23 +310,26 @@ class DownloadService : Service() {
         }
     }
     
-    private fun resumeDownload(downloadId: Long) {
+    fun resumeDownload(downloadId: Long) {
         scope.launch {
             val downloadItem = repository.getDownloadById(downloadId) ?: return@launch
             
             when (downloadItem.downloadType) {
-                DownloadType.DIRECT -> downloadManager.resumeDownload(downloadItem)
+                DownloadType.DIRECT -> {
+                    downloadManager.resumeDownload(downloadItem)
+                    startDownloadWorker(downloadId)
+                }
                 DownloadType.TORRENT -> torrentDownloadManager.resumeTorrentDownload(downloadId)
-                DownloadType.VIDEO -> videoDownloadManager.resumeVideoDownload(downloadItem)
+                DownloadType.VIDEO -> {
+                    videoDownloadManager.resumeVideoDownload(downloadItem)
+                    startDownloadWorker(downloadId)
+                }
                 DownloadType.MAGNET -> torrentDownloadManager.resumeTorrentDownload(downloadId)
             }
-            
-            // Restart the download
-            startDownloadWorker(downloadId)
         }
     }
     
-    private fun cancelDownload(downloadId: Long) {
+    fun cancelDownload(downloadId: Long) {
         scope.launch {
             val downloadItem = repository.getDownloadById(downloadId) ?: return@launch
             
@@ -359,7 +355,7 @@ class DownloadService : Service() {
         }
     }
     
-    private fun retryDownload(downloadId: Long) {
+    fun retryDownload(downloadId: Long) {
         scope.launch {
             val downloadItem = repository.getDownloadById(downloadId) ?: return@launch
             
@@ -376,7 +372,6 @@ class DownloadService : Service() {
                 }
             }
             
-            // Restart the download
             startDownloadWorker(downloadId)
         }
     }
@@ -391,7 +386,10 @@ class DownloadService : Service() {
                     torrentDownloadManager.stopTorrentDownload(downloadId)
                     downloadManager.deleteDownload(downloadItem, deleteFile)
                 }
-                DownloadType.VIDEO -> videoDownloadManager.cancelVideoDownload(downloadItem)
+                DownloadType.VIDEO -> {
+                    videoDownloadManager.cancelVideoDownload(downloadItem)
+                    downloadManager.deleteDownload(downloadItem, deleteFile)
+                }
                 DownloadType.MAGNET -> {
                     torrentDownloadManager.stopTorrentDownload(downloadId)
                     downloadManager.deleteDownload(downloadItem, deleteFile)
@@ -405,13 +403,12 @@ class DownloadService : Service() {
     }
     
     private fun observeActiveDownloads() {
-        repository.getActiveDownloads().observeForever { downloads ->
+        val observer = Observer<List<DownloadItem>> { downloads ->
+            activeDownloads.clear()
             downloads.forEach { download ->
                 if (download.status == DownloadStatus.DOWNLOADING || 
                     download.status == DownloadStatus.QUEUED) {
                     activeDownloads[download.id] = true
-                } else {
-                    activeDownloads.remove(download.id)
                 }
             }
             
@@ -421,23 +418,34 @@ class DownloadService : Service() {
                 stopForegroundService()
             }
         }
+        activeDownloadsObserver = observer
+        repository.getActiveDownloads().observeForever(observer)
     }
     
     private fun startForegroundService() {
         if (isForeground) return
         
-        isForeground = true
-        notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        
-        foregroundNotification = createNotification()
-        startForeground(NOTIFICATION_ID, foregroundNotification)
+        try {
+            isForeground = true
+            notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            foregroundNotification = createNotification()
+            startForeground(NOTIFICATION_ID, foregroundNotification)
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not start foreground service", e)
+            isForeground = false
+        }
     }
     
     private fun stopForegroundService() {
         if (!isForeground) return
         
         isForeground = false
-        stopForeground(true)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
         notificationManager = null
         foregroundNotification = null
     }
@@ -553,7 +561,9 @@ class DownloadService : Service() {
         
         Log.d(TAG, "DownloadService destroyed")
         
-        // Clean up
+        activeDownloadsObserver?.let {
+            repository.getActiveDownloads().removeObserver(it)
+        }
         torrentDownloadManager.shutdown()
         executor.shutdown()
         

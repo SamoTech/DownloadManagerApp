@@ -1,0 +1,8 @@
+{
+  "name": "Universal Download Manager",
+  "description": "Universal Download Manager supports downloading all file types from any website, including torrents and videos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

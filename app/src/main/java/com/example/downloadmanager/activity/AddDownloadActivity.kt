@@ -8,16 +8,17 @@ import android.text.Editable
 import android.text.TextWatcher
 import android.util.Log
 import android.view.View
-import android.widget.ArrayAdapter
+import android.view.ViewGroup
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.recyclerview.widget.LinearLayoutManager
 import com.example.downloadmanager.R
 import com.example.downloadmanager.databinding.ActivityAddDownloadBinding
 import com.example.downloadmanager.manager.DownloadManager
 import com.example.downloadmanager.manager.TorrentDownloadManager
 import com.example.downloadmanager.manager.VideoDownloadManager
 import com.example.downloadmanager.model.DownloadDatabase
-import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadType
 import com.example.downloadmanager.model.TorrentFileInfo
@@ -25,11 +26,11 @@ import com.example.downloadmanager.model.TorrentMetadata
 import com.example.downloadmanager.model.VideoFormat
 import com.example.downloadmanager.model.VideoStreamInfo
 import com.example.downloadmanager.service.DownloadService
-import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.FileOutputStream
 
 class AddDownloadActivity : AppCompatActivity() {
     
@@ -58,19 +59,19 @@ class AddDownloadActivity : AppCompatActivity() {
         binding = ActivityAddDownloadBinding.inflate(layoutInflater)
         setContentView(binding.root)
         
-        // Set up toolbar
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         supportActionBar?.title = getString(R.string.add_download)
         
-        // Initialize managers
         val database = DownloadDatabase.getDatabase(application)
         repository = DownloadRepository(database.downloadDao())
         downloadManager = DownloadManager(application, repository)
         torrentDownloadManager = TorrentDownloadManager(application, repository)
         videoDownloadManager = VideoDownloadManager(application, repository)
         
-        // Get download type from intent
+        binding.etSavePath.setText(downloadManager.getDefaultDownloadPath())
+        binding.rvTorrentFiles.layoutManager = LinearLayoutManager(this)
+        
         downloadType = intent.getStringExtra("download_type")?.let { typeName ->
             try {
                 DownloadType.valueOf(typeName)
@@ -79,39 +80,33 @@ class AddDownloadActivity : AppCompatActivity() {
             }
         } ?: DownloadType.DIRECT
         
-        // Set up UI based on download type
         setupUIForDownloadType()
         
-        // Set up URL text change listener
         binding.etUrl.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             
             override fun afterTextChanged(s: Editable?) {
-                val url = s.toString()
+                val url = s.toString().trim()
                 if (url.isNotEmpty()) {
                     updateUIFromUrl(url)
                 }
             }
         })
         
-        // Set up browse button
         binding.btnBrowse.setOnClickListener {
             showFilePicker()
         }
         
-        // Set up torrent browse button
         binding.btnTorrentBrowse.setOnClickListener {
             showFilePicker()
         }
         
-        // Set up start download button
         binding.btnStartDownload.setOnClickListener {
             startDownload()
         }
         
-        // Set up quality selection
         setupQualitySelection()
     }
     
@@ -161,6 +156,11 @@ class AddDownloadActivity : AppCompatActivity() {
                 setupUIForDownloadType()
                 extractVideoInfo(url)
             }
+            else -> {
+                if (binding.etFilename.text.isNullOrBlank()) {
+                    binding.etFilename.setText(downloadManager.getFilenameFromUrl(url))
+                }
+            }
         }
     }
     
@@ -178,24 +178,12 @@ class AddDownloadActivity : AppCompatActivity() {
                     if (torrentMetadata != null) {
                         binding.etFilename.setText(torrentMetadata?.name)
                         setupTorrentFilesList()
-                    } else {
-                        Toast.makeText(
-                            this@AddDownloadActivity,
-                            R.string.error_invalid_url,
-                            Toast.LENGTH_SHORT
-                        ).show()
                     }
-                    
                     binding.btnStartDownload.isEnabled = true
                     binding.btnStartDownload.text = getString(R.string.start_download)
                 }
             } catch (e: Exception) {
                 runOnUiThread {
-                    Toast.makeText(
-                        this@AddDownloadActivity,
-                        R.string.error_connection,
-                        Toast.LENGTH_SHORT
-                    ).show()
                     binding.btnStartDownload.isEnabled = true
                     binding.btnStartDownload.text = getString(R.string.start_download)
                 }
@@ -216,28 +204,15 @@ class AddDownloadActivity : AppCompatActivity() {
                 runOnUiThread {
                     if (videoStreamInfo != null) {
                         binding.etFilename.setText(videoStreamInfo?.video?.title)
-                        // Auto-select best format
                         selectedVideoFormat = videoStreamInfo?.formats?.maxByOrNull { 
                             it.fileSize ?: 0L 
                         }
-                    } else {
-                        Toast.makeText(
-                            this@AddDownloadActivity,
-                            R.string.error_invalid_url,
-                            Toast.LENGTH_SHORT
-                        ).show()
                     }
-                    
                     binding.btnStartDownload.isEnabled = true
                     binding.btnStartDownload.text = getString(R.string.start_download)
                 }
             } catch (e: Exception) {
                 runOnUiThread {
-                    Toast.makeText(
-                        this@AddDownloadActivity,
-                        R.string.error_connection,
-                        Toast.LENGTH_SHORT
-                    ).show()
                     binding.btnStartDownload.isEnabled = true
                     binding.btnStartDownload.text = getString(R.string.start_download)
                 }
@@ -252,7 +227,9 @@ class AddDownloadActivity : AppCompatActivity() {
                 selectedTorrentFiles
             ) { fileIndex, isSelected ->
                 if (isSelected) {
-                    selectedTorrentFiles.add(fileIndex)
+                    if (!selectedTorrentFiles.contains(fileIndex)) {
+                        selectedTorrentFiles.add(fileIndex)
+                    }
                 } else {
                     selectedTorrentFiles.remove(fileIndex)
                 }
@@ -260,7 +237,6 @@ class AddDownloadActivity : AppCompatActivity() {
             
             binding.rvTorrentFiles.adapter = adapter
             
-            // Set up select all checkbox
             binding.cbSelectAllFiles.setOnCheckedChangeListener { _, isChecked ->
                 selectedTorrentFiles.clear()
                 if (isChecked) {
@@ -274,7 +250,6 @@ class AddDownloadActivity : AppCompatActivity() {
     }
     
     private fun setupQualitySelection() {
-        // Set up radio buttons for quality selection
         val qualityOptions = listOf(
             binding.rbBestQuality,
             binding.rbHighQuality,
@@ -290,11 +265,6 @@ class AddDownloadActivity : AppCompatActivity() {
                 }
             }
         }
-        
-        // Set up extract audio checkbox
-        binding.cbExtractAudio.setOnCheckedChangeListener { _, isChecked ->
-            // Handle audio extraction
-        }
     }
     
     private fun updateSelectedQuality(radioButtonId: Int) {
@@ -302,7 +272,7 @@ class AddDownloadActivity : AppCompatActivity() {
             R.id.rbBestQuality -> selectedVideoFormat = videoStreamInfo?.formats?.maxByOrNull { it.fileSize ?: 0L }
             R.id.rbHighQuality -> selectedVideoFormat = videoStreamInfo?.formats?.filter { !it.isAudioOnly }?.maxByOrNull { it.fileSize ?: 0L }
             R.id.rbMediumQuality -> selectedVideoFormat = videoStreamInfo?.formats?.filter { !it.isAudioOnly }?.minByOrNull { 
-                Math.abs((it.fileSize ?: 0L) - 50 * 1024 * 1024) // ~50MB
+                Math.abs((it.fileSize ?: 0L) - 50 * 1024 * 1024)
             }
             R.id.rbLowQuality -> selectedVideoFormat = videoStreamInfo?.formats?.filter { !it.isAudioOnly }?.minByOrNull { it.fileSize ?: 0L }
             R.id.rbAudioOnly -> selectedVideoFormat = videoStreamInfo?.formats?.filter { it.isAudioOnly }?.maxByOrNull { it.audioBitrate ?: 0 }
@@ -310,15 +280,12 @@ class AddDownloadActivity : AppCompatActivity() {
     }
     
     private fun showFilePicker() {
-        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
-            type = "*/*"
-            addCategory(Intent.CATEGORY_OPENABLE)
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+        try {
+            startActivityForResult(intent, REQUEST_CODE_FILE_PICKER)
+        } catch (e: Exception) {
+            Toast.makeText(this, downloadManager.getDefaultDownloadPath(), Toast.LENGTH_SHORT).show()
         }
-        
-        startActivityForResult(
-            Intent.createChooser(intent, getString(R.string.select_file)),
-            REQUEST_CODE_FILE_PICKER
-        )
     }
     
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -326,10 +293,8 @@ class AddDownloadActivity : AppCompatActivity() {
         
         if (requestCode == REQUEST_CODE_FILE_PICKER && resultCode == Activity.RESULT_OK) {
             data?.data?.let { uri ->
-                val path = getPathFromUri(uri)
-                if (path != null) {
-                    binding.etSavePath.setText(path)
-                }
+                val path = getPathFromUri(uri) ?: downloadManager.getDefaultDownloadPath()
+                binding.etSavePath.setText(path)
             }
         }
     }
@@ -340,7 +305,7 @@ class AddDownloadActivity : AppCompatActivity() {
             contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
                 if (cursor.moveToFirst()) {
                     val columnIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                    cursor.getString(columnIndex)
+                    if (columnIndex >= 0) cursor.getString(columnIndex) else null
                 } else {
                     null
                 }
@@ -358,91 +323,33 @@ class AddDownloadActivity : AppCompatActivity() {
         }
         
         val filename = binding.etFilename.text.toString().trim()
+            .ifBlank { downloadManager.getFilenameFromUrl(url) }
         val savePath = binding.etSavePath.text.toString().trim()
+            .ifBlank { downloadManager.getDefaultDownloadPath() }
         
-        if (savePath.isEmpty()) {
-            binding.etSavePath.setText(downloadManager.getDefaultDownloadPath())
+        binding.btnStartDownload.isEnabled = false
+        binding.btnStartDownload.text = getString(R.string.starting_download)
+        
+        Intent(this@AddDownloadActivity, DownloadService::class.java).apply {
+            action = DownloadService.ACTION_START_DOWNLOAD
+            putExtra(DownloadService.EXTRA_URL, url)
+            putExtra(DownloadService.EXTRA_FILENAME, filename)
+            putExtra(DownloadService.EXTRA_SAVE_PATH, savePath)
+            putExtra(DownloadService.EXTRA_DOWNLOAD_TYPE, downloadType)
+            startService(this)
         }
         
-        scope.launch {
-            try {
-                runOnUiThread {
-                    binding.btnStartDownload.isEnabled = false
-                    binding.btnStartDownload.text = getString(R.string.starting_download)
-                }
-                
-                val downloadId = when (downloadType) {
-                    DownloadType.TORRENT -> {
-                        val torrentFile = if (url.endsWith(".torrent")) {
-                            // Download torrent file first
-                            downloadTorrentFile(url, savePath)
-                        } else {
-                            null
-                        }
-                        
-                        torrentDownloadManager.startTorrentDownload(
-                            DownloadItem(
-                                url = url,
-                                filename = filename,
-                                savePath = savePath,
-                                downloadType = downloadType,
-                                magnetUri = if (url.startsWith("magnet:")) url else null,
-                                selectedFiles = selectedTorrentFiles
-                            )
-                        )
-                    }
-                    DownloadType.VIDEO -> {
-                        videoDownloadManager.startVideoDownload(
-                            DownloadItem(
-                                url = url,
-                                filename = filename,
-                                savePath = savePath,
-                                downloadType = downloadType,
-                                videoQuality = selectedVideoFormat?.quality,
-                                isAudioOnly = binding.cbExtractAudio.isChecked
-                            ),
-                            selectedVideoFormat
-                        )
-                    }
-                    else -> {
-                        downloadManager.startDownload(url, filename, savePath, downloadType)
-                    }
-                }
-                
-                runOnUiThread {
-                    Toast.makeText(
-                        this@AddDownloadActivity,
-                        R.string.download_started,
-                        Toast.LENGTH_SHORT
-                    ).show()
-                    
-                    // Start the download service
-                    Intent(this@AddDownloadActivity, DownloadService::class.java).apply {
-                        action = DownloadService.ACTION_START_DOWNLOAD
-                        putExtra(DownloadService.EXTRA_URL, url)
-                        putExtra(DownloadService.EXTRA_FILENAME, filename)
-                        putExtra(DownloadService.EXTRA_SAVE_PATH, savePath)
-                        putExtra(DownloadService.EXTRA_DOWNLOAD_TYPE, downloadType)
-                        startService(this)
-                    }
-                    
-                    finish()
-                }
-            } catch (e: Exception) {
-                runOnUiThread {
-                    Toast.makeText(
-                        this@AddDownloadActivity,
-                        e.message ?: getString(R.string.error_unknown),
-                        Toast.LENGTH_SHORT
-                    ).show()
-                    binding.btnStartDownload.isEnabled = true
-                    binding.btnStartDownload.text = getString(R.string.start_download)
-                }
-            }
-        }
+        Toast.makeText(
+            this@AddDownloadActivity,
+            R.string.download_started,
+            Toast.LENGTH_SHORT
+        ).show()
+        
+        finish()
     }
     
-    private suspend fun downloadTorrentFile(url: String, savePath: String): File? {
+    @Suppress("unused")
+    private fun downloadTorrentFile(url: String, savePath: String): File? {
         return try {
             val filename = downloadManager.getFilenameFromUrl(url)
             val file = File(savePath, filename)
@@ -467,11 +374,10 @@ class AddDownloadActivity : AppCompatActivity() {
     }
     
     override fun onSupportNavigateUp(): Boolean {
-        onBackPressed()
+        onBackPressedDispatcher.onBackPressed()
         return true
     }
     
-    // Torrent file adapter for the RecyclerView
     private inner class TorrentFileAdapter(
         private val files: List<TorrentFileInfo>,
         private val selectedFiles: List<Int>,
@@ -493,6 +399,7 @@ class AddDownloadActivity : AppCompatActivity() {
             val file = files[position]
             holder.filename.text = file.name
             holder.filesize.text = formatFileSize(file.size)
+            holder.checkbox.setOnCheckedChangeListener(null)
             holder.checkbox.isChecked = selectedFiles.contains(position)
             
             holder.checkbox.setOnCheckedChangeListener { _, isChecked ->

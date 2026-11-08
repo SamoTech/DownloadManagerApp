@@ -1,26 +1,20 @@
 package com.example.downloadmanager.manager
 
 import android.app.Application
-import android.content.Context
 import android.os.Environment
 import android.util.Log
 import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
 import com.example.downloadmanager.model.DownloadType
-import com.example.downloadmanager.model.TorrentMetadata
-import com.example.downloadmanager.model.VideoFormat
-import com.example.downloadmanager.model.VideoStreamInfo
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.Response
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
-import java.io.InputStream
 import java.net.URL
 import java.net.URLConnection
 import java.util.concurrent.TimeUnit
@@ -44,10 +38,13 @@ class DownloadManager(
     companion object {
         private const val TAG = "DownloadManager"
         private const val BUFFER_SIZE = 8192
-        private const val CHUNK_SIZE = 1024 * 1024 // 1MB
     }
     
     fun getDefaultDownloadPath(): String {
+        val appDownloads = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+        if (appDownloads != null && (appDownloads.exists() || appDownloads.mkdirs())) {
+            return appDownloads.absolutePath
+        }
         return Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).absolutePath
     }
     
@@ -62,28 +59,29 @@ class DownloadManager(
     
     fun getFileExtension(url: String): String {
         return when {
-            url.contains("magnet:") -> ".torrent"
-            url.endsWith(".torrent") -> ".torrent"
-            url.contains("?") -> url.substring(url.lastIndexOf('.') + 1, url.indexOf('?'))
-            url.contains("&") -> url.substring(url.lastIndexOf('.') + 1, url.indexOf('&'))
-            else -> url.substring(url.lastIndexOf('.') + 1)
+            url.contains("magnet:") -> "torrent"
+            url.endsWith(".torrent") -> "torrent"
+            url.contains("?") -> url.substringBefore('?').substringAfterLast('.', "")
+            url.contains("&") -> url.substringBefore('&').substringAfterLast('.', "")
+            else -> url.substringAfterLast('.', "")
         }.lowercase()
     }
     
     fun getFilenameFromUrl(url: String): String {
         return when {
             url.contains("magnet:") -> {
-                val displayName = url.substringAfter("dn=").substringBefore("&")
+                val displayName = url.substringAfter("dn=", "").substringBefore("&")
                 if (displayName.isNotEmpty()) displayName else "magnet_${System.currentTimeMillis()}"
             }
             url.endsWith("/") -> "index.html"
             else -> {
                 val filename = url.substringAfterLast("/")
-                if (filename.contains("?")) {
+                val clean = if (filename.contains("?")) {
                     filename.substringBefore("?")
                 } else {
                     filename
                 }
+                clean.ifBlank { "download_${System.currentTimeMillis()}" }
             }
         }
     }
@@ -116,8 +114,8 @@ class DownloadManager(
         downloadType: DownloadType = DownloadType.DIRECT
     ): Long {
         return try {
-            val finalFilename = filename ?: getFilenameFromUrl(url)
-            val finalSavePath = savePath ?: getDefaultDownloadPath()
+            val finalFilename = if (filename.isNullOrBlank()) getFilenameFromUrl(url) else filename
+            val finalSavePath = if (savePath.isNullOrBlank()) getDefaultDownloadPath() else savePath
             
             val existing = repository.getDownloadByUrl(url)
             if (existing != null) {
@@ -151,8 +149,8 @@ class DownloadManager(
             Log.e(TAG, "Error starting download: $url", e)
             val errorItem = DownloadItem(
                 url = url,
-                filename = filename ?: getFilenameFromUrl(url),
-                savePath = savePath ?: getDefaultDownloadPath(),
+                filename = if (filename.isNullOrBlank()) getFilenameFromUrl(url) else filename,
+                savePath = if (savePath.isNullOrBlank()) getDefaultDownloadPath() else savePath,
                 status = DownloadStatus.FAILED,
                 errorMessage = e.message ?: "Unknown error",
                 downloadType = downloadType
@@ -162,7 +160,7 @@ class DownloadManager(
         }
     }
     
-    private suspend fun getContentLength(url: String): Long {
+    private fun getContentLength(url: String): Long {
         return try {
             if (url.startsWith("magnet:") || url.endsWith(".torrent")) {
                 return 0L
@@ -172,7 +170,7 @@ class DownloadManager(
             connection.connectTimeout = 5000
             connection.readTimeout = 5000
             connection.connect()
-            connection.contentLengthLong
+            connection.contentLengthLong.coerceAtLeast(0L)
         } catch (e: Exception) {
             Log.e(TAG, "Error getting content length: $url", e)
             0L
@@ -205,10 +203,10 @@ class DownloadManager(
             try {
                 repository.updateStatus(downloadItem.id, DownloadStatus.DOWNLOADING)
                 
-                val url = downloadItem.url
+                createDownloadDirectory(downloadItem.savePath)
                 val file = File(downloadItem.savePath, downloadItem.filename)
                 
-                if (downloadItem.isResumable && file.exists()) {
+                if (downloadItem.isResumable && file.exists() && file.length() > 0) {
                     downloadWithResume(downloadItem, file, onProgress, onComplete, onError)
                 } else {
                     downloadFresh(downloadItem, file, onProgress, onComplete, onError)
@@ -226,168 +224,174 @@ class DownloadManager(
         }
     }
     
-    private suspend fun downloadFresh(
+    private fun downloadFresh(
         downloadItem: DownloadItem,
         file: File,
         onProgress: (Long, Long, Int, Long) -> Unit,
         onComplete: (DownloadItem) -> Unit,
         onError: (DownloadItem, String) -> Unit
     ) {
-        try {
-            val url = downloadItem.url
-            val request = Request.Builder().url(url).build()
-            
-            okHttpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    throw IOException("HTTP ${response.code}: ${response.message}")
-                }
+        scope.launch {
+            try {
+                val url = downloadItem.url
+                val request = Request.Builder().url(url).build()
                 
-                val contentLength = response.body?.contentLength() ?: 0L
-                val inputStream = response.body?.byteStream() ?: throw IOException("No input stream")
-                
-                FileOutputStream(file).use { outputStream ->
-                    val buffer = ByteArray(BUFFER_SIZE)
-                    var bytesRead: Int
-                    var totalRead: Long = 0
-                    var lastUpdateTime = System.currentTimeMillis()
-                    var lastRead: Long = 0
+                okHttpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw IOException("HTTP ${response.code}: ${response.message}")
+                    }
                     
-                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                        outputStream.write(buffer, 0, bytesRead)
-                        totalRead += bytesRead
+                    val contentLength = (response.body?.contentLength() ?: 0L).coerceAtLeast(0L)
+                    val inputStream = response.body?.byteStream() ?: throw IOException("No input stream")
+                    
+                    FileOutputStream(file).use { outputStream ->
+                        val buffer = ByteArray(BUFFER_SIZE)
+                        var bytesRead: Int
+                        var totalRead: Long = 0
+                        var lastUpdateTime = System.currentTimeMillis()
+                        var lastRead: Long = 0
                         
-                        val currentTime = System.currentTimeMillis()
-                        if (currentTime - lastUpdateTime >= 500) {
-                            val timeDiff = (currentTime - lastUpdateTime) / 1000.0
-                            val bytesDiff = totalRead - lastRead
-                            val speed = (bytesDiff / timeDiff).toLong()
+                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                            outputStream.write(buffer, 0, bytesRead)
+                            totalRead += bytesRead
                             
-                            val progress = if (contentLength > 0) {
-                                ((totalRead * 100.0) / contentLength).toInt()
-                            } else {
-                                0
+                            val currentTime = System.currentTimeMillis()
+                            if (currentTime - lastUpdateTime >= 500) {
+                                val timeDiff = (currentTime - lastUpdateTime) / 1000.0
+                                val bytesDiff = totalRead - lastRead
+                                val speed = if (timeDiff > 0) (bytesDiff / timeDiff).toLong() else 0L
+                                
+                                val progress = if (contentLength > 0) {
+                                    ((totalRead * 100.0) / contentLength).toInt()
+                                } else {
+                                    0
+                                }
+                                
+                                onProgress(totalRead, contentLength, progress, speed)
+                                
+                                lastUpdateTime = currentTime
+                                lastRead = totalRead
                             }
-                            
-                            onProgress(totalRead, contentLength, progress, speed)
-                            
-                            lastUpdateTime = currentTime
-                            lastRead = totalRead
                         }
+                        
+                        val progress = if (contentLength > 0) {
+                            ((totalRead * 100.0) / contentLength).toInt()
+                        } else {
+                            100
+                        }
+                        onProgress(totalRead, contentLength, progress, 0)
                     }
-                    
-                    val progress = if (contentLength > 0) {
-                        ((totalRead * 100.0) / contentLength).toInt()
-                    } else {
-                        100
-                    }
-                    onProgress(totalRead, contentLength, progress, 0)
                 }
+                
+                val completedItem = downloadItem.copy(
+                    fileSize = file.length(),
+                    downloadedSize = file.length(),
+                    progress = 100,
+                    downloadSpeed = 0,
+                    status = DownloadStatus.COMPLETED,
+                    completedDate = java.util.Date()
+                )
+                repository.update(completedItem)
+                onComplete(completedItem)
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in fresh download: ${downloadItem.url}", e)
+                file.delete()
+                val errorItem = downloadItem.copy(
+                    status = DownloadStatus.FAILED,
+                    errorMessage = e.message ?: "Unknown error"
+                )
+                repository.update(errorItem)
+                onError(errorItem, e.message ?: "Unknown error")
             }
-            
-            val completedItem = downloadItem.copy(
-                downloadedSize = file.length(),
-                progress = 100,
-                status = DownloadStatus.COMPLETED,
-                completedDate = java.util.Date()
-            )
-            repository.update(completedItem)
-            onComplete(completedItem)
-            
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in fresh download: ${downloadItem.url}", e)
-            file.delete()
-            val errorItem = downloadItem.copy(
-                status = DownloadStatus.FAILED,
-                errorMessage = e.message ?: "Unknown error"
-            )
-            repository.update(errorItem)
-            onError(errorItem, e.message ?: "Unknown error")
         }
     }
     
-    private suspend fun downloadWithResume(
+    private fun downloadWithResume(
         downloadItem: DownloadItem,
         file: File,
         onProgress: (Long, Long, Int, Long) -> Unit,
         onComplete: (DownloadItem) -> Unit,
         onError: (DownloadItem, String) -> Unit
     ) {
-        try {
-            val url = downloadItem.url
-            val existingSize = file.length()
-            
-            val request = Request.Builder()
-                .url(url)
-                .header("Range", "bytes=${existingSize}-")
-                .build()
-            
-            okHttpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    throw IOException("HTTP ${response.code}: ${response.message}")
-                }
+        scope.launch {
+            try {
+                val url = downloadItem.url
+                val existingSize = file.length()
                 
-                val contentLength = response.body?.contentLength() ?: 0L
-                val totalSize = existingSize + contentLength
-                val inputStream = response.body?.byteStream() ?: throw IOException("No input stream")
+                val request = Request.Builder()
+                    .url(url)
+                    .header("Range", "bytes=${existingSize}-")
+                    .build()
                 
-                FileOutputStream(file, true).use { outputStream ->
-                    outputStream.seek(existingSize)
+                okHttpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw IOException("HTTP ${response.code}: ${response.message}")
+                    }
                     
-                    val buffer = ByteArray(BUFFER_SIZE)
-                    var bytesRead: Int
-                    var totalRead: Long = existingSize
-                    var lastUpdateTime = System.currentTimeMillis()
-                    var lastRead: Long = existingSize
+                    val contentLength = (response.body?.contentLength() ?: 0L).coerceAtLeast(0L)
+                    val totalSize = existingSize + contentLength
+                    val inputStream = response.body?.byteStream() ?: throw IOException("No input stream")
                     
-                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                        outputStream.write(buffer, 0, bytesRead)
-                        totalRead += bytesRead
+                    FileOutputStream(file, true).use { outputStream ->
+                        val buffer = ByteArray(BUFFER_SIZE)
+                        var bytesRead: Int
+                        var totalRead: Long = existingSize
+                        var lastUpdateTime = System.currentTimeMillis()
+                        var lastRead: Long = existingSize
                         
-                        val currentTime = System.currentTimeMillis()
-                        if (currentTime - lastUpdateTime >= 500) {
-                            val timeDiff = (currentTime - lastUpdateTime) / 1000.0
-                            val bytesDiff = totalRead - lastRead
-                            val speed = (bytesDiff / timeDiff).toLong()
+                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                            outputStream.write(buffer, 0, bytesRead)
+                            totalRead += bytesRead
                             
-                            val progress = if (totalSize > 0) {
-                                ((totalRead * 100.0) / totalSize).toInt()
-                            } else {
-                                0
+                            val currentTime = System.currentTimeMillis()
+                            if (currentTime - lastUpdateTime >= 500) {
+                                val timeDiff = (currentTime - lastUpdateTime) / 1000.0
+                                val bytesDiff = totalRead - lastRead
+                                val speed = if (timeDiff > 0) (bytesDiff / timeDiff).toLong() else 0L
+                                
+                                val progress = if (totalSize > 0) {
+                                    ((totalRead * 100.0) / totalSize).toInt()
+                                } else {
+                                    0
+                                }
+                                
+                                onProgress(totalRead, totalSize, progress, speed)
+                                
+                                lastUpdateTime = currentTime
+                                lastRead = totalRead
                             }
-                            
-                            onProgress(totalRead, totalSize, progress, speed)
-                            
-                            lastUpdateTime = currentTime
-                            lastRead = totalRead
                         }
+                        
+                        val progress = if (totalSize > 0) {
+                            ((totalRead * 100.0) / totalSize).toInt()
+                        } else {
+                            100
+                        }
+                        onProgress(totalRead, totalSize, progress, 0)
                     }
-                    
-                    val progress = if (totalSize > 0) {
-                        ((totalRead * 100.0) / totalSize).toInt()
-                    } else {
-                        100
-                    }
-                    onProgress(totalRead, totalSize, progress, 0)
                 }
+                
+                val completedItem = downloadItem.copy(
+                    fileSize = file.length(),
+                    downloadedSize = file.length(),
+                    progress = 100,
+                    downloadSpeed = 0,
+                    status = DownloadStatus.COMPLETED,
+                    completedDate = java.util.Date()
+                )
+                repository.update(completedItem)
+                onComplete(completedItem)
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in resume download: ${downloadItem.url}", e)
+                val errorItem = downloadItem.copy(
+                    status = DownloadStatus.FAILED,
+                    errorMessage = e.message ?: "Unknown error"
+                )
+                repository.update(errorItem)
+                onError(errorItem, e.message ?: "Unknown error")
             }
-            
-            val completedItem = downloadItem.copy(
-                downloadedSize = file.length(),
-                progress = 100,
-                status = DownloadStatus.COMPLETED,
-                completedDate = java.util.Date()
-            )
-            repository.update(completedItem)
-            onComplete(completedItem)
-            
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in resume download: ${downloadItem.url}", e)
-            val errorItem = downloadItem.copy(
-                status = DownloadStatus.FAILED,
-                errorMessage = e.message ?: "Unknown error"
-            )
-            repository.update(errorItem)
-            onError(errorItem, e.message ?: "Unknown error")
         }
     }
     

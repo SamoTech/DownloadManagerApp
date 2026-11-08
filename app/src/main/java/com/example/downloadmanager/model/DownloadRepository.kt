@@ -33,6 +33,10 @@ class DownloadRepository(private val downloadDao: DownloadDao) {
     suspend fun getDownloadById(id: Long): DownloadItem? {
         return downloadDao.getDownloadById(id)
     }
+
+    fun observeDownloadById(id: Long): LiveData<DownloadItem?> {
+        return downloadDao.observeDownloadById(id)
+    }
     
     fun getActiveDownloads(): LiveData<List<DownloadItem>> {
         return downloadDao.getActiveDownloads(
@@ -58,10 +62,13 @@ class DownloadRepository(private val downloadDao: DownloadDao) {
     
     suspend fun updateProgress(id: Long, progress: Int, downloadedSize: Long, speed: Long) {
         val download = downloadDao.getDownloadById(id) ?: return
+        val remaining = (download.fileSize - downloadedSize).coerceAtLeast(0L)
+        val etaSeconds = if (speed > 0 && remaining > 0) remaining / speed else 0L
         download.copy(
             progress = progress,
             downloadedSize = downloadedSize,
-            downloadSpeed = speed
+            downloadSpeed = speed,
+            eta = etaSeconds
         ).let { updated ->
             downloadDao.update(updated)
         }

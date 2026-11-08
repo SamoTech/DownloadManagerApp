@@ -2,6 +2,7 @@ package com.example.downloadmanager.model
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey
+import androidx.room.TypeConverter
 import androidx.room.TypeConverters
 import java.util.Date
 
@@ -58,24 +59,45 @@ enum class DownloadType {
 }
 
 class DownloadStatusConverter {
-    @androidx.room.TypeConverter
+    @TypeConverter
     fun fromStatus(status: DownloadStatus): String {
         return status.name
     }
 
-    @androidx.room.TypeConverter
+    @TypeConverter
     fun toStatus(status: String): DownloadStatus {
         return DownloadStatus.valueOf(status)
+    }
+
+    @TypeConverter
+    fun fromTimestamp(value: Long?): Date? {
+        return value?.let { Date(it) }
+    }
+
+    @TypeConverter
+    fun dateToTimestamp(date: Date?): Long? {
+        return date?.time
+    }
+
+    @TypeConverter
+    fun fromIntList(list: List<Int>?): String? {
+        return list?.joinToString(",")
+    }
+
+    @TypeConverter
+    fun toIntList(data: String?): List<Int>? {
+        if (data.isNullOrBlank()) return emptyList()
+        return data.split(",").mapNotNull { it.trim().toIntOrNull() }
     }
 }
 
 class DownloadTypeConverter {
-    @androidx.room.TypeConverter
+    @TypeConverter
     fun fromType(type: DownloadType): String {
         return type.name
     }
 
-    @androidx.room.TypeConverter
+    @TypeConverter
     fun toType(type: String): DownloadType {
         return DownloadType.valueOf(type)
     }

@@ -15,11 +15,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.Response
-import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
-import java.net.URL
 import java.util.concurrent.TimeUnit
 
 class VideoDownloadManager(
@@ -39,7 +36,6 @@ class VideoDownloadManager(
     
     companion object {
         private const val TAG = "VideoDownloadManager"
-        private const val YOUTUBE_BASE_URL = "https://www.youtube.com"
         private const val BUFFER_SIZE = 8192
     }
     
@@ -74,7 +70,7 @@ class VideoDownloadManager(
         }
     }
     
-    private suspend fun extractYouTubeInfo(url: String): VideoStreamInfo? {
+    private fun extractYouTubeInfo(url: String): VideoStreamInfo? {
         return try {
             val youTubeExtractor = YouTubeExtractor(context)
             val videoInfo = youTubeExtractor.extract(url) ?: return null
@@ -83,13 +79,13 @@ class VideoDownloadManager(
                 VideoFormat(
                     formatId = format.formatId,
                     url = format.url,
-                    quality = format.qualityLabel,
+                    quality = format.quality,
                     resolution = format.resolution,
                     fps = format.fps,
                     bitrate = format.bitrate,
                     codec = format.codec,
                     container = format.container,
-                    fileSize = format.contentLength,
+                    fileSize = format.fileSize,
                     isAudioOnly = format.isAudioOnly,
                     audioBitrate = format.audioBitrate,
                     sampleRate = format.sampleRate
@@ -123,7 +119,7 @@ class VideoDownloadManager(
         }
     }
     
-    private suspend fun extractVimeoInfo(url: String): VideoStreamInfo? {
+    private fun extractVimeoInfo(url: String): VideoStreamInfo? {
         return try {
             val response = okHttpClient.newCall(Request.Builder().url(url).build()).execute()
             val html = response.body?.string() ?: return null
@@ -153,32 +149,32 @@ class VideoDownloadManager(
         }
     }
     
-    private suspend fun extractFacebookInfo(url: String): VideoStreamInfo? {
+    private fun extractFacebookInfo(url: String): VideoStreamInfo? {
         return genericVideoInfo(url, "Facebook")
     }
     
-    private suspend fun extractInstagramInfo(url: String): VideoStreamInfo? {
+    private fun extractInstagramInfo(url: String): VideoStreamInfo? {
         return genericVideoInfo(url, "Instagram")
     }
     
-    private suspend fun extractTwitterInfo(url: String): VideoStreamInfo? {
+    private fun extractTwitterInfo(url: String): VideoStreamInfo? {
         return genericVideoInfo(url, "Twitter")
     }
     
-    private suspend fun extractTikTokInfo(url: String): VideoStreamInfo? {
+    private fun extractTikTokInfo(url: String): VideoStreamInfo? {
         return genericVideoInfo(url, "TikTok")
     }
     
-    private suspend fun extractGenericVideoInfo(url: String): VideoStreamInfo? {
+    private fun extractGenericVideoInfo(url: String): VideoStreamInfo? {
         return try {
             val response = okHttpClient.newCall(Request.Builder().url(url).build()).execute()
-            val contentType = response.headers.get("Content-Type") ?: return null
+            val contentType = response.headers.get("Content-Type") ?: return genericVideoInfo(url, "Video")
             
             if (contentType.startsWith("video/")) {
                 VideoStreamInfo(
                     video = VideoInfo(
                         id = url,
-                        title = url.substringAfterLast("/"),
+                        title = url.substringAfterLast("/").ifBlank { "Video" },
                         url = url
                     ),
                     formats = listOf(
@@ -191,14 +187,14 @@ class VideoDownloadManager(
                     )
                 )
             } else {
-                null
+                genericVideoInfo(url, "Video")
             }
         } catch (e: Exception) {
-            null
+            genericVideoInfo(url, "Video")
         }
     }
     
-    private fun genericVideoInfo(url: String, platform: String): VideoStreamInfo? {
+    private fun genericVideoInfo(url: String, platform: String): VideoStreamInfo {
         return VideoStreamInfo(
             video = VideoInfo(
                 id = url,
@@ -208,7 +204,7 @@ class VideoDownloadManager(
             formats = listOf(
                 VideoFormat(
                     formatId = "mp4",
-                    url = "$url/video.mp4",
+                    url = url,
                     quality = "Best",
                     container = "mp4"
                 )
@@ -245,20 +241,24 @@ class VideoDownloadManager(
             
             val videoInfo = extractVideoInfo(downloadItem.url) ?: throw Exception("Could not extract video info")
             
-            val selectedFormat = selectBestFormat(videoInfo.formats, quality)
+            val selectedFormat = videoFormat ?: selectBestFormat(videoInfo.formats, quality)
             
             val finalUrl = selectedFormat?.url ?: videoInfo.formats.firstOrNull()?.url
                 ?: throw Exception("No downloadable video format found")
             
-            val finalFilename = selectedFormat?.let { format ->
-                val ext = when (format.container) {
-                    "mp4" -> ".mp4"
-                    "webm" -> ".webm"
-                    "flv" -> ".flv"
-                    else -> ".mp4"
-                }
-                "${videoInfo.video.title.replace("[^a-zA-Z0-9]".toRegex(), "_")}$ext"
-            } ?: "${videoInfo.video.title.replace("[^a-zA-Z0-9]".toRegex(), "_")}.mp4"
+            val finalFilename = if (downloadItem.filename.isNotBlank()) {
+                downloadItem.filename
+            } else {
+                selectedFormat?.let { format ->
+                    val ext = when (format.container) {
+                        "mp4" -> ".mp4"
+                        "webm" -> ".webm"
+                        "flv" -> ".flv"
+                        else -> ".mp4"
+                    }
+                    "${videoInfo.video.title.replace("[^a-zA-Z0-9]".toRegex(), "_")}$ext"
+                } ?: "${videoInfo.video.title.replace("[^a-zA-Z0-9]".toRegex(), "_")}.mp4"
+            }
             
             val updatedItem = downloadItem.copy(
                 id = id,
@@ -268,7 +268,7 @@ class VideoDownloadManager(
                 videoUrl = downloadItem.url,
                 videoTitle = videoInfo.video.title,
                 videoQuality = selectedFormat?.quality ?: quality,
-                isAudioOnly = selectedFormat?.isAudioOnly ?: false,
+                isAudioOnly = selectedFormat?.isAudioOnly ?: downloadItem.isAudioOnly,
                 status = DownloadStatus.QUEUED
             )
             
@@ -309,6 +309,8 @@ class VideoDownloadManager(
             try {
                 repository.updateStatus(downloadItem.id, DownloadStatus.DOWNLOADING)
                 
+                val dir = File(downloadItem.savePath)
+                if (!dir.exists()) dir.mkdirs()
                 val file = File(downloadItem.savePath, downloadItem.filename)
                 val url = downloadItem.url
                 
@@ -319,7 +321,7 @@ class VideoDownloadManager(
                         throw Exception("HTTP ${response.code}: ${response.message}")
                     }
                     
-                    val contentLength = response.body?.contentLength() ?: 0L
+                    val contentLength = (response.body?.contentLength() ?: 0L).coerceAtLeast(0L)
                     val inputStream = response.body?.byteStream() ?: throw Exception("No input stream")
                     
                     FileOutputStream(file).use { outputStream ->
@@ -337,7 +339,7 @@ class VideoDownloadManager(
                             if (currentTime - lastUpdateTime >= 500) {
                                 val timeDiff = (currentTime - lastUpdateTime) / 1000.0
                                 val bytesDiff = totalRead - lastRead
-                                val speed = (bytesDiff / timeDiff).toLong()
+                                val speed = if (timeDiff > 0) (bytesDiff / timeDiff).toLong() else 0L
                                 
                                 val progress = if (contentLength > 0) {
                                     ((totalRead * 100.0) / contentLength).toInt()
@@ -362,6 +364,7 @@ class VideoDownloadManager(
                 }
                 
                 val completedItem = downloadItem.copy(
+                    fileSize = file.length(),
                     downloadedSize = file.length(),
                     progress = 100,
                     status = DownloadStatus.COMPLETED,
@@ -406,6 +409,18 @@ class VideoDownloadManager(
                 file.delete()
             }
             repository.updateStatus(downloadItem.id, DownloadStatus.CANCELLED)
+        }
+    }
+
+    fun retryDownload(downloadItem: DownloadItem) {
+        scope.launch {
+            val resetItem = downloadItem.copy(
+                downloadedSize = 0,
+                progress = 0,
+                status = DownloadStatus.QUEUED,
+                errorMessage = null
+            )
+            repository.update(resetItem)
         }
     }
 }

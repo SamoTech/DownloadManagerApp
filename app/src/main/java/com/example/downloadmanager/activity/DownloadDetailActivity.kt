@@ -1,13 +1,15 @@
 package com.example.downloadmanager.activity
 
+import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.FileProvider
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
 import com.example.downloadmanager.R
 import com.example.downloadmanager.databinding.ActivityDownloadDetailBinding
 import com.example.downloadmanager.model.DownloadDatabase
@@ -15,6 +17,8 @@ import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
 import com.example.downloadmanager.service.DownloadService
+import kotlinx.coroutines.launch
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -49,12 +53,10 @@ class DownloadDetailActivity : AppCompatActivity() {
         binding = ActivityDownloadDetailBinding.inflate(layoutInflater)
         setContentView(binding.root)
         
-        // Set up toolbar
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         supportActionBar?.title = getString(R.string.download_details)
         
-        // Get download ID from intent
         downloadId = intent.getLongExtra("download_id", -1L)
         if (downloadId == -1L) {
             Toast.makeText(this, R.string.error_invalid_download, Toast.LENGTH_SHORT).show()
@@ -62,73 +64,50 @@ class DownloadDetailActivity : AppCompatActivity() {
             return
         }
         
-        // Initialize ViewModel
         val database = DownloadDatabase.getDatabase(application)
         val repository = DownloadRepository(database.downloadDao())
         viewModel = ViewModelProvider(this, DownloadDetailViewModelFactory(repository, downloadId))
             .get(DownloadDetailViewModel::class.java)
         
-        // Observe download
         viewModel.download.observe(this, Observer { downloadItem ->
             downloadItem?.let { updateUI(it) }
         })
         
-        // Set up action buttons
         setupActionButtons()
-        
-        // Start DownloadService
         startDownloadService()
     }
     
     private fun updateUI(downloadItem: DownloadItem) {
-        // Set filename
         binding.tvFilename.text = downloadItem.filename
-        
-        // Set URL
         binding.tvUrl.text = downloadItem.url
-        
-        // Set save path
         binding.tvSavePath.text = getString(R.string.save_path, "${downloadItem.savePath}/${downloadItem.filename}")
-        
-        // Set file size
         binding.tvFileSize.text = getString(R.string.file_size, formatFileSize(downloadItem.fileSize))
-        
-        // Set downloaded size
         binding.tvDownloadedSize.text = formatFileSize(downloadItem.downloadedSize)
-        
-        // Set progress
         binding.tvProgress.text = getString(R.string.download_progress, downloadItem.progress)
         binding.progressBar.progress = downloadItem.progress
-        
-        // Set status
         binding.tvStatus.text = getString(R.string.status, getStatusText(downloadItem.status))
         
-        // Set download speed
         if (downloadItem.downloadSpeed > 0) {
             binding.tvDownloadSpeed.text = getString(R.string.download_speed, formatSpeed(downloadItem.downloadSpeed))
         } else {
             binding.tvDownloadSpeed.text = getString(R.string.unknown_speed)
         }
         
-        // Set ETA
         if (downloadItem.eta > 0) {
             binding.tvEta.text = getString(R.string.eta, formatDuration(downloadItem.eta * 1000))
         } else {
             binding.tvEta.text = getString(R.string.unknown_eta)
         }
         
-        // Set added date
         binding.tvAddedDate.text = getString(R.string.added_on, formatDate(downloadItem.addedDate))
         
-        // Set completed date
         if (downloadItem.completedDate != null) {
-            binding.tvCompletedDate.text = getString(R.string.completed_on, formatDate(downloadItem.completedDate!!))
+            binding.tvCompletedDate.text = getString(R.string.completed_on, formatDate(downloadItem.completedDate))
             binding.tvCompletedDate.visibility = View.VISIBLE
         } else {
             binding.tvCompletedDate.visibility = View.GONE
         }
         
-        // Set error message
         if (!downloadItem.errorMessage.isNullOrEmpty()) {
             binding.tvErrorMessage.text = downloadItem.errorMessage
             binding.tvErrorMessage.visibility = View.VISIBLE
@@ -136,11 +115,10 @@ class DownloadDetailActivity : AppCompatActivity() {
             binding.tvErrorMessage.visibility = View.GONE
         }
         
-        // Set file type icon
         binding.ivFileType.setImageResource(getFileTypeIcon(downloadItem))
         
-        // Show/hide torrent info
-        if (downloadItem.downloadType == com.example.downloadmanager.model.DownloadType.TORRENT) {
+        if (downloadItem.downloadType == com.example.downloadmanager.model.DownloadType.TORRENT ||
+            downloadItem.downloadType == com.example.downloadmanager.model.DownloadType.MAGNET) {
             binding.torrentInfo.visibility = View.VISIBLE
             binding.tvPeers.text = getString(R.string.peers, downloadItem.peers)
             binding.tvSeeds.text = getString(R.string.seeds, downloadItem.seeds)
@@ -156,7 +134,6 @@ class DownloadDetailActivity : AppCompatActivity() {
             binding.torrentInfo.visibility = View.GONE
         }
         
-        // Show/hide video info
         if (downloadItem.downloadType == com.example.downloadmanager.model.DownloadType.VIDEO) {
             binding.videoInfo.visibility = View.VISIBLE
             binding.tvVideoTitle.text = downloadItem.videoTitle ?: ""
@@ -165,7 +142,6 @@ class DownloadDetailActivity : AppCompatActivity() {
             binding.videoInfo.visibility = View.GONE
         }
         
-        // Update action buttons based on status
         updateActionButtons(downloadItem)
     }
     
@@ -205,10 +181,11 @@ class DownloadDetailActivity : AppCompatActivity() {
                 binding.btnAction2.visibility = View.VISIBLE
                 binding.btnAction3.visibility = View.GONE
             }
-            DownloadStatus.FAILED -> {
+            DownloadStatus.FAILED, DownloadStatus.CANCELLED -> {
                 binding.btnAction1.text = getString(R.string.retry)
                 binding.btnAction1.visibility = View.VISIBLE
-                binding.btnAction2.visibility = View.GONE
+                binding.btnAction2.text = getString(R.string.delete)
+                binding.btnAction2.visibility = View.VISIBLE
                 binding.btnAction3.visibility = View.GONE
             }
             DownloadStatus.COMPLETED -> {
@@ -233,14 +210,17 @@ class DownloadDetailActivity : AppCompatActivity() {
                 when (downloadItem.status) {
                     DownloadStatus.DOWNLOADING -> pauseDownload(downloadItem)
                     DownloadStatus.PAUSED -> resumeDownload(downloadItem)
-                    DownloadStatus.FAILED -> retryDownload(downloadItem)
+                    DownloadStatus.FAILED, DownloadStatus.CANCELLED -> retryDownload(downloadItem)
                     DownloadStatus.COMPLETED -> openFile(downloadItem)
+                    else -> {}
                 }
             }
             "secondary" -> {
                 when (downloadItem.status) {
                     DownloadStatus.DOWNLOADING, DownloadStatus.PAUSED -> cancelDownload(downloadItem)
+                    DownloadStatus.FAILED, DownloadStatus.CANCELLED -> showDeleteConfirmation(downloadItem)
                     DownloadStatus.COMPLETED -> shareFile(downloadItem)
+                    else -> {}
                 }
             }
             "tertiary" -> {
@@ -285,14 +265,13 @@ class DownloadDetailActivity : AppCompatActivity() {
     
     private fun openFile(downloadItem: DownloadItem) {
         try {
-            val file = java.io.File(downloadItem.savePath, downloadItem.filename)
+            val file = File(downloadItem.savePath, downloadItem.filename)
             if (file.exists()) {
-                val intent = Intent(Intent.ACTION_VIEW)
-                intent.setDataAndType(
-                    Uri.fromFile(file),
-                    downloadItem.mimeType
-                )
-                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, downloadItem.mimeType.ifBlank { "*/*" })
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
                 startActivity(intent)
             } else {
                 Toast.makeText(this, R.string.error_file_not_found, Toast.LENGTH_SHORT).show()
@@ -304,11 +283,14 @@ class DownloadDetailActivity : AppCompatActivity() {
     
     private fun shareFile(downloadItem: DownloadItem) {
         try {
-            val file = java.io.File(downloadItem.savePath, downloadItem.filename)
+            val file = File(downloadItem.savePath, downloadItem.filename)
             if (file.exists()) {
-                val intent = Intent(Intent.ACTION_SEND)
-                intent.type = downloadItem.mimeType
-                intent.putExtra(Intent.EXTRA_STREAM, Uri.fromFile(file))
+                val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = downloadItem.mimeType.ifBlank { "*/*" }
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
                 startActivity(Intent.createChooser(intent, getString(R.string.share)))
             } else {
                 Toast.makeText(this, R.string.error_file_not_found, Toast.LENGTH_SHORT).show()
@@ -346,12 +328,10 @@ class DownloadDetailActivity : AppCompatActivity() {
     }
     
     private fun startDownloadService() {
-        // Start the service
         Intent(this, DownloadService::class.java).apply {
             startService(this)
         }
         
-        // Bind to the service
         bindService(
             Intent(this, DownloadService::class.java),
             serviceConnection,
@@ -375,9 +355,9 @@ class DownloadDetailActivity : AppCompatActivity() {
     }
     
     private fun formatSpeed(bytesPerSecond: Long): String {
-        if (bytesPerSecond <= 0) return "0B/s"
+        if (bytesPerSecond <= 0) return "0B"
         
-        val units = arrayOf("B/s", "KB/s", "MB/s", "GB/s")
+        val units = arrayOf("B", "KB", "MB", "GB")
         var speed = bytesPerSecond.toDouble()
         var unitIndex = 0
         
@@ -436,13 +416,12 @@ class DownloadDetailActivity : AppCompatActivity() {
     }
     
     override fun onSupportNavigateUp(): Boolean {
-        onBackPressed()
+        onBackPressedDispatcher.onBackPressed()
         return true
     }
     
     override fun onStart() {
         super.onStart()
-        // Bind to service
         bindService(
             Intent(this, DownloadService::class.java),
             serviceConnection,
@@ -452,7 +431,6 @@ class DownloadDetailActivity : AppCompatActivity() {
     
     override fun onStop() {
         super.onStop()
-        // Unbind from service
         if (isBound) {
             unbindService(serviceConnection)
             isBound = false
@@ -462,16 +440,13 @@ class DownloadDetailActivity : AppCompatActivity() {
 
 class DownloadDetailViewModel(
     private val repository: DownloadRepository,
-    private val downloadId: Long
+    downloadId: Long
 ) : androidx.lifecycle.ViewModel() {
     
-    val download: androidx.lifecycle.LiveData<DownloadItem?> = androidx.lifecycle.liveData {
-        val result = repository.getDownloadById(downloadId)
-        emit(result)
-    }
+    val download: androidx.lifecycle.LiveData<DownloadItem?> = repository.observeDownloadById(downloadId)
     
     fun deleteDownload(downloadId: Long) {
-        androidx.lifecycle.viewModelScope.launch {
+        viewModelScope.launch {
             repository.delete(downloadId)
         }
     }
