@@ -239,7 +239,7 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginEnd="6dp"
-                            android:text="SoundCloud: Synthwave Chill" />
+                            android:text="SoundCloud: Forss" />
 
                         <com.google.android.material.chip.Chip
                             android:id="@+id/chipSampleYtMusic"
@@ -247,7 +247,7 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginEnd="6dp"
-                            android:text="YouTube Music: Lofi Beats" />
+                            android:text="SoundHelix: Synth MP3" />
 
                         <com.google.android.material.chip.Chip
                             android:id="@+id/chipSampleBandcamp"
@@ -255,14 +255,14 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginEnd="6dp"
-                            android:text="Bandcamp: Indie Acoustic" />
+                            android:text="Spotify: Rick Astley" />
 
                         <com.google.android.material.chip.Chip
                             android:id="@+id/chipSampleArchive"
                             style="@style/Widget.Material3.Chip.Assist"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="Archive.org: Classical MP3" />
+                            android:text="Archive.org: Orchestral MP3" />
                     </LinearLayout>
                 </HorizontalScrollView>
 
@@ -509,6 +509,15 @@
                     android:textColor="@color/colorOnSurface"
                     android:textSize="16sp"
                     android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvDetectedVideoPlatform"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="Supports YouTube, TikTok, Instagram, X/Twitter, Facebook, Reddit, Vimeo, Dailymotion &amp; Direct Video"
+                    android:textColor="@color/gray"
+                    android:textSize="12sp" />
 
                 <com.google.android.material.divider.MaterialDivider
                     android:layout_width="match_parent"

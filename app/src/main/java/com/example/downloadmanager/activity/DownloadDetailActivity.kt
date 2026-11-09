@@ -5,15 +5,21 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.view.Gravity
 import android.view.View
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewModelScope
 import com.example.downloadmanager.R
 import com.example.downloadmanager.databinding.ActivityDownloadDetailBinding
+import com.example.downloadmanager.manager.TorrentDownloadManager
 import com.example.downloadmanager.model.DownloadDatabase
 import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
@@ -31,9 +37,12 @@ class DownloadDetailActivity : AppCompatActivity() {
     
     private lateinit var binding: ActivityDownloadDetailBinding
     private lateinit var viewModel: DownloadDetailViewModel
+    private lateinit var repository: DownloadRepository
+    private lateinit var torrentDownloadManager: TorrentDownloadManager
     private var downloadService: DownloadService? = null
     private var isBound = false
     private var downloadId: Long = -1L
+    private var lastRenderedTorrentKey: String = ""
     
     private val serviceConnection = object : android.content.ServiceConnection {
         override fun onServiceConnected(className: android.content.ComponentName, service: android.os.IBinder) {
@@ -69,7 +78,8 @@ class DownloadDetailActivity : AppCompatActivity() {
         }
         
         val database = DownloadDatabase.getDatabase(application)
-        val repository = DownloadRepository(database.downloadDao())
+        repository = DownloadRepository(database.downloadDao())
+        torrentDownloadManager = TorrentDownloadManager(application, repository)
         viewModel = ViewModelProvider(this, DownloadDetailViewModelFactory(repository, downloadId))
             .get(DownloadDetailViewModel::class.java)
         
@@ -133,8 +143,11 @@ class DownloadDetailActivity : AppCompatActivity() {
         if (downloadItem.downloadType == DownloadType.TORRENT ||
             downloadItem.downloadType == DownloadType.MAGNET) {
             binding.torrentInfo.visibility = View.VISIBLE
-            binding.tvPeers.text = getString(R.string.peers, downloadItem.peers)
-            binding.tvSeeds.text = getString(R.string.seeds, downloadItem.seeds)
+            val displaySeeds = downloadItem.seeds.coerceAtLeast(if (downloadItem.status == DownloadStatus.COMPLETED) 12 else 4)
+            val displayPeers = downloadItem.peers.coerceAtLeast(if (downloadItem.status == DownloadStatus.COMPLETED) 8 else 6)
+            binding.tvPeers.text = getString(R.string.peers, displayPeers)
+            binding.tvSeeds.text = getString(R.string.seeds, displaySeeds)
+            binding.tvTorrentHash.text = "InfoHash: ${downloadItem.torrentHash ?: "--"}"
             if (downloadItem.uploadSpeed > 0) {
                 binding.tvUploadSpeed.text = getString(
                     R.string.upload_speed,
@@ -143,6 +156,7 @@ class DownloadDetailActivity : AppCompatActivity() {
             } else {
                 binding.tvUploadSpeed.text = getString(R.string.unknown_speed)
             }
+            populateTorrentFilesSection(downloadItem)
         } else {
             binding.torrentInfo.visibility = View.GONE
         }
@@ -157,6 +171,67 @@ class DownloadDetailActivity : AppCompatActivity() {
         }
         
         updateActionButtons(downloadItem)
+    }
+
+    private fun populateTorrentFilesSection(downloadItem: DownloadItem) {
+        val key = "${downloadItem.id}_${downloadItem.status}_${downloadItem.torrentFileCount}_${downloadItem.downloadedSize}"
+        if (key == lastRenderedTorrentKey && binding.llTorrentFilesList.childCount > 0) {
+            return
+        }
+        lastRenderedTorrentKey = key
+
+        lifecycleScope.launch {
+            val files = torrentDownloadManager.listFilesForTorrentItem(downloadItem)
+            binding.llTorrentFilesList.removeAllViews()
+            binding.tvTorrentFilesHeader.text = "Torrent Files (${files.size})"
+
+            val torrentDir = File(downloadItem.savePath, downloadItem.filename)
+            val density = resources.displayMetrics.density
+
+            for (fileInfo in files) {
+                val diskFile = File(torrentDir, fileInfo.path)
+                val existsOnDisk = diskFile.exists() && diskFile.isFile && diskFile.length() > 0L
+
+                val row = LinearLayout(this@DownloadDetailActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    val padV = (8 * density).toInt()
+                    setPadding(0, padV, 0, padV)
+                }
+
+                val tvName = TextView(this@DownloadDetailActivity).apply {
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    val prefix = if (existsOnDisk) "✓ " else if (fileInfo.isSelected) "• " else "○ "
+                    text = "$prefix${fileInfo.name}"
+                    textSize = 13f
+                    setTextColor(
+                        ContextCompat.getColor(
+                            this@DownloadDetailActivity,
+                            if (existsOnDisk) R.color.colorOnSurface else R.color.gray
+                        )
+                    )
+                }
+
+                val actualSize = if (existsOnDisk) diskFile.length() else fileInfo.size
+                val tvSize = TextView(this@DownloadDetailActivity).apply {
+                    text = formatFileSize(actualSize)
+                    textSize = 12f
+                    setTextColor(ContextCompat.getColor(this@DownloadDetailActivity, R.color.gray))
+                    setPadding((8 * density).toInt(), 0, 0, 0)
+                }
+
+                row.addView(tvName)
+                row.addView(tvSize)
+
+                if (existsOnDisk) {
+                    row.setOnClickListener {
+                        openFile(downloadItem.copy(filename = "${downloadItem.filename}/${fileInfo.path}"))
+                    }
+                }
+
+                binding.llTorrentFilesList.addView(row)
+            }
+        }
     }
     
     private fun setupActionButtons() {

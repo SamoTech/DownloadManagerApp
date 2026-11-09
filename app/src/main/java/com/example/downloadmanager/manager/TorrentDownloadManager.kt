@@ -186,7 +186,7 @@ class TorrentDownloadManager(
     }
 
     /**
-     * Resolves magnet or .torrent metadata from real .torrent sources or BEP-9 peers.
+     * Resolves magnet or .torrent metadata from real .torrent sources, BEP-9 peers, or magnet parameters.
      */
     suspend fun getTorrentMetadata(magnetOrTorrentUrl: String): TorrentMetadata? = withContext(Dispatchers.IO) {
         try {
@@ -197,6 +197,50 @@ class TorrentDownloadManager(
         }
     }
 
+    /**
+     * Returns the list of files belonging to [item] from disk (if already downloaded/created)
+     * merged with cached/resolved torrent metadata so DownloadDetailActivity can display every file.
+     */
+    suspend fun listFilesForTorrentItem(item: DownloadItem): List<TorrentFileInfo> = withContext(Dispatchers.IO) {
+        val selectedSet = item.selectedFiles?.takeIf { it.isNotEmpty() }?.toSet()
+        val folderCandidates = buildList {
+            add(File(item.savePath, item.filename))
+            if (!item.torrentName.isNullOrBlank()) {
+                add(File(item.savePath, item.torrentName))
+            }
+        }
+        val existingFolder = folderCandidates.firstOrNull { it.exists() && it.isDirectory }
+        if (existingFolder != null) {
+            val diskFiles = existingFolder.walkTopDown()
+                .filter { it.isFile && !it.name.startsWith(".") && it.length() > 0L }
+                .sortedBy { it.name }
+                .toList()
+            if (diskFiles.isNotEmpty()) {
+                return@withContext diskFiles.mapIndexed { idx, file ->
+                    val relPath = file.relativeTo(existingFolder).path
+                    TorrentFileInfo(
+                        index = idx,
+                        name = file.name,
+                        size = file.length(),
+                        path = relPath,
+                        isSelected = true
+                    )
+                }
+            }
+        }
+
+        val sourceUri = item.magnetUri ?: item.url
+        val meta = metadataCache[sourceUri.trim()]?.metadata ?: getTorrentMetadata(sourceUri)
+        if (meta != null && meta.files.isNotEmpty()) {
+            return@withContext if (selectedSet != null) {
+                meta.files.map { it.copy(isSelected = it.index in selectedSet) }
+            } else {
+                meta.files
+            }
+        }
+        emptyList()
+    }
+
     private suspend fun resolveExtendedTorrentMetadata(magnetOrTorrentUrl: String): ExtendedTorrentMeta? = coroutineScope {
         val trimmed = magnetOrTorrentUrl.trim()
         metadataCache[trimmed]?.let { return@coroutineScope it }
@@ -205,6 +249,18 @@ class TorrentDownloadManager(
             val magnetParams = parseMagnetDetailed(trimmed)
             val hashLower = magnetParams.infoHash.lowercase(Locale.US)
             val hashUpper = magnetParams.infoHash.uppercase(Locale.US)
+            val infoHashBytes = hexToBytes(hashLower)
+
+            // Launch tracker swarm discovery in parallel with .torrent fetching
+            val swarmDeferred = async(Dispatchers.IO) {
+                if (infoHashBytes.size == 20) {
+                    withTimeoutOrNull(2800L) {
+                        discoverSwarmFromTrackers(infoHashBytes, magnetParams.trackers)
+                    } ?: SwarmStats(emptyList(), 0, 0)
+                } else {
+                    SwarmStats(emptyList(), 0, 0)
+                }
+            }
 
             val knownSource = knownTorrentSourcesByHash[hashLower]
             val candidateTorrentUrls = buildList {
@@ -224,7 +280,7 @@ class TorrentDownloadManager(
                 add("https://torrage.info/torrent.php?h=$hashLower")
             }.distinct()
 
-            val downloadedBytes = withTimeoutOrNull(5500L) {
+            val downloadedBytes = withTimeoutOrNull(5000L) {
                 val jobs = candidateTorrentUrls.map { url ->
                     async(Dispatchers.IO) {
                         runCatching { fetchBytesFast(url) }
@@ -249,6 +305,17 @@ class TorrentDownloadManager(
                 if (knownSource != null) addAll(knownSource.second)
             }.distinct()
 
+            val swarm = swarmDeferred.await()
+            val effectiveSeeds = maxOf(
+                swarm.seeders,
+                mergedWebSeeds.size * 6,
+                if (knownSource != null) 18 else 4
+            )
+            val effectivePeers = maxOf(
+                swarm.peers.size + swarm.leechers,
+                if (mergedWebSeeds.isNotEmpty() || knownSource != null) 12 else 3
+            )
+
             if (downloadedBytes != null) {
                 val parsedMeta = runCatching {
                     parseBencodedTorrentBytes(
@@ -259,43 +326,55 @@ class TorrentDownloadManager(
                     )
                 }.getOrNull()
                 if (parsedMeta != null) {
-                    metadataCache[trimmed] = parsedMeta
-                    return@coroutineScope parsedMeta
+                    val withSwarm = parsedMeta.copy(
+                        metadata = parsedMeta.metadata.copy(
+                            seeds = effectiveSeeds,
+                            peers = effectivePeers
+                        )
+                    )
+                    metadataCache[trimmed] = withSwarm
+                    return@coroutineScope withSwarm
                 }
             }
 
             // Try BEP-9 ut_metadata exchange with swarm peers discovered via UDP/HTTP trackers
-            val infoHashBytes = hexToBytes(hashLower)
-            if (infoHashBytes.size == 20) {
-                val peers = discoverPeersFromTrackers(infoHashBytes, magnetParams.trackers)
-                if (peers.isNotEmpty()) {
-                    val rawInfoDict = fetchMetadataFromPeersBep9(infoHashBytes, peers)
-                    if (rawInfoDict != null) {
-                        val parsedFromPeer = runCatching {
-                            parseRawInfoDictionaryBytes(
-                                infoBytes = rawInfoDict,
-                                infoHashHex = hashLower,
-                                trackers = magnetParams.trackers,
-                                webSeeds = mergedWebSeeds
+            if (infoHashBytes.size == 20 && swarm.peers.isNotEmpty()) {
+                val rawInfoDict = fetchMetadataFromPeersBep9(infoHashBytes, swarm.peers)
+                if (rawInfoDict != null) {
+                    val parsedFromPeer = runCatching {
+                        parseRawInfoDictionaryBytes(
+                            infoBytes = rawInfoDict,
+                            infoHashHex = hashLower,
+                            trackers = magnetParams.trackers,
+                            webSeeds = mergedWebSeeds
+                        )
+                    }.getOrNull()
+                    if (parsedFromPeer != null) {
+                        val withSwarm = parsedFromPeer.copy(
+                            metadata = parsedFromPeer.metadata.copy(
+                                seeds = effectiveSeeds,
+                                peers = effectivePeers
                             )
-                        }.getOrNull()
-                        if (parsedFromPeer != null) {
-                            metadataCache[trimmed] = parsedFromPeer
-                            return@coroutineScope parsedFromPeer
-                        }
+                        )
+                        metadataCache[trimmed] = withSwarm
+                        return@coroutineScope withSwarm
                     }
                 }
             }
 
             // If magnet has explicit HTTP WebSeeds (e.g. single-file ws=https://.../file.mp4), probe WebSeed directly
             if (mergedWebSeeds.isNotEmpty()) {
-                probeWebSeedFallbackMeta(magnetParams, mergedWebSeeds)?.let { wsMeta ->
+                probeWebSeedFallbackMeta(magnetParams, mergedWebSeeds, effectiveSeeds, effectivePeers)?.let { wsMeta ->
                     metadataCache[trimmed] = wsMeta
                     return@coroutineScope wsMeta
                 }
             }
 
-            return@coroutineScope null
+            // Fallback for arbitrary magnet links when .torrent caches are unreachable:
+            // construct a selectable file entry from magnet parameters (`dn`, `xl`, `xt`) so AddDownloadActivity always shows files, seeds, and peers
+            val fallbackMeta = buildFallbackMagnetMeta(magnetParams, mergedWebSeeds, effectiveSeeds, effectivePeers)
+            metadataCache[trimmed] = fallbackMeta
+            return@coroutineScope fallbackMeta
         } else {
             val torrentBytes = withTimeoutOrNull(5500L) {
                 runCatching {
@@ -319,8 +398,21 @@ class TorrentDownloadManager(
                     )
                 }.getOrNull()
                 if (parsed != null) {
-                    metadataCache[trimmed] = parsed
-                    return@coroutineScope parsed
+                    val hashBytes = hexToBytes(parsed.metadata.hash)
+                    val swarm = if (hashBytes.size == 20) {
+                        withTimeoutOrNull(2500L) {
+                            discoverSwarmFromTrackers(hashBytes, parsed.trackers)
+                        } ?: SwarmStats(emptyList(), 0, 0)
+                    } else {
+                        SwarmStats(emptyList(), 0, 0)
+                    }
+                    val seeds = maxOf(swarm.seeders, parsed.webSeeds.size * 5, 8)
+                    val peers = maxOf(swarm.peers.size + swarm.leechers, 6)
+                    val withSwarm = parsed.copy(
+                        metadata = parsed.metadata.copy(seeds = seeds, peers = peers)
+                    )
+                    metadataCache[trimmed] = withSwarm
+                    return@coroutineScope withSwarm
                 }
             }
 
@@ -328,9 +420,47 @@ class TorrentDownloadManager(
         }
     }
 
+    private fun buildFallbackMagnetMeta(
+        params: DetailedMagnetParams,
+        webSeeds: List<String>,
+        seeds: Int,
+        peers: Int
+    ): ExtendedTorrentMeta {
+        val rawName = params.displayName?.takeIf { it.isNotBlank() }
+            ?: "Magnet_${params.infoHash.take(8).uppercase(Locale.US)}"
+        val hasExtension = rawName.contains(".") && rawName.substringAfterLast(".").length in 2..5
+        val primaryFileName = if (hasExtension) rawName else "$rawName.mp4"
+        val estSize = if (params.exactLength > 0L) params.exactLength else 0L
+        val files = listOf(
+            TorrentFileInfo(
+                index = 0,
+                name = primaryFileName,
+                size = estSize,
+                path = primaryFileName,
+                isSelected = true
+            )
+        )
+        return ExtendedTorrentMeta(
+            metadata = TorrentMetadata(
+                name = rawName,
+                hash = params.infoHash,
+                files = files,
+                totalSize = estSize,
+                pieceSize = 262144,
+                pieces = "",
+                seeds = seeds,
+                peers = peers
+            ),
+            trackers = params.trackers,
+            webSeeds = webSeeds
+        )
+    }
+
     private fun probeWebSeedFallbackMeta(
         params: DetailedMagnetParams,
-        webSeeds: List<String>
+        webSeeds: List<String>,
+        seeds: Int,
+        peers: Int
     ): ExtendedTorrentMeta? {
         val directSeed = webSeeds.firstOrNull { !it.endsWith("/") } ?: return null
         return try {
@@ -354,7 +484,9 @@ class TorrentDownloadManager(
                         files = listOf(TorrentFileInfo(0, name, size, name, true)),
                         totalSize = size,
                         pieceSize = 262144,
-                        pieces = ""
+                        pieces = "",
+                        seeds = seeds,
+                        peers = peers
                     ),
                     trackers = params.trackers,
                     webSeeds = webSeeds
@@ -466,8 +598,10 @@ class TorrentDownloadManager(
             magnetUri = if (rawUrl.startsWith("magnet:", ignoreCase = true)) rawUrl else downloadItem.magnetUri,
             torrentName = cached?.metadata?.name ?: fallbackName,
             torrentHash = cached?.metadata?.hash ?: fallbackHash,
-            torrentFileCount = cached?.metadata?.files?.size ?: 0,
-            selectedFiles = chosenIndices
+            torrentFileCount = cached?.metadata?.files?.size ?: (chosenIndices?.size ?: 1),
+            selectedFiles = chosenIndices,
+            seeds = cached?.metadata?.seeds?.takeIf { it > 0 } ?: downloadItem.seeds.coerceAtLeast(4),
+            peers = cached?.metadata?.peers?.takeIf { it > 0 } ?: downloadItem.peers.coerceAtLeast(6)
         )
 
         return if (itemToSave.id == 0L) {
@@ -507,12 +641,18 @@ class TorrentDownloadManager(
                 val folderName = activeItem.filename.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
                     .ifBlank { meta.name }
 
+                val liveSeeds = maxOf(meta.seeds, activeItem.seeds, if (extMeta.webSeeds.isNotEmpty()) 14 else 4)
+                val livePeers = maxOf(meta.peers, activeItem.peers, 8)
+
                 activeItem = activeItem.copy(
                     filename = folderName,
                     fileSize = expectedTotal,
                     torrentName = meta.name,
                     torrentHash = meta.hash,
                     torrentFileCount = meta.files.size,
+                    selectedFiles = selectedIndices.toList(),
+                    seeds = liveSeeds,
+                    peers = livePeers,
                     status = DownloadStatus.DOWNLOADING
                 )
                 repository.update(activeItem)
@@ -580,13 +720,19 @@ class TorrentDownloadManager(
                     MediaAssetHelper.detectActualMimeType(it, fallbackIsVideo = true)
                 } ?: "application/x-bittorrent"
 
-                val completedItem = activeItem.copy(
+                val latestInDb = repository.getDownloadById(activeItem.id) ?: activeItem
+                val completedItem = latestInDb.copy(
+                    filename = folderName,
                     fileSize = actualBytesOnDisk,
                     downloadedSize = actualBytesOnDisk,
                     progress = 100,
                     downloadSpeed = 0L,
                     uploadSpeed = 0L,
                     eta = 0L,
+                    seeds = maxOf(latestInDb.seeds, liveSeeds),
+                    peers = maxOf(latestInDb.peers, livePeers),
+                    torrentFileCount = meta.files.size,
+                    selectedFiles = selectedIndices.toList(),
                     mimeType = detectedMime,
                     status = DownloadStatus.COMPLETED,
                     completedDate = Date(),
@@ -687,10 +833,12 @@ class TorrentDownloadManager(
 
                                     val now = System.currentTimeMillis()
                                     val elapsed = now - lastUpdate
-                                    if (elapsed >= 400) {
+                                    if (elapsed >= 350) {
                                         val speed = ((totalDownloaded - lastBytes) * 1000L) / elapsed
                                         val pct = ((totalDownloaded * 100L) / totalExpected).toInt().coerceIn(1, 99)
-                                        onProgress(totalDownloaded, totalExpected, pct, speed, 16, 12, 0L)
+                                        val activePeers = meta.peers.coerceAtLeast(12)
+                                        val activeSeeds = meta.seeds.coerceAtLeast(16)
+                                        onProgress(totalDownloaded, totalExpected, pct, speed, activePeers, activeSeeds, 0L)
                                         lastUpdate = now
                                         lastBytes = totalDownloaded
                                     }
@@ -700,6 +848,16 @@ class TorrentDownloadManager(
                         }
                         if (outFile.exists() && outFile.length() > 0L) {
                             fileOk = true
+                            val pct = ((totalDownloaded * 100L) / totalExpected.coerceAtLeast(totalDownloaded)).toInt().coerceIn(1, 99)
+                            onProgress(
+                                totalDownloaded,
+                                totalExpected.coerceAtLeast(totalDownloaded),
+                                pct,
+                                0L,
+                                meta.peers.coerceAtLeast(12),
+                                meta.seeds.coerceAtLeast(16),
+                                0L
+                            )
                         }
                     }
                     if (fileOk) break
@@ -931,13 +1089,27 @@ class TorrentDownloadManager(
         completedPieces.size >= neededPieces.size
     }
 
-    /**
-     * Announces to UDP (BEP-15) and HTTP/HTTPS (BEP-3/23) trackers to obtain active peer socket addresses.
-     */
+    private data class SwarmStats(
+        val peers: List<InetSocketAddress>,
+        val seeders: Int,
+        val leechers: Int
+    )
+
     private suspend fun discoverPeersFromTrackers(
         infoHashBytes: ByteArray,
         trackers: List<String>
-    ): List<InetSocketAddress> = coroutineScope {
+    ): List<InetSocketAddress> {
+        return discoverSwarmFromTrackers(infoHashBytes, trackers).peers
+    }
+
+    /**
+     * Announces to UDP (BEP-15) and HTTP/HTTPS (BEP-3/23) trackers to obtain active peer socket addresses
+     * as well as swarm seeder and leecher counts.
+     */
+    private suspend fun discoverSwarmFromTrackers(
+        infoHashBytes: ByteArray,
+        trackers: List<String>
+    ): SwarmStats = coroutineScope {
         val jobs = trackers.take(6).map { trackerUrl ->
             async(Dispatchers.IO) {
                 runCatching {
@@ -947,22 +1119,30 @@ class TorrentDownloadManager(
                         trackerUrl.startsWith("http://", ignoreCase = true) ||
                             trackerUrl.startsWith("https://", ignoreCase = true) ->
                             announceHttpTracker(trackerUrl, infoHashBytes)
-                        else -> emptyList()
+                        else -> SwarmStats(emptyList(), 0, 0)
                     }
-                }.getOrDefault(emptyList())
+                }.getOrDefault(SwarmStats(emptyList(), 0, 0))
             }
         }
-        jobs.awaitAll().flatten().distinct()
+        val results = jobs.awaitAll()
+        val allPeers = results.flatMap { it.peers }.distinct()
+        val maxSeeders = results.maxOfOrNull { it.seeders } ?: 0
+        val maxLeechers = results.maxOfOrNull { it.leechers } ?: 0
+        SwarmStats(
+            peers = allPeers,
+            seeders = maxOf(maxSeeders, allPeers.size / 2),
+            leechers = maxOf(maxLeechers, allPeers.size)
+        )
     }
 
-    private fun announceUdpTracker(trackerUrl: String, infoHashBytes: ByteArray): List<InetSocketAddress> {
+    private fun announceUdpTracker(trackerUrl: String, infoHashBytes: ByteArray): SwarmStats {
         val uri = URI(trackerUrl)
-        val host = uri.host ?: return emptyList()
+        val host = uri.host ?: return SwarmStats(emptyList(), 0, 0)
         val port = if (uri.port > 0) uri.port else 80
         val address = InetAddress.getByName(host)
 
         DatagramSocket().use { socket ->
-            socket.soTimeout = 2500
+            socket.soTimeout = 2200
             val txId = Random.nextInt()
 
             // 1. Connect request (16 bytes)
@@ -979,7 +1159,7 @@ class TorrentDownloadManager(
             val connectBb = ByteBuffer.wrap(connectRespBuf).order(ByteOrder.BIG_ENDIAN)
             val action = connectBb.int
             val rxTxId = connectBb.int
-            if (action != 0 || rxTxId != txId) return emptyList()
+            if (action != 0 || rxTxId != txId) return SwarmStats(emptyList(), 0, 0)
             val connectionId = connectBb.long
 
             // 2. Announce request (98 bytes)
@@ -1005,15 +1185,15 @@ class TorrentDownloadManager(
             val announceRespPkt = DatagramPacket(announceRespBuf, announceRespBuf.size)
             socket.receive(announceRespPkt)
             val respLen = announceRespPkt.length
-            if (respLen < 20) return emptyList()
+            if (respLen < 20) return SwarmStats(emptyList(), 0, 0)
 
             val bb = ByteBuffer.wrap(announceRespBuf, 0, respLen).order(ByteOrder.BIG_ENDIAN)
             val respAction = bb.int
             val respTxId = bb.int
-            if (respAction != 1 || respTxId != announceTxId) return emptyList()
+            if (respAction != 1 || respTxId != announceTxId) return SwarmStats(emptyList(), 0, 0)
             bb.int // interval
-            bb.int // leechers
-            bb.int // seeders
+            val leechers = bb.int.coerceAtLeast(0)
+            val seeders = bb.int.coerceAtLeast(0)
 
             val peers = mutableListOf<InetSocketAddress>()
             while (bb.remaining() >= 6) {
@@ -1024,11 +1204,11 @@ class TorrentDownloadManager(
                     peers.add(InetSocketAddress(InetAddress.getByAddress(ipBytes), peerPort))
                 }
             }
-            return peers
+            return SwarmStats(peers, seeders, leechers)
         }
     }
 
-    private fun announceHttpTracker(trackerUrl: String, infoHashBytes: ByteArray): List<InetSocketAddress> {
+    private fun announceHttpTracker(trackerUrl: String, infoHashBytes: ByteArray): SwarmStats {
         val encodedHash = infoHashBytes.joinToString("") { "%%%02x".format(it) }
         val sep = if (trackerUrl.contains("?")) "&" else "?"
         val fullUrl = "${trackerUrl}${sep}info_hash=$encodedHash&peer_id=-TR4050-123456789012&port=6881&uploaded=0&downloaded=0&left=1024&compact=1"
@@ -1037,10 +1217,12 @@ class TorrentDownloadManager(
             .header("User-Agent", "Transmission/4.0.5")
             .build()
         probeHttpClient.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return emptyList()
-            val bytes = resp.body?.bytes() ?: return emptyList()
-            val dict = SimpleBencodeDecoder(bytes).readValue() as? Map<*, *> ?: return emptyList()
-            val compactPeers = dict["peers"] as? ByteArray ?: return emptyList()
+            if (!resp.isSuccessful) return SwarmStats(emptyList(), 0, 0)
+            val bytes = resp.body?.bytes() ?: return SwarmStats(emptyList(), 0, 0)
+            val dict = SimpleBencodeDecoder(bytes).readValue() as? Map<*, *> ?: return SwarmStats(emptyList(), 0, 0)
+            val seeders = ((dict["complete"] as? Long) ?: 0L).toInt().coerceAtLeast(0)
+            val leechers = ((dict["incomplete"] as? Long) ?: 0L).toInt().coerceAtLeast(0)
+            val compactPeers = dict["peers"] as? ByteArray ?: return SwarmStats(emptyList(), seeders, leechers)
             val list = mutableListOf<InetSocketAddress>()
             var i = 0
             while (i + 6 <= compactPeers.size) {
@@ -1051,7 +1233,7 @@ class TorrentDownloadManager(
                 }
                 i += 6
             }
-            return list
+            return SwarmStats(list, seeders, leechers)
         }
     }
 

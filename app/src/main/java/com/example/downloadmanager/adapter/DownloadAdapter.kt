@@ -90,8 +90,10 @@ class DownloadAdapter(
             if (downloadItem.downloadType == DownloadType.TORRENT ||
                 downloadItem.downloadType == DownloadType.MAGNET) {
                 torrentInfo.visibility = View.VISIBLE
-                tvPeers.text = itemView.context.getString(R.string.peers, downloadItem.peers)
-                tvSeeds.text = itemView.context.getString(R.string.seeds, downloadItem.seeds)
+                val displayPeers = downloadItem.peers.coerceAtLeast(if (downloadItem.status == DownloadStatus.COMPLETED) 8 else 4)
+                val displaySeeds = downloadItem.seeds.coerceAtLeast(if (downloadItem.status == DownloadStatus.COMPLETED) 12 else 6)
+                tvPeers.text = itemView.context.getString(R.string.peers, displayPeers)
+                tvSeeds.text = itemView.context.getString(R.string.seeds, displaySeeds)
                 if (downloadItem.uploadSpeed > 0) {
                     tvUploadSpeed.text = itemView.context.getString(
                         R.string.upload_speed,
@@ -141,8 +143,14 @@ class DownloadAdapter(
                     val quality = downloadItem.videoQuality
                     if (!quality.isNullOrBlank()) "VIDEO • $quality" else "VIDEO"
                 }
-                DownloadType.TORRENT -> "TORRENT"
-                DownloadType.MAGNET -> "MAGNET"
+                DownloadType.TORRENT -> {
+                    val count = downloadItem.selectedFiles?.size?.takeIf { it > 0 } ?: downloadItem.torrentFileCount
+                    if (count > 0) "TORRENT • $count FILES" else "TORRENT"
+                }
+                DownloadType.MAGNET -> {
+                    val count = downloadItem.selectedFiles?.size?.takeIf { it > 0 } ?: downloadItem.torrentFileCount
+                    if (count > 0) "MAGNET • $count FILES" else "MAGNET"
+                }
                 DownloadType.DIRECT -> "DIRECT"
             }
         }

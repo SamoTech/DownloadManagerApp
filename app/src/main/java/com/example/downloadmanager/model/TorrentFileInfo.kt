@@ -18,7 +18,9 @@ data class TorrentMetadata(
     val privateTorrent: Boolean = false,
     val comment: String? = null,
     val createdBy: String? = null,
-    val creationDate: Long? = null
+    val creationDate: Long? = null,
+    val seeds: Int = 0,
+    val peers: Int = 0
 )
 
 data class MagnetInfo(

@@ -526,12 +526,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun detectDownloadType(url: String): DownloadType {
         return when {
-            url.startsWith("magnet:") -> DownloadType.MAGNET
-            url.endsWith(".torrent", ignoreCase = true) -> DownloadType.TORRENT
+            url.startsWith("magnet:", ignoreCase = true) -> DownloadType.MAGNET
+            url.substringBefore("?").endsWith(".torrent", ignoreCase = true) -> DownloadType.TORRENT
             MusicDownloadManager.isMusicUrl(url) -> DownloadType.MUSIC
-            url.contains("youtube.com") || url.contains("youtu.be") ||
-                url.contains("vimeo.com") || url.contains("tiktok.com") ||
-                url.contains("dailymotion.com") || url.contains("twitch.tv") -> DownloadType.VIDEO
+            com.example.downloadmanager.manager.VideoDownloadManager.isSocialVideoUrl(url) ||
+                com.example.downloadmanager.manager.VideoDownloadManager.isWatchPageUrl(url) -> DownloadType.VIDEO
             else -> DownloadType.DIRECT
         }
     }

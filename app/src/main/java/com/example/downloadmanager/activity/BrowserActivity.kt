@@ -211,14 +211,20 @@ class BrowserActivity : AppCompatActivity() {
 
         val items = listOf(
             DetectedLinkItem(
-                title = "SoundHelix Song 1 (Electronic Synth MP3)",
-                url = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
+                title = "Forss - Flickermood (SoundCloud Stream)",
+                url = "https://soundcloud.com/forss/flickermood",
                 downloadType = DownloadType.MUSIC,
-                badgeLabel = "MUSIC • MP3"
+                badgeLabel = "MUSIC • SOUNDCLOUD"
             ),
             DetectedLinkItem(
-                title = "SoundHelix Song 2 (Ambient Groove MP3)",
-                url = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3",
+                title = "Rick Astley - Never Gonna Give You Up (Spotify Track)",
+                url = "https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8",
+                downloadType = DownloadType.MUSIC,
+                badgeLabel = "MUSIC • SPOTIFY"
+            ),
+            DetectedLinkItem(
+                title = "SoundHelix Song 1 (Electronic Synth MP3)",
+                url = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
                 downloadType = DownloadType.MUSIC,
                 badgeLabel = "MUSIC • MP3"
             ),
@@ -287,15 +293,15 @@ class BrowserActivity : AppCompatActivity() {
         val tracks = MusicDownloadManager.getSampleMusicTracks()
         val items = when (category) {
             "archive_audio", "indie_music" -> {
-                binding.tvPageTitle.text = "Creative Commons Studio Audio Hub"
+                binding.tvPageTitle.text = "SoundCloud, Spotify & Studio Audio Hub"
                 binding.tvPageBadge.text = "AUDIO STREAMS"
-                binding.tvPageDescription.text = "Verified direct MP3 audio streams ready for instant download and playback."
+                binding.tvPageDescription.text = "Verified SoundCloud, Spotify, and direct MP3 audio streams ready for instant download."
                 tracks.map {
                     DetectedLinkItem(
                         title = "${it.artist} - ${it.title}",
                         url = it.url,
                         downloadType = DownloadType.MUSIC,
-                        badgeLabel = "MUSIC • MP3"
+                        badgeLabel = "MUSIC • ${it.platform.uppercase(Locale.US)}"
                     )
                 }
             }
@@ -396,31 +402,33 @@ class BrowserActivity : AppCompatActivity() {
     private fun sniffWebpageLinks(url: String): SniffResult {
         val discovered = mutableListOf<DetectedLinkItem>()
 
-        // Always allow downloading the page URL itself if it's a known video/music/direct resource
-        if (VideoDownloadManager.isYouTubeUrl(url) || VideoDownloadManager.isWatchPageUrl(url)) {
+        // Always allow downloading the page URL itself if it's a known social video/music/direct resource
+        if (VideoDownloadManager.isSocialVideoUrl(url) || VideoDownloadManager.isWatchPageUrl(url)) {
+            val platform = VideoDownloadManager.detectVideoPlatform(url) ?: "Social Video"
             discovered.add(
                 DetectedLinkItem(
-                    title = "Video Stream ($url)",
+                    title = "$platform Video Download ($url)",
                     url = url,
                     downloadType = DownloadType.VIDEO,
-                    badgeLabel = "VIDEO"
+                    badgeLabel = "VIDEO • ${platform.uppercase(Locale.US)}"
                 )
             )
             discovered.add(
                 DetectedLinkItem(
-                    title = "Audio Track Extraction ($url)",
+                    title = "$platform Audio Extraction ($url)",
                     url = url,
                     downloadType = DownloadType.MUSIC,
-                    badgeLabel = "MUSIC • M4A"
+                    badgeLabel = "MUSIC • M4A/MP3"
                 )
             )
         } else if (MusicDownloadManager.isMusicUrl(url)) {
+            val platform = MusicDownloadManager.detectMusicPlatform(url) ?: "Music"
             discovered.add(
                 DetectedLinkItem(
-                    title = "Music Stream ($url)",
+                    title = "$platform Track Download ($url)",
                     url = url,
                     downloadType = DownloadType.MUSIC,
-                    badgeLabel = "MUSIC"
+                    badgeLabel = "MUSIC • ${platform.uppercase(Locale.US)}"
                 )
             )
         }

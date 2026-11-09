@@ -144,6 +144,67 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context) {
         }
     }
 
+    /**
+     * Searches YouTube via InnerTube `/youtubei/v1/search` and returns candidate videoIds.
+     */
+    fun searchVideoIds(query: String, maxResults: Int = 5): List<String> {
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return emptyList()
+        return try {
+            val escapedQuery = JSONObject.quote(trimmed)
+            val payload = """
+                {
+                  "query": $escapedQuery,
+                  "context": {
+                    "client": {
+                      "clientName": "WEB",
+                      "clientVersion": "2.20250201.01.00",
+                      "hl": "en",
+                      "gl": "US"
+                    }
+                  }
+                }
+            """.trimIndent()
+            val req = Request.Builder()
+                .url("https://www.youtube.com/youtubei/v1/search?prettyPrint=false")
+                .header("User-Agent", DEFAULT_MOBILE_USER_AGENT)
+                .header("Content-Type", "application/json")
+                .post(payload.toRequestBody("application/json".toMediaType()))
+                .build()
+
+            okHttpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return emptyList()
+                val body = resp.body?.string().orEmpty()
+                if (body.isEmpty()) return emptyList()
+                val found = LinkedHashSet<String>()
+                val regex = Regex(""""videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"""")
+                for (m in regex.findAll(body)) {
+                    val id = m.groupValues.getOrNull(1) ?: continue
+                    found.add(id)
+                    if (found.size >= maxResults) break
+                }
+                found.toList()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "YouTube search failed for '$trimmed': ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * Searches YouTube for [query] and returns the first candidate with playable formats.
+     */
+    fun searchAndExtract(query: String): YouTubeVideoInfo? {
+        val ids = searchVideoIds(query, maxResults = 5)
+        for (videoId in ids) {
+            val info = extract("https://www.youtube.com/watch?v=$videoId")
+            if (info != null && info.formats.isNotEmpty()) {
+                return info
+            }
+        }
+        return null
+    }
+
     private fun fetchVisitorData(videoId: String): String? {
         return try {
             val req = Request.Builder()

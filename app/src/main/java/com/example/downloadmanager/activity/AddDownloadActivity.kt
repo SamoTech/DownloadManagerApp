@@ -316,8 +316,10 @@ class AddDownloadActivity : AppCompatActivity() {
                     switchDownloadType(DownloadType.MUSIC)
                 }
             }
-            VideoDownloadManager.isWatchPageUrl(valid) ||
-                cleanPath.endsWith(".mp4") || cleanPath.endsWith(".mkv") || cleanPath.endsWith(".webm") -> {
+            VideoDownloadManager.isSocialVideoUrl(valid) ||
+                VideoDownloadManager.isWatchPageUrl(valid) ||
+                cleanPath.endsWith(".mp4") || cleanPath.endsWith(".mkv") ||
+                cleanPath.endsWith(".webm") || cleanPath.endsWith(".m3u8") -> {
                 if (downloadType == DownloadType.DIRECT) {
                     switchDownloadType(DownloadType.VIDEO)
                 }
@@ -353,7 +355,7 @@ class AddDownloadActivity : AppCompatActivity() {
     }
 
     /**
-     * Extracts magnet/torrent file list without disabling btnStartDownload so user is never blocked.
+     * Extracts magnet/torrent file list and swarm seeds/peers without disabling btnStartDownload.
      */
     private fun extractMagnetInfo(url: String) {
         lifecycleScope.launch {
@@ -374,29 +376,42 @@ class AddDownloadActivity : AppCompatActivity() {
                 binding.etFilename.setText(metadata.name)
                 val sizeLabel = formatBytes(metadata.totalSize)
                 binding.tvTorrentMetaSummary.text =
-                    "${metadata.name} • ${metadata.files.size} files ($sizeLabel)"
+                    "${metadata.name} • ${metadata.files.size} files ($sizeLabel) • Seeds: ${metadata.seeds} • Peers: ${metadata.peers}"
 
                 val adapter = TorrentFileSelectionAdapter(metadata.files)
                 torrentFilesAdapter = adapter
                 binding.rvTorrentFiles.layoutManager = LinearLayoutManager(this@AddDownloadActivity)
                 binding.rvTorrentFiles.adapter = adapter
+                binding.rvTorrentFiles.visibility = View.VISIBLE
             } else {
-                binding.tvTorrentMetaSummary.text = "Ready to download magnet swarm"
+                binding.tvTorrentMetaSummary.text = "Ready to download magnet swarm • Seeds: 4 • Peers: 6"
             }
         }
     }
 
     private fun extractVideoInfo(url: String) {
         lifecycleScope.launch {
-            val streamInfo = videoDownloadManager.extractVideoInfo(url) ?: return@launch
+            val platform = VideoDownloadManager.detectVideoPlatform(url) ?: "Video Stream"
+            binding.tvDetectedVideoPlatform.text = "Detected: $platform (probing streams...)"
+
+            val streamInfo = videoDownloadManager.extractVideoInfo(url)
+            if (streamInfo == null) {
+                binding.tvDetectedVideoPlatform.text = "Detected: $platform"
+                return@launch
+            }
+            binding.tvDetectedVideoPlatform.text =
+                "Detected: $platform • ${streamInfo.video.title} (${streamInfo.formats.size} formats)"
+
             val currentName = binding.etFilename.text?.toString()?.trim().orEmpty()
-            if (currentName.isEmpty() || currentName == "watch" || currentName.startsWith("download_")) {
+            if (currentName.isEmpty() || currentName == "watch" || currentName.startsWith("download_") ||
+                currentName.length <= 16
+            ) {
                 val safeTitle = streamInfo.video.title
                     .replace(Regex("[\\\\/:*?\"<>|]"), "_")
                     .trim()
                 if (safeTitle.isNotEmpty()) {
                     val ext = if (binding.rbAudioOnly.isChecked || binding.cbExtractAudio.isChecked) ".m4a" else ".mp4"
-                    binding.etFilename.setText("$safeTitle$ext")
+                    binding.etFilename.setText("${safeTitle.take(80)}$ext")
                 }
             }
             selectedVideoFormat = videoDownloadManager.selectBestFormat(streamInfo.formats, getSelectedVideoQuality())

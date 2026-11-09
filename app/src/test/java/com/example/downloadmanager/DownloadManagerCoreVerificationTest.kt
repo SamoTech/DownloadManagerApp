@@ -161,4 +161,40 @@ class DownloadManagerCoreVerificationTest {
         assertEquals(".m4a", MusicDownloadManager.extensionForFormat("m4a_256"))
         assertEquals(".ogg", MusicDownloadManager.extensionForFormat("ogg_192"))
     }
+
+    @Test
+    fun socialMediaAndMusicPlatformDetection_recognizesAllSupportedPlatforms() {
+        // Social Video Platforms
+        assertTrue(VideoDownloadManager.isTikTokUrl("https://www.tiktok.com/@tiktok/video/7106594312292453675"))
+        assertTrue(VideoDownloadManager.isTikTokUrl("https://vm.tiktok.com/ZGe12345/"))
+        assertEquals("TikTok", VideoDownloadManager.detectVideoPlatform("https://www.tiktok.com/@tiktok/video/7106594312292453675"))
+
+        assertTrue(VideoDownloadManager.isInstagramUrl("https://www.instagram.com/reel/C5abc123/"))
+        assertEquals("Instagram", VideoDownloadManager.detectVideoPlatform("https://www.instagram.com/reel/C5abc123/"))
+
+        assertTrue(VideoDownloadManager.isTwitterUrl("https://x.com/NASA/status/1800000000000000000"))
+        assertEquals("X / Twitter", VideoDownloadManager.detectVideoPlatform("https://x.com/NASA/status/1800000000000000000"))
+
+        assertTrue(VideoDownloadManager.isFacebookUrl("https://www.facebook.com/watch/?v=10153231379946729"))
+        assertTrue(VideoDownloadManager.isFacebookUrl("https://fb.watch/abc123/"))
+        assertEquals("Facebook", VideoDownloadManager.detectVideoPlatform("https://fb.watch/abc123/"))
+
+        assertTrue(VideoDownloadManager.isRedditUrl("https://www.reddit.com/r/videos/comments/abc123/sample_clip/"))
+        assertEquals("Reddit", VideoDownloadManager.detectVideoPlatform("https://v.redd.it/xyz987"))
+
+        assertTrue(VideoDownloadManager.isVimeoUrl("https://vimeo.com/76979871"))
+        assertEquals("Vimeo", VideoDownloadManager.detectVideoPlatform("https://vimeo.com/76979871"))
+
+        assertTrue(VideoDownloadManager.isDailymotionUrl("https://www.dailymotion.com/video/x8abcde"))
+        assertEquals("Dailymotion", VideoDownloadManager.detectVideoPlatform("https://dai.ly/x8abcde"))
+
+        // Music Platforms (SoundCloud & Spotify)
+        assertTrue(MusicDownloadManager.isSoundCloudUrl("https://soundcloud.com/forss/flickermood"))
+        assertTrue(MusicDownloadManager.isSoundCloudUrl("https://on.soundcloud.com/abc123"))
+        assertEquals("SoundCloud", MusicDownloadManager.detectMusicPlatform("https://soundcloud.com/forss/flickermood"))
+
+        assertTrue(MusicDownloadManager.isSpotifyUrl("https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8"))
+        assertTrue(MusicDownloadManager.isSpotifyUrl("https://spotify.link/xyz123"))
+        assertEquals("Spotify", MusicDownloadManager.detectMusicPlatform("https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8"))
+    }
 }
