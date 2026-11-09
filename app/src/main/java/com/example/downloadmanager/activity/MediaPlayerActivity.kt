@@ -189,23 +189,16 @@ class MediaPlayerActivity : AppCompatActivity() {
                         EXTRA_IS_VIDEO,
                         file.extension.lowercase(Locale.US) in MediaAssetHelper.VIDEO_EXTENSIONS
                     )
-                    playFile(file, title, isVid, seed = file.name)
+                    playFile(file, title, isVid)
                 }
                 playableItems.isNotEmpty() -> {
                     playDownloadItem(playableItems.first())
                 }
                 else -> {
-                    // Demo built-in track when no downloads have completed yet so standalone player always works
-                    val demoFile = withContext(Dispatchers.IO) {
-                        val f = File(cacheDir, "Luca_Studio_Preview.mp3")
-                        MediaAssetHelper.ensureValidMediaFile(
-                            context = this@MediaPlayerActivity,
-                            targetFile = f,
-                            isVideo = false,
-                            seed = "studio_preview"
-                        )
-                    }
-                    playFile(demoFile, "Luca Studio Audio Preview", isVideo = false, seed = "studio_preview")
+                    binding.tvMediaTitle.text = "No Completed Media"
+                    binding.tvMediaSubtitle.text = "Download a video or audio track first to play it here"
+                    binding.playerView.visibility = View.GONE
+                    binding.audioContainer.visibility = View.VISIBLE
                 }
             }
         }
@@ -223,19 +216,13 @@ class MediaPlayerActivity : AppCompatActivity() {
                     item.isAudioOnly,
                     item.mimeType
                 )
-                val validFile = MediaAssetHelper.ensureValidMediaFile(
-                    context = this@MediaPlayerActivity,
-                    targetFile = candidate,
-                    isVideo = isVid,
-                    seed = item.url
-                )
-                val codecSummary = MediaAssetHelper.inspectMediaCodecSummary(validFile, isVid)
-                Triple(validFile, isVid, codecSummary)
+                val codecSummary = MediaAssetHelper.inspectMediaCodecSummary(candidate, isVid)
+                Triple(candidate, isVid, codecSummary)
             }
 
             val (file, isVid, codecSummary) = resolvedPair
             val displayTitle = item.videoTitle?.takeIf { it.isNotBlank() } ?: item.filename
-            playFile(file, displayTitle, isVid, seed = item.url, subtitle = codecSummary)
+            playFile(file, displayTitle, isVid, subtitle = codecSummary)
         }
     }
 
@@ -243,7 +230,6 @@ class MediaPlayerActivity : AppCompatActivity() {
         file: File,
         title: String,
         isVideo: Boolean,
-        seed: String,
         subtitle: String? = null
     ) {
         hasRepairedCurrentFile = false
@@ -253,7 +239,14 @@ class MediaPlayerActivity : AppCompatActivity() {
 
         supportActionBar?.title = title
         binding.tvMediaTitle.text = title
-        val sizeStr = if (file.exists()) formatBytes(file.length()) else ""
+
+        if (!file.exists() || !file.isFile || file.length() == 0L) {
+            binding.tvMediaSubtitle.text = getString(R.string.error_file_not_found)
+            Toast.makeText(this, R.string.error_file_not_found, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val sizeStr = formatBytes(file.length())
         binding.tvMediaSubtitle.text = listOfNotNull(
             subtitle ?: if (isVideo) "HD Video" else "Studio Audio",
             sizeStr.takeIf { it.isNotEmpty() }
@@ -283,36 +276,36 @@ class MediaPlayerActivity : AppCompatActivity() {
     private fun handlePlaybackError() {
         val file = currentMediaFile ?: return
 
-        // 1. If audio file, try Android's platform MediaPlayer first
+        // If audio file, try Android's platform MediaPlayer as a secondary hardware decoder
         if (!currentIsVideo && file.exists() && startPlatformAudioPlayer(file)) {
             return
         }
 
-        // 2. If the downloaded stream had an unsupported container/codec, repair it once and play
-        if (!hasRepairedCurrentFile) {
+        // If DASH M4A container needs remuxing, try non-destructive remux of the real file once
+        if (!currentIsVideo && !hasRepairedCurrentFile && file.exists()) {
             hasRepairedCurrentFile = true
             lifecycleScope.launch {
-                val repaired = withContext(Dispatchers.IO) {
-                    val fallback = File(
-                        cacheDir,
-                        if (currentIsVideo) "repaired_playback.mp4" else "repaired_playback.m4a"
-                    )
-                    if (fallback.exists()) fallback.delete()
-                    MediaAssetHelper.writeVerifiedMediaAssetToFile(
-                        context = this@MediaPlayerActivity,
-                        targetFile = fallback,
-                        isVideo = currentIsVideo,
-                        seed = currentTitle
-                    )
+                val remuxedFile = withContext(Dispatchers.IO) {
+                    val tempOut = File(cacheDir, "remuxed_${file.nameWithoutExtension}.m4a")
+                    if (MediaAssetHelper.remuxAudioToStandardM4a(file, tempOut)) tempOut else null
                 }
-                currentMediaFile = repaired
-                exoPlayer?.let { player ->
-                    player.setMediaItem(MediaItem.fromUri(Uri.fromFile(repaired)))
-                    player.prepare()
-                    player.playWhenReady = true
+                if (remuxedFile != null && remuxedFile.exists()) {
+                    currentMediaFile = remuxedFile
+                    exoPlayer?.let { player ->
+                        player.setMediaItem(MediaItem.fromUri(Uri.fromFile(remuxedFile)))
+                        player.prepare()
+                        player.playWhenReady = true
+                    }
+                    return@launch
                 }
+                binding.tvMediaSubtitle.text = "Playback error: unsupported or corrupted media stream"
+                Toast.makeText(this@MediaPlayerActivity, R.string.error_open_file, Toast.LENGTH_SHORT).show()
             }
+            return
         }
+
+        binding.tvMediaSubtitle.text = "Playback error: unsupported or corrupted media stream"
+        Toast.makeText(this, R.string.error_open_file, Toast.LENGTH_SHORT).show()
     }
 
     private fun startPlatformAudioPlayer(file: File): Boolean {

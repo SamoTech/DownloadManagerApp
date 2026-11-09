@@ -319,25 +319,21 @@ class DownloadDetailActivity : AppCompatActivity() {
     
     private fun shareFile(downloadItem: DownloadItem) {
         try {
-            val rawFile = File(downloadItem.savePath, downloadItem.filename)
+            val file = MediaAssetHelper.resolvePlayableFile(downloadItem)
+                ?: File(downloadItem.savePath, downloadItem.filename)
             val isVideo = MediaAssetHelper.isVideoFileOrType(
-                downloadItem.filename,
+                file.name,
                 downloadItem.downloadType,
                 downloadItem.isAudioOnly,
                 downloadItem.mimeType
             )
             val isAudio = !isVideo && MediaAssetHelper.isAudioFileOrType(
-                downloadItem.filename,
+                file.name,
                 downloadItem.downloadType,
                 downloadItem.isAudioOnly,
                 downloadItem.mimeType
             )
-            val file = if (isVideo || isAudio) {
-                MediaAssetHelper.ensureValidMediaFile(this, rawFile, isVideo, downloadItem.url)
-            } else {
-                rawFile
-            }
-            if (file.exists()) {
+            if (file.exists() && file.isFile) {
                 val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
                 val mime = if (isVideo || isAudio) {
                     MediaAssetHelper.getMimeTypeForFilename(file.name, isVideo)

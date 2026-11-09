@@ -17,10 +17,12 @@ import kotlinx.coroutines.launch
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.URLDecoder
+import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
@@ -44,7 +46,8 @@ class VideoDownloadManager(
 
     companion object {
         private const val TAG = "VideoDownloadManager"
-        private const val BUFFER_SIZE = 16 * 1024
+        private const val BUFFER_SIZE = 32 * 1024
+        private const val YOUTUBE_RANGE_CHUNK_SIZE = 9L * 1024L * 1024L // 9 MB chunks for unthrottled googlevideo.com downloads
 
         private val streamInfoCache = ConcurrentHashMap<String, VideoStreamInfo>()
 
@@ -52,7 +55,6 @@ class VideoDownloadManager(
             val trimmed = rawUrl.trim()
             if (trimmed.isEmpty()) return null
 
-            // Extract embedded URL if the user pasted surrounding text
             val extracted = if (trimmed.contains(" ")) {
                 Regex("""https?://[^\s"'<>]+""", RegexOption.IGNORE_CASE)
                     .find(trimmed)?.value ?: return null
@@ -78,9 +80,14 @@ class VideoDownloadManager(
             return YouTubeExtractor.extractVideoIdFromUrl(url) != null
         }
 
+        fun isArchiveDetailsUrl(url: String): Boolean {
+            return Regex("""archive\.org/details/([^/?#]+)""", RegexOption.IGNORE_CASE).containsMatchIn(url)
+        }
+
         fun isWatchPageUrl(url: String): Boolean {
             val lower = url.lowercase()
             return isYouTubeUrl(url) ||
+                isArchiveDetailsUrl(url) ||
                 lower.contains("vimeo.com/") ||
                 lower.contains("tiktok.com/") ||
                 lower.contains("facebook.com/") ||
@@ -96,6 +103,7 @@ class VideoDownloadManager(
         return try {
             val info = when {
                 isYouTubeUrl(validUrl) -> extractYouTubeInfo(validUrl)
+                isArchiveDetailsUrl(validUrl) -> extractArchiveOrgVideoInfo(validUrl)
                 else -> extractGenericOrWebVideoInfo(validUrl)
             }
             if (info != null) {
@@ -135,6 +143,80 @@ class VideoDownloadManager(
         }
     }
 
+    private fun extractArchiveOrgVideoInfo(url: String): VideoStreamInfo? {
+        val itemId = Regex("""archive\.org/details/([^/?#]+)""", RegexOption.IGNORE_CASE)
+            .find(url)?.groupValues?.getOrNull(1) ?: return null
+        return try {
+            val metaUrl = "https://archive.org/metadata/$itemId"
+            val req = Request.Builder()
+                .url(metaUrl)
+                .header("User-Agent", YouTubeExtractor.DEFAULT_MOBILE_USER_AGENT)
+                .build()
+            okHttpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val root = JSONObject(resp.body?.string().orEmpty())
+                val metadataObj = root.optJSONObject("metadata")
+                val title = metadataObj?.optString("title")?.takeIf { it.isNotBlank() } ?: itemId
+                val creator = metadataObj?.optString("creator")?.takeIf { it.isNotBlank() } ?: "Internet Archive"
+                val filesArr = root.optJSONArray("files") ?: return null
+
+                val formats = mutableListOf<VideoFormat>()
+                for (i in 0 until filesArr.length()) {
+                    val fObj = filesArr.optJSONObject(i) ?: continue
+                    val name = fObj.optString("name")
+                    val lower = name.lowercase()
+                    val size = fObj.optString("size", "0").toLongOrNull() ?: 0L
+                    val encPath = name.split("/").joinToString("/") {
+                        URLEncoder.encode(it, "UTF-8").replace("+", "%20")
+                    }
+                    val directUrl = "https://archive.org/download/$itemId/$encPath"
+                    when {
+                        lower.endsWith(".mp4") || lower.endsWith(".webm") || lower.endsWith(".mkv") -> {
+                            val ext = lower.substringAfterLast(".")
+                            formats.add(
+                                VideoFormat(
+                                    formatId = "muxed_ia_$i",
+                                    url = directUrl,
+                                    quality = name.substringAfterLast("/"),
+                                    container = ext,
+                                    fileSize = size.takeIf { it > 0L },
+                                    isAudioOnly = false
+                                )
+                            )
+                        }
+                        lower.endsWith(".mp3") || lower.endsWith(".m4a") || lower.endsWith(".flac") || lower.endsWith(".ogg") -> {
+                            val ext = lower.substringAfterLast(".")
+                            formats.add(
+                                VideoFormat(
+                                    formatId = "audio_ia_$i",
+                                    url = directUrl,
+                                    quality = "${ext.uppercase()} Audio",
+                                    container = ext,
+                                    fileSize = size.takeIf { it > 0L },
+                                    isAudioOnly = true,
+                                    audioBitrate = 192
+                                )
+                            )
+                        }
+                    }
+                }
+                if (formats.isEmpty()) return null
+                VideoStreamInfo(
+                    video = VideoInfo(
+                        id = itemId,
+                        title = title,
+                        url = url,
+                        author = creator
+                    ),
+                    formats = formats
+                )
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error extracting Archive.org video info: ${e.message}")
+            null
+        }
+    }
+
     /**
      * Resolves direct video/audio HTTP links or extracts embedded <video>/<source>/og:video/JSON-LD streams from HTML pages.
      */
@@ -143,14 +225,14 @@ class VideoDownloadManager(
         return try {
             val req = Request.Builder()
                 .url(validUrl)
-                .header(
-                    "User-Agent",
-                    "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-                )
+                .header("User-Agent", YouTubeExtractor.DEFAULT_MOBILE_USER_AGENT)
                 .header("Range", "bytes=0-32767")
                 .build()
 
             okHttpClient.newCall(req).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return null
+                }
                 val finalUrl = response.request.url.toString()
                 val contentType = (response.header("Content-Type") ?: "").lowercase()
                 val contentRange = response.header("Content-Range")
@@ -395,7 +477,6 @@ class VideoDownloadManager(
 
         if (q == "audio") {
             val audioFormats = formats.filter { it.isAudioOnly }
-            // Prefer M4A/AAC (itag 140) for universal hardware compatibility, then progressive muxed MP4
             return audioFormats.filter { it.container == "m4a" }.maxByOrNull { it.audioBitrate ?: 0 }
                 ?: audioFormats.maxByOrNull { it.audioBitrate ?: 0 }
                 ?: formats.firstOrNull { it.formatId.startsWith("muxed_") }
@@ -406,8 +487,6 @@ class VideoDownloadManager(
         val muxedFormats = videoFormats.filter { it.formatId.startsWith("muxed_") }
         val adaptiveMp4Formats = videoFormats.filter { it.formatId.startsWith("adaptive_") && it.container == "mp4" }
 
-        // Always prioritize progressive muxed MP4 formats (which contain both H.264 video + AAC stereo audio
-        // in a standard non-fragmented container) so playback works on 100% of Android devices without DASH issues.
         return when (q) {
             "best", "high" -> {
                 muxedFormats.maxByOrNull { it.fileSize ?: 0L }
@@ -454,10 +533,8 @@ class VideoDownloadManager(
                 val wantAudio = downloadItem.isAudioOnly || downloadItem.downloadType == DownloadType.MUSIC
                 val lookupUrl = sourceUrl ?: currentStreamUrl!!
 
-                // Resolve stream info on the background worker thread
                 val streamInfo = extractVideoInfo(lookupUrl)
 
-                // Update filename with real extracted video title if current filename was a generic placeholder
                 var activeItem = repository.getDownloadById(downloadItem.id) ?: downloadItem
                 var targetFilename = activeItem.filename
                 val extractedTitle = streamInfo?.video?.title
@@ -484,47 +561,32 @@ class VideoDownloadManager(
                     val audioFormat = streamInfo?.formats?.let { selectBestFormat(it, "audio") }
                     val audioStreamUrl = audioFormat?.url ?: currentStreamUrl ?: lookupUrl
 
+                    if (isWatchPageUrl(audioStreamUrl)) {
+                        throw IOException("Could not extract playable audio stream from $lookupUrl")
+                    }
+
                     val tempRawAudio = File(dir, ".tmp_raw_aud_${downloadItem.id}")
                     try {
-                        val downloadedOk = if (!isWatchPageUrl(audioStreamUrl)) {
-                            try {
-                                streamUrlToFile(
-                                    downloadId = downloadItem.id,
-                                    streamUrl = audioStreamUrl,
-                                    destFile = tempRawAudio,
-                                    expectedSize = audioFormat?.fileSize ?: 0L,
-                                    onProgress = onProgress
-                                )
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Direct audio stream failed (${e.message}), using fallback stream")
-                                false
-                            }
-                        } else {
-                            false
-                        }
+                        val downloadedOk = streamUrlToFile(
+                            downloadId = downloadItem.id,
+                            streamUrl = audioStreamUrl,
+                            destFile = tempRawAudio,
+                            expectedSize = audioFormat?.fileSize ?: 0L,
+                            onProgress = onProgress
+                        )
 
                         val statusNow = repository.getDownloadById(downloadItem.id)?.status
                         if (statusNow == DownloadStatus.PAUSED || statusNow == DownloadStatus.CANCELLED) {
                             return@launch
                         }
 
-                        if (downloadedOk && tempRawAudio.exists() && tempRawAudio.length() > 1024L) {
-                            // Remux DASH M4A or muxed MP4 audio track into a clean standard M4A container
-                            val remuxed = MediaAssetHelper.remuxAudioToStandardM4a(tempRawAudio, file)
-                            if (!remuxed) {
-                                tempRawAudio.copyTo(file, overwrite = true)
-                            }
-                        } else {
-                            // Fallback if external site blocked direct scraping
-                            MediaAssetHelper.writeVerifiedMediaAssetToFile(
-                                context = context,
-                                targetFile = file,
-                                isVideo = false,
-                                seed = lookupUrl
-                            ) { written, total ->
-                                val pct = ((written * 100.0) / total).toInt().coerceIn(1, 99)
-                                onProgress(written, total, pct, 640_000L)
-                            }
+                        if (!downloadedOk || !tempRawAudio.exists() || tempRawAudio.length() <= 1024L) {
+                            throw IOException("Audio stream download returned empty or incomplete data")
+                        }
+
+                        val remuxed = MediaAssetHelper.remuxAudioToStandardM4a(tempRawAudio, file)
+                        if (!remuxed) {
+                            tempRawAudio.copyTo(file, overwrite = true)
                         }
                     } finally {
                         tempRawAudio.delete()
@@ -543,6 +605,7 @@ class VideoDownloadManager(
                     }
 
                     var videoSuccess = false
+                    var lastError: Exception? = null
 
                     if (isAdaptiveVideoOnly && companionAudioFormat != null) {
                         val tempVideoFile = File(dir, ".tmp_vid_${downloadItem.id}.mp4")
@@ -579,6 +642,7 @@ class VideoDownloadManager(
                                 }
                             }
                         } catch (e: Exception) {
+                            lastError = e
                             Log.w(TAG, "Adaptive video+audio muxing failed: ${e.message}")
                         } finally {
                             tempVideoFile.delete()
@@ -592,22 +656,22 @@ class VideoDownloadManager(
                             return@launch
                         }
 
-                        // Try progressive muxed format (contains both video + audio) or direct videoStreamUrl
                         val muxedFormat = streamInfo?.formats?.firstOrNull { it.formatId.startsWith("muxed_") }
                         val directCandidateUrl = muxedFormat?.url ?: videoStreamUrl
-                        if (!isWatchPageUrl(directCandidateUrl)) {
-                            try {
-                                videoSuccess = streamUrlToFile(
-                                    downloadId = downloadItem.id,
-                                    streamUrl = directCandidateUrl,
-                                    destFile = file,
-                                    expectedSize = muxedFormat?.fileSize ?: chosenFormat?.fileSize ?: 0L,
-                                    onProgress = onProgress
-                                )
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Direct video stream download failed: ${e.message}")
-                                videoSuccess = false
-                            }
+                        if (isWatchPageUrl(directCandidateUrl)) {
+                            throw IOException("Could not extract playable video stream from $lookupUrl")
+                        }
+                        try {
+                            videoSuccess = streamUrlToFile(
+                                downloadId = downloadItem.id,
+                                streamUrl = directCandidateUrl,
+                                destFile = file,
+                                expectedSize = muxedFormat?.fileSize ?: chosenFormat?.fileSize ?: 0L,
+                                onProgress = onProgress
+                            )
+                        } catch (e: Exception) {
+                            lastError = e
+                            videoSuccess = false
                         }
                     }
 
@@ -616,16 +680,9 @@ class VideoDownloadManager(
                         return@launch
                     }
 
-                    if (!videoSuccess || !MediaAssetHelper.isValidPlayableMediaFile(file, requireVideo = true)) {
-                        MediaAssetHelper.writeVerifiedMediaAssetToFile(
-                            context = context,
-                            targetFile = file,
-                            isVideo = true,
-                            seed = lookupUrl
-                        ) { written, total ->
-                            val pct = ((written * 100.0) / total).toInt().coerceIn(1, 99)
-                            onProgress(written, total, pct, 1_200_000L)
-                        }
+                    if (!videoSuccess || !file.exists() || file.length() <= 1024L) {
+                        if (file.exists()) file.delete()
+                        throw lastError ?: IOException("Failed to download video stream from $lookupUrl")
                     }
                 }
 
@@ -649,19 +706,23 @@ class VideoDownloadManager(
                 onComplete(completedItem)
             } catch (e: Exception) {
                 Log.w(TAG, "Error downloading video: ${e.message}", e)
-                val errorItem = downloadItem.copy(
-                    status = DownloadStatus.FAILED,
-                    errorMessage = e.message ?: "Video download failed"
-                )
-                repository.update(errorItem)
-                onError(errorItem, e.message ?: "Video download failed")
+                val latest = repository.getDownloadById(downloadItem.id) ?: downloadItem
+                if (latest.status != DownloadStatus.PAUSED && latest.status != DownloadStatus.CANCELLED) {
+                    val errorItem = latest.copy(
+                        status = DownloadStatus.FAILED,
+                        downloadSpeed = 0L,
+                        errorMessage = e.message ?: "Video download failed"
+                    )
+                    repository.update(errorItem)
+                    onError(errorItem, e.message ?: "Video download failed")
+                }
             }
         }
     }
 
     /**
      * Downloads a media stream to [destFile].
-     * For googlevideo.com streams with known content length, uses unthrottled Range requests if needed.
+     * Uses the exact client User-Agent for `googlevideo.com` URLs and supports Range chunking.
      */
     private suspend fun streamUrlToFile(
         downloadId: Long,
@@ -670,10 +731,11 @@ class VideoDownloadManager(
         expectedSize: Long = 0L,
         onProgress: (Long, Long, Int, Long) -> Unit
     ): Boolean {
-        val ua = if (streamUrl.contains("googlevideo.com")) {
-            YouTubeExtractor.VR_USER_AGENT
-        } else {
-            "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        val ua = YouTubeExtractor.getUserAgentForStreamUrl(streamUrl)
+        val isGoogleVideo = streamUrl.contains("googlevideo.com", ignoreCase = true)
+
+        if (isGoogleVideo && expectedSize > YOUTUBE_RANGE_CHUNK_SIZE) {
+            return downloadGoogleVideoChunked(downloadId, streamUrl, ua, destFile, expectedSize, onProgress)
         }
 
         val request = Request.Builder()
@@ -714,7 +776,7 @@ class VideoDownloadManager(
                         val timeDiff = (now - lastUpdateTime) / 1000.0
                         val speed = if (timeDiff > 0) ((totalRead - lastRead) / timeDiff).toLong() else 0L
                         val progress = if (contentLength > 0) {
-                            ((totalRead * 100.0) / contentLength).toInt().coerceIn(0, 100)
+                            ((totalRead * 100.0) / contentLength).toInt().coerceIn(0, 99)
                         } else {
                             50
                         }
@@ -726,6 +788,61 @@ class VideoDownloadManager(
                 outputStream.flush()
                 onProgress(totalRead, contentLength.coerceAtLeast(totalRead), 100, 0L)
             }
+        }
+        return destFile.exists() && destFile.length() > 512L
+    }
+
+    private suspend fun downloadGoogleVideoChunked(
+        downloadId: Long,
+        streamUrl: String,
+        userAgent: String,
+        destFile: File,
+        totalSize: Long,
+        onProgress: (Long, Long, Int, Long) -> Unit
+    ): Boolean {
+        FileOutputStream(destFile, false).use { outputStream ->
+            var offset = 0L
+            var lastUpdateTime = System.currentTimeMillis()
+            var lastRead = 0L
+            val buffer = ByteArray(BUFFER_SIZE)
+
+            while (offset < totalSize) {
+                val endByte = minOf(offset + YOUTUBE_RANGE_CHUNK_SIZE - 1L, totalSize - 1L)
+                val req = Request.Builder()
+                    .url(streamUrl)
+                    .header("User-Agent", userAgent)
+                    .header("Range", "bytes=$offset-$endByte")
+                    .header("Accept", "*/*")
+                    .build()
+
+                okHttpClient.newCall(req).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw IOException("HTTP ${response.code}: ${response.message}")
+                    }
+                    val input = response.body?.byteStream() ?: throw IOException("Empty chunk stream")
+                    var read: Int
+                    while (input.read(buffer).also { read = it } != -1) {
+                        val currentStatus = repository.getDownloadById(downloadId)?.status
+                        if (currentStatus == DownloadStatus.PAUSED || currentStatus == DownloadStatus.CANCELLED) {
+                            return false
+                        }
+                        outputStream.write(buffer, 0, read)
+                        offset += read
+
+                        val now = System.currentTimeMillis()
+                        if (now - lastUpdateTime >= 350) {
+                            val timeDiff = (now - lastUpdateTime) / 1000.0
+                            val speed = if (timeDiff > 0) ((offset - lastRead) / timeDiff).toLong() else 0L
+                            val progress = ((offset * 100.0) / totalSize).toInt().coerceIn(0, 99)
+                            onProgress(offset, totalSize, progress, speed)
+                            lastUpdateTime = now
+                            lastRead = offset
+                        }
+                    }
+                }
+            }
+            outputStream.flush()
+            onProgress(totalSize, totalSize, 100, 0L)
         }
         return destFile.exists() && destFile.length() > 512L
     }

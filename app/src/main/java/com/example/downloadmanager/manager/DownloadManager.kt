@@ -208,45 +208,10 @@ class DownloadManager(
 
                 val useMultiConnection = probe.supportsRange && resolvedSize > 2L * 1024 * 1024 && activeItem.downloadedSize == 0L
 
-                try {
-                    if (useMultiConnection) {
-                        downloadMultiThreaded(activeItem, targetFile, 4, onProgress)
-                    } else {
-                        downloadSingleStream(activeItem, targetFile, onProgress)
-                    }
-                } catch (netErr: Exception) {
-                    val currentStatus = repository.getDownloadById(activeItem.id)?.status
-                    if (currentStatus == DownloadStatus.PAUSED || currentStatus == DownloadStatus.CANCELLED) {
-                        return@launch
-                    }
-
-                    // If this direct download was an audio/video file and the remote server blocked direct access,
-                    // ensure a playable media file is saved instead of failing.
-                    val isVideo = MediaAssetHelper.isVideoFileOrType(
-                        activeItem.filename,
-                        activeItem.downloadType,
-                        activeItem.isAudioOnly,
-                        activeItem.mimeType
-                    )
-                    val isAudio = !isVideo && MediaAssetHelper.isAudioFileOrType(
-                        activeItem.filename,
-                        activeItem.downloadType,
-                        activeItem.isAudioOnly,
-                        activeItem.mimeType
-                    )
-                    if (isVideo || isAudio) {
-                        MediaAssetHelper.writeVerifiedMediaAssetToFile(
-                            context = context,
-                            targetFile = targetFile,
-                            isVideo = isVideo,
-                            seed = activeItem.url
-                        ) { written, total ->
-                            val pct = ((written * 100.0) / total).toInt().coerceIn(1, 99)
-                            onProgress(written, total, pct, 850_000L)
-                        }
-                    } else {
-                        throw netErr
-                    }
+                if (useMultiConnection) {
+                    downloadMultiThreaded(activeItem, targetFile, 4, onProgress)
+                } else {
+                    downloadSingleStream(activeItem, targetFile, onProgress)
                 }
 
                 val statusAfter = repository.getDownloadById(activeItem.id)?.status

@@ -14,9 +14,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.net.URLDecoder
+import java.net.URLEncoder
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
@@ -49,7 +53,7 @@ class MusicDownloadManager(
 
     companion object {
         private const val TAG = "MusicDownloadManager"
-        private const val BUFFER_SIZE = 16 * 1024
+        private const val BUFFER_SIZE = 32 * 1024
 
         private val trackInfoCache = ConcurrentHashMap<String, MusicTrackInfo>()
 
@@ -75,13 +79,13 @@ class MusicDownloadManager(
             "tidal.com" to "Tidal",
             "qobuz.com" to "Qobuz",
             "archive.org" to "Internet Archive Audio",
+            "soundhelix.com" to "SoundHelix Studio Audio",
             "freemusicarchive.org" to "Free Music Archive",
-            "wikimedia.org" to "Wikimedia Commons Audio",
-            "webtorrent.io" to "WebTorrent Creative Commons"
+            "wikimedia.org" to "Wikimedia Commons Audio"
         )
 
         fun detectMusicPlatform(url: String): String? {
-            val lower = url.lowercase()
+            val lower = url.lowercase(Locale.US)
             for ((domain, platformName) in KNOWN_MUSIC_DOMAINS) {
                 if (domain == "youtube.com" || domain == "youtu.be") continue
                 if (lower.contains(domain)) {
@@ -91,7 +95,7 @@ class MusicDownloadManager(
             val cleanPath = lower.substringBefore("?").substringBefore("#")
             val ext = cleanPath.substringAfterLast(".", "")
             if (ext in AUDIO_EXTENSIONS) {
-                return "Direct Audio (${ext.uppercase()})"
+                return "Direct Audio (${ext.uppercase(Locale.US)})"
             }
             return null
         }
@@ -101,7 +105,7 @@ class MusicDownloadManager(
         }
 
         fun formatLabelForCode(formatCode: String): String {
-            return when (formatCode.lowercase()) {
+            return when (formatCode.lowercase(Locale.US)) {
                 "mp3_320" -> "MP3 320 kbps"
                 "mp3_192" -> "MP3 192 kbps"
                 "flac" -> "FLAC Lossless"
@@ -112,7 +116,7 @@ class MusicDownloadManager(
         }
 
         fun extensionForFormat(formatCode: String): String {
-            return when (formatCode.lowercase()) {
+            return when (formatCode.lowercase(Locale.US)) {
                 "flac" -> ".flac"
                 "m4a", "m4a_256" -> ".m4a"
                 "ogg", "ogg_192" -> ".ogg"
@@ -121,7 +125,7 @@ class MusicDownloadManager(
         }
 
         fun mimeTypeForFormat(formatCode: String): String {
-            return when (formatCode.lowercase()) {
+            return when (formatCode.lowercase(Locale.US)) {
                 "flac" -> "audio/flac"
                 "m4a", "m4a_256" -> "audio/mp4"
                 "ogg", "ogg_192" -> "audio/ogg"
@@ -131,28 +135,28 @@ class MusicDownloadManager(
 
         fun getSampleMusicTracks(): List<SampleTrack> = listOf(
             SampleTrack(
-                title = "Beastie Boys - Now Get Busy (CC-BY)",
-                artist = "The WIRED CD",
+                title = "SoundHelix Song 1 (Electronic Synth MP3)",
+                artist = "T. Schürger",
                 platform = "Direct MP3",
-                url = "https://webtorrent.io/torrents/The%20WIRED%20CD%20-%20Rip.%20Sample.%20Mash.%20Share/01%20-%20Beastie%20Boys%20-%20Now%20Get%20Busy.mp3"
+                url = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"
             ),
             SampleTrack(
-                title = "David Byrne - My Fair Lady (CC-BY)",
-                artist = "The WIRED CD",
+                title = "SoundHelix Song 2 (Ambient Groove MP3)",
+                artist = "T. Schürger",
                 platform = "Direct MP3",
-                url = "https://webtorrent.io/torrents/The%20WIRED%20CD%20-%20Rip.%20Sample.%20Mash.%20Share/02%20-%20David%20Byrne%20-%20My%20Fair%20Lady.mp3"
+                url = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3"
             ),
             SampleTrack(
-                title = "My Morning Jacket - One Big Holiday (CC-BY)",
-                artist = "The WIRED CD",
+                title = "SoundHelix Song 3 (Progressive Lead MP3)",
+                artist = "T. Schürger",
                 platform = "Direct MP3",
-                url = "https://webtorrent.io/torrents/The%20WIRED%20CD%20-%20Rip.%20Sample.%20Mash.%20Share/04%20-%20My%20Morning%20Jacket%20-%20One%20Big%20Holiday.mp3"
+                url = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3"
             ),
             SampleTrack(
-                title = "Thievery Corporation - DC 3000 (CC-BY)",
-                artist = "The WIRED CD",
-                platform = "Direct MP3",
-                url = "https://webtorrent.io/torrents/The%20WIRED%20CD%20-%20Rip.%20Sample.%20Mash.%20Share/10%20-%20Thievery%20Corporation%20-%20DC%203000.mp3"
+                title = "Elephants Dream Orchestral Score (CC-BY MP3)",
+                artist = "Jan Morgenstern",
+                platform = "Internet Archive Audio",
+                url = "https://archive.org/download/ElephantsDream/ED-CM-5.1-DVD-C.mp3"
             )
         )
     }
@@ -164,17 +168,26 @@ class MusicDownloadManager(
         val url: String
     )
 
-    suspend fun extractMusicInfo(rawUrl: String): MusicTrackInfo? {
+    suspend fun extractMusicInfo(rawUrl: String, preferredFormatCode: String? = null): MusicTrackInfo? {
         val validUrl = VideoDownloadManager.normalizeHttpUrl(rawUrl) ?: return null
-        trackInfoCache[validUrl]?.let { return it }
+        val cacheKey = if (preferredFormatCode != null) "$validUrl|$preferredFormatCode" else validUrl
+        trackInfoCache[cacheKey]?.let { return it }
 
         // 1. Check if this is a YouTube or YouTube Music URL
         if (YouTubeExtractor.extractVideoIdFromUrl(validUrl) != null) {
             val ytInfo = YouTubeExtractor(context).extract(validUrl)
-            if (ytInfo != null) {
+            if (ytInfo != null && ytInfo.formats.isNotEmpty()) {
+                val wantWebm = preferredFormatCode?.lowercase(Locale.US)?.startsWith("ogg") == true
                 val bestAudio = ytInfo.formats
                     .filter { it.isAudioOnly }
-                    .maxByOrNull { (if (it.container == "m4a") 10000 else 0) + (it.audioBitrate ?: 0) }
+                    .maxByOrNull { fmt ->
+                        val containerBonus = when {
+                            wantWebm && fmt.container == "webm" -> 10000
+                            !wantWebm && fmt.container == "m4a" -> 10000
+                            else -> 0
+                        }
+                        containerBonus + (fmt.audioBitrate ?: 0)
+                    }
                     ?: ytInfo.formats.firstOrNull { it.formatId.startsWith("muxed_") }
                     ?: ytInfo.formats.firstOrNull()
 
@@ -187,14 +200,24 @@ class MusicDownloadManager(
                     containerExt = bestAudio?.container?.let { if (it == "webm") ".webm" else ".m4a" },
                     estimatedSizeBytes = bestAudio?.fileSize ?: 0L
                 )
-                trackInfoCache[validUrl] = info
+                trackInfoCache[cacheKey] = info
+                return info
+            }
+        }
+
+        // 2. Check if this is an Internet Archive item page (https://archive.org/details/<itemId>)
+        val archiveItemMatch = Regex("""archive\.org/details/([^/?#]+)""", RegexOption.IGNORE_CASE).find(validUrl)
+        if (archiveItemMatch != null) {
+            val itemId = archiveItemMatch.groupValues[1]
+            extractArchiveOrgAudio(itemId, validUrl, preferredFormatCode)?.let { info ->
+                trackInfoCache[cacheKey] = info
                 return info
             }
         }
 
         val platform = detectMusicPlatform(validUrl) ?: "Audio Stream"
         val decodedSlug = try {
-            java.net.URLDecoder.decode(
+            URLDecoder.decode(
                 validUrl.substringBefore("?").trimEnd('/').substringAfterLast("/"),
                 "UTF-8"
             )
@@ -211,12 +234,15 @@ class MusicDownloadManager(
         return try {
             val request = Request.Builder()
                 .url(validUrl)
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36")
+                .header("User-Agent", YouTubeExtractor.DEFAULT_MOBILE_USER_AGENT)
                 .header("Range", "bytes=0-32767")
                 .build()
             okHttpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return null
+                }
                 val finalUrl = response.request.url.toString()
-                val contentType = (response.header("Content-Type") ?: "").lowercase()
+                val contentType = (response.header("Content-Type") ?: "").lowercase(Locale.US)
                 val contentRange = response.header("Content-Range")
                 val totalLength = contentRange?.substringAfterLast("/")?.toLongOrNull()
                     ?: response.header("Content-Length")?.toLongOrNull()
@@ -224,8 +250,15 @@ class MusicDownloadManager(
 
                 val isHtml = contentType.startsWith("text/html") || contentType.startsWith("application/xhtml")
                 if (!isHtml) {
-                    val extFromUrl = decodedSlug.substringAfterLast(".", "").lowercase()
-                    val containerExt = if (extFromUrl in AUDIO_EXTENSIONS) ".$extFromUrl" else null
+                    val extFromUrl = decodedSlug.substringAfterLast(".", "").lowercase(Locale.US)
+                    val containerExt = when {
+                        extFromUrl in AUDIO_EXTENSIONS -> ".$extFromUrl"
+                        contentType.contains("flac") -> ".flac"
+                        contentType.contains("ogg") || contentType.contains("opus") -> ".ogg"
+                        contentType.contains("mp4") || contentType.contains("m4a") || contentType.contains("aac") -> ".m4a"
+                        contentType.contains("wav") -> ".wav"
+                        else -> ".mp3"
+                    }
                     val info = MusicTrackInfo(
                         title = slugTitle,
                         artist = platform,
@@ -235,7 +268,7 @@ class MusicDownloadManager(
                         containerExt = containerExt,
                         estimatedSizeBytes = totalLength
                     )
-                    trackInfoCache[validUrl] = info
+                    trackInfoCache[cacheKey] = info
                     return info
                 }
 
@@ -243,7 +276,10 @@ class MusicDownloadManager(
                 val extractedTitle = extractMetaTag(html, "og:title")
                     ?: extractHtmlTitle(html)
                     ?: slugTitle
-                val extractedAudio = extractMetaTag(html, "og:audio:secure_url")
+
+                val bandcampAudio = extractBandcampAudioUrl(html)
+                val extractedAudio = bandcampAudio
+                    ?: extractMetaTag(html, "og:audio:secure_url")
                     ?: extractMetaTag(html, "og:audio")
                     ?: extractMetaTag(html, "twitter:player:stream")
                     ?: Regex("""<(?:audio|source)[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
@@ -266,28 +302,97 @@ class MusicDownloadManager(
                     platform
                 }
 
+                val extFromStream = extractedAudio?.substringBefore("?")?.substringAfterLast(".", "")?.lowercase(Locale.US)
+                val resolvedExt = if (extFromStream in AUDIO_EXTENSIONS) ".$extFromStream" else null
+
                 val info = MusicTrackInfo(
                     title = cleanTitle,
                     artist = artistFromTitle,
                     platform = platform,
                     sourceUrl = validUrl,
-                    directAudioUrl = extractedAudio,
-                    estimatedSizeBytes = totalLength
+                    directAudioUrl = extractedAudio?.replace("&amp;", "&")?.replace("\\/", "/"),
+                    containerExt = resolvedExt,
+                    estimatedSizeBytes = 0L
                 )
-                trackInfoCache[validUrl] = info
+                trackInfoCache[cacheKey] = info
                 info
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Metadata probe fallback for music info: ${e.message}")
-            MusicTrackInfo(
-                title = slugTitle,
-                artist = platform,
-                platform = platform,
-                sourceUrl = validUrl,
-                directAudioUrl = validUrl,
-                estimatedSizeBytes = 0L
-            )
+            Log.w(TAG, "Error probing music info: ${e.message}")
+            null
         }
+    }
+
+    private fun extractArchiveOrgAudio(
+        itemId: String,
+        sourceUrl: String,
+        preferredFormatCode: String?
+    ): MusicTrackInfo? {
+        return try {
+            val req = Request.Builder()
+                .url("https://archive.org/metadata/$itemId")
+                .header("User-Agent", YouTubeExtractor.DEFAULT_MOBILE_USER_AGENT)
+                .build()
+            okHttpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val root = JSONObject(resp.body?.string().orEmpty())
+                val metaObj = root.optJSONObject("metadata")
+                val title = metaObj?.optString("title")?.takeIf { it.isNotBlank() } ?: itemId
+                val artist = metaObj?.optString("creator")?.takeIf { it.isNotBlank() } ?: "Internet Archive"
+                val filesArr = root.optJSONArray("files") ?: return null
+
+                val wantExt = preferredFormatCode?.let { extensionForFormat(it).removePrefix(".") } ?: "mp3"
+                var bestName: String? = null
+                var bestExt = "mp3"
+                var bestSize = 0L
+
+                val candidates = mutableListOf<Triple<String, String, Long>>()
+                for (i in 0 until filesArr.length()) {
+                    val fObj = filesArr.optJSONObject(i) ?: continue
+                    val name = fObj.optString("name")
+                    val ext = name.substringAfterLast(".", "").lowercase(Locale.US)
+                    if (ext in AUDIO_EXTENSIONS) {
+                        val size = fObj.optString("size", "0").toLongOrNull() ?: 0L
+                        candidates.add(Triple(name, ext, size))
+                    }
+                }
+                if (candidates.isEmpty()) return null
+
+                val chosen = candidates.firstOrNull { it.second == wantExt }
+                    ?: candidates.firstOrNull { it.second == "mp3" }
+                    ?: candidates.first()
+
+                bestName = chosen.first
+                bestExt = chosen.second
+                bestSize = chosen.third
+
+                val encPath = bestName.split("/").joinToString("/") {
+                    URLEncoder.encode(it, "UTF-8").replace("+", "%20")
+                }
+                val directUrl = "https://archive.org/download/$itemId/$encPath"
+                MusicTrackInfo(
+                    title = title,
+                    artist = artist,
+                    platform = "Internet Archive Audio",
+                    sourceUrl = sourceUrl,
+                    directAudioUrl = directUrl,
+                    containerExt = ".$bestExt",
+                    estimatedSizeBytes = bestSize
+                )
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Archive.org audio metadata error: ${e.message}")
+            null
+        }
+    }
+
+    private fun extractBandcampAudioUrl(html: String): String? {
+        val unescaped = html
+            .replace("&quot;", "\"")
+            .replace("&amp;", "&")
+            .replace("\\/", "/")
+        val m = Regex(""""mp3-128"\s*:\s*"(https?://[^"]+)"""").find(unescaped)
+        return m?.groupValues?.getOrNull(1)
     }
 
     private fun extractMetaTag(html: String, property: String): String? {
@@ -324,9 +429,15 @@ class MusicDownloadManager(
         val chosenFormat = formatCode ?: prefs.getString("default_music_format", "mp3_320") ?: "mp3_320"
         val qualityLabel = formatLabelForCode(chosenFormat)
 
-        val cachedTrackInfo = trackInfoCache[validUrl]
+        val cachedTrackInfo = trackInfoCache["$validUrl|$chosenFormat"] ?: trackInfoCache[validUrl]
         val isYt = YouTubeExtractor.extractVideoIdFromUrl(validUrl) != null
-        val ext = cachedTrackInfo?.containerExt ?: if (isYt) ".m4a" else extensionForFormat(chosenFormat)
+        val urlCleanPath = validUrl.substringBefore("?").substringBefore("#")
+        val urlExt = urlCleanPath.substringAfterLast(".", "").lowercase(Locale.US)
+        val ext = cachedTrackInfo?.containerExt
+            ?: if (urlExt in AUDIO_EXTENSIONS) ".$urlExt"
+            else if (isYt) ".m4a"
+            else extensionForFormat(chosenFormat)
+
         val mime = MediaAssetHelper.getMimeTypeForFilename("track$ext", isVideo = false)
 
         val rawInputName = downloadItem.filename.trim()
@@ -336,7 +447,7 @@ class MusicDownloadManager(
             rawInputName.startsWith("Audio_Track")
 
         val decodedSlug = try {
-            java.net.URLDecoder.decode(
+            URLDecoder.decode(
                 validUrl.substringBefore("?").trimEnd('/').substringAfterLast("/"),
                 "UTF-8"
             )
@@ -353,7 +464,7 @@ class MusicDownloadManager(
             .trim()
             .ifBlank { "Audio_Track_${System.currentTimeMillis()}" }
 
-        val finalFilename = if (baseTitle.lowercase().endsWith(ext)) baseTitle else "$baseTitle$ext"
+        val finalFilename = if (baseTitle.lowercase(Locale.US).endsWith(ext)) baseTitle else "$baseTitle$ext"
         val artist = artistName?.takeIf { it.isNotBlank() } ?: cachedTrackInfo?.artist ?: "Artist"
         val platform = cachedTrackInfo?.platform ?: detectMusicPlatform(validUrl) ?: "Music"
 
@@ -402,7 +513,13 @@ class MusicDownloadManager(
                 if (!dir.exists()) dir.mkdirs()
 
                 val lookupUrl = sourceUrl ?: directUrl!!
-                val info = extractMusicInfo(lookupUrl)
+                val formatHint = when {
+                    downloadItem.videoQuality?.contains("FLAC", ignoreCase = true) == true -> "flac"
+                    downloadItem.videoQuality?.contains("OGG", ignoreCase = true) == true -> "ogg"
+                    downloadItem.videoQuality?.contains("M4A", ignoreCase = true) == true -> "m4a"
+                    else -> "mp3_320"
+                }
+                val info = extractMusicInfo(lookupUrl, formatHint)
 
                 var activeItem = repository.getDownloadById(downloadItem.id) ?: downloadItem
                 var targetFilename = activeItem.filename
@@ -414,8 +531,8 @@ class MusicDownloadManager(
                             targetFilename.startsWith("watch") ||
                             targetFilename.startsWith("download_"))
                     ) {
-                        targetFilename = if (cleanTitle.lowercase().endsWith(ext)) cleanTitle else "$cleanTitle$ext"
-                    } else if (info.containerExt != null && !targetFilename.lowercase().endsWith(info.containerExt)) {
+                        targetFilename = if (cleanTitle.lowercase(Locale.US).endsWith(ext)) cleanTitle else "$cleanTitle$ext"
+                    } else if (info.containerExt != null && !targetFilename.lowercase(Locale.US).endsWith(info.containerExt)) {
                         targetFilename = targetFilename.substringBeforeLast(".") + info.containerExt
                     }
                     activeItem = activeItem.copy(
@@ -425,137 +542,136 @@ class MusicDownloadManager(
                     repository.update(activeItem)
                 }
 
-                val file = File(dir, targetFilename)
+                val streamUrl = info?.directAudioUrl ?: directUrl?.takeIf { !VideoDownloadManager.isWatchPageUrl(it) }
+                if (streamUrl.isNullOrBlank() || VideoDownloadManager.isWatchPageUrl(streamUrl)) {
+                    throw IOException("No direct audio stream available for $lookupUrl")
+                }
+
                 val tempRawFile = File(dir, ".tmp_music_${downloadItem.id}")
+                try {
+                    val ua = YouTubeExtractor.getUserAgentForStreamUrl(streamUrl)
+                    val request = Request.Builder()
+                        .url(streamUrl)
+                        .header("User-Agent", ua)
+                        .header("Accept", "*/*")
+                        .build()
 
-                val streamUrl = info?.directAudioUrl ?: directUrl
-                var downloadedDirectOk = false
-
-                if (!streamUrl.isNullOrBlank() && !VideoDownloadManager.isWatchPageUrl(streamUrl)) {
-                    try {
-                        val ua = if (streamUrl.contains("googlevideo.com")) {
-                            YouTubeExtractor.VR_USER_AGENT
-                        } else {
-                            "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+                    okHttpClient.newCall(request).execute().use { response ->
+                        if (!response.isSuccessful) {
+                            throw IOException("HTTP ${response.code}: ${response.message}")
+                        }
+                        val contentType = (response.header("Content-Type") ?: "").lowercase(Locale.US)
+                        if (contentType.startsWith("text/html")) {
+                            throw IOException("Server returned an HTML page instead of an audio stream")
                         }
 
-                        val request = Request.Builder()
-                            .url(streamUrl)
-                            .header("User-Agent", ua)
-                            .header("Accept", "*/*")
-                            .build()
+                        val contentLength = (response.body?.contentLength()?.takeIf { it > 0L }
+                            ?: info?.estimatedSizeBytes ?: 0L).coerceAtLeast(0L)
+                        val inputStream = response.body?.byteStream()
+                            ?: throw IOException("Empty audio stream response")
 
-                        okHttpClient.newCall(request).execute().use { response ->
-                            if (response.isSuccessful) {
-                                val contentType = (response.header("Content-Type") ?: "").lowercase()
-                                if (!contentType.startsWith("text/html")) {
-                                    val contentLength = (response.body?.contentLength()?.takeIf { it > 0L }
-                                        ?: info?.estimatedSizeBytes ?: 0L).coerceAtLeast(0L)
-                                    val inputStream = response.body?.byteStream()
-                                    if (inputStream != null) {
-                                        FileOutputStream(tempRawFile).use { outputStream ->
-                                            val buffer = ByteArray(BUFFER_SIZE)
-                                            var bytesRead: Int
-                                            var totalRead = 0L
-                                            var lastUpdateTime = System.currentTimeMillis()
-                                            var lastRead = 0L
+                        FileOutputStream(tempRawFile).use { outputStream ->
+                            val buffer = ByteArray(BUFFER_SIZE)
+                            var bytesRead: Int
+                            var totalRead = 0L
+                            var lastUpdateTime = System.currentTimeMillis()
+                            var lastRead = 0L
 
-                                            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                                                val currentStatus = repository.getDownloadById(downloadItem.id)?.status
-                                                if (currentStatus == DownloadStatus.PAUSED || currentStatus == DownloadStatus.CANCELLED) {
-                                                    tempRawFile.delete()
-                                                    return@launch
-                                                }
-                                                outputStream.write(buffer, 0, bytesRead)
-                                                totalRead += bytesRead
+                            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                val currentStatus = repository.getDownloadById(downloadItem.id)?.status
+                                if (currentStatus == DownloadStatus.PAUSED || currentStatus == DownloadStatus.CANCELLED) {
+                                    tempRawFile.delete()
+                                    return@launch
+                                }
+                                outputStream.write(buffer, 0, bytesRead)
+                                totalRead += bytesRead
 
-                                                val now = System.currentTimeMillis()
-                                                if (now - lastUpdateTime >= 350) {
-                                                    val diffSec = (now - lastUpdateTime) / 1000.0
-                                                    val speed = if (diffSec > 0) ((totalRead - lastRead) / diffSec).toLong() else 0L
-                                                    val progress = if (contentLength > 0) {
-                                                        ((totalRead * 100.0) / contentLength).toInt().coerceIn(0, 100)
-                                                    } else {
-                                                        60
-                                                    }
-                                                    onProgress(totalRead, contentLength.coerceAtLeast(totalRead), progress, speed)
-                                                    lastUpdateTime = now
-                                                    lastRead = totalRead
-                                                }
-                                            }
-                                            outputStream.flush()
-                                            onProgress(totalRead, contentLength.coerceAtLeast(totalRead), 100, 0)
-                                            downloadedDirectOk = totalRead > 1024L
-                                        }
+                                val now = System.currentTimeMillis()
+                                if (now - lastUpdateTime >= 350) {
+                                    val diffSec = (now - lastUpdateTime) / 1000.0
+                                    val speed = if (diffSec > 0) ((totalRead - lastRead) / diffSec).toLong() else 0L
+                                    val progress = if (contentLength > 0) {
+                                        ((totalRead * 100.0) / contentLength).toInt().coerceIn(0, 99)
+                                    } else {
+                                        60
                                     }
+                                    onProgress(totalRead, contentLength.coerceAtLeast(totalRead), progress, speed)
+                                    lastUpdateTime = now
+                                    lastRead = totalRead
                                 }
                             }
+                            outputStream.flush()
+                            onProgress(totalRead, contentLength.coerceAtLeast(totalRead), 100, 0)
                         }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Direct audio stream error (${e.message}), using fallback stream")
-                        downloadedDirectOk = false
                     }
-                }
 
-                val statusNow = repository.getDownloadById(downloadItem.id)?.status
-                if (statusNow == DownloadStatus.PAUSED || statusNow == DownloadStatus.CANCELLED) {
-                    tempRawFile.delete()
-                    return@launch
-                }
+                    val statusNow = repository.getDownloadById(downloadItem.id)?.status
+                    if (statusNow == DownloadStatus.PAUSED || statusNow == DownloadStatus.CANCELLED) {
+                        return@launch
+                    }
 
-                try {
-                    if (downloadedDirectOk && tempRawFile.exists() && tempRawFile.length() > 1024L) {
-                        val detected = MediaAssetHelper.detectActualMimeType(tempRawFile, fallbackIsVideo = false)
-                        if (detected == "audio/mp4" || detected == "video/mp4") {
-                            val remuxed = MediaAssetHelper.remuxAudioToStandardM4a(tempRawFile, file)
-                            if (!remuxed) {
-                                tempRawFile.copyTo(file, overwrite = true)
-                            }
-                        } else {
-                            tempRawFile.copyTo(file, overwrite = true)
+                    if (!tempRawFile.exists() || tempRawFile.length() <= 1024L) {
+                        throw IOException("Downloaded audio stream is empty or corrupted")
+                    }
+
+                    // Align filename extension with the true container magic bytes
+                    val detectedMime = MediaAssetHelper.detectActualMimeType(tempRawFile, fallbackIsVideo = false)
+                    val trueExt = when (detectedMime) {
+                        "audio/mp4", "video/mp4" -> ".m4a"
+                        "audio/webm", "video/webm" -> ".webm"
+                        "audio/flac" -> ".flac"
+                        "audio/ogg" -> ".ogg"
+                        "audio/wav" -> ".wav"
+                        "audio/mpeg" -> ".mp3"
+                        else -> null
+                    }
+                    if (trueExt != null && !targetFilename.lowercase(Locale.US).endsWith(trueExt)) {
+                        targetFilename = targetFilename.substringBeforeLast(".") + trueExt
+                    }
+
+                    val finalFile = File(dir, targetFilename)
+                    if (detectedMime == "audio/mp4" || detectedMime == "video/mp4") {
+                        val remuxed = MediaAssetHelper.remuxAudioToStandardM4a(tempRawFile, finalFile)
+                        if (!remuxed) {
+                            tempRawFile.copyTo(finalFile, overwrite = true)
                         }
                     } else {
-                        // Fallback when the remote site is a SPA (e.g. SoundCloud/Spotify/Bandcamp page) with no direct file URL
-                        MediaAssetHelper.writeVerifiedMediaAssetToFile(
-                            context = context,
-                            targetFile = file,
-                            isVideo = false,
-                            seed = lookupUrl
-                        ) { written, total ->
-                            val pct = ((written * 100.0) / total).toInt().coerceIn(1, 99)
-                            onProgress(written, total, pct, 640_000L)
-                        }
+                        tempRawFile.copyTo(finalFile, overwrite = true)
                     }
+
+                    val finalFileSize = finalFile.length()
+                    val accurateMime = MediaAssetHelper.detectActualMimeType(finalFile, fallbackIsVideo = false)
+                        ?: MediaAssetHelper.getMimeTypeForFilename(targetFilename, isVideo = false)
+
+                    val latestItem = repository.getDownloadById(downloadItem.id) ?: activeItem
+                    val completedItem = latestItem.copy(
+                        filename = targetFilename,
+                        fileSize = finalFileSize,
+                        downloadedSize = finalFileSize,
+                        progress = 100,
+                        downloadSpeed = 0L,
+                        mimeType = accurateMime,
+                        status = DownloadStatus.COMPLETED,
+                        completedDate = java.util.Date(),
+                        errorMessage = null
+                    )
+                    repository.update(completedItem)
+                    onComplete(completedItem)
                 } finally {
                     tempRawFile.delete()
                 }
-
-                val finalFileSize = file.length()
-                val accurateMime = MediaAssetHelper.detectActualMimeType(file, fallbackIsVideo = false)
-                    ?: MediaAssetHelper.getMimeTypeForFilename(targetFilename, isVideo = false)
-
-                val latestItem = repository.getDownloadById(downloadItem.id) ?: activeItem
-                val completedItem = latestItem.copy(
-                    filename = targetFilename,
-                    fileSize = finalFileSize,
-                    downloadedSize = finalFileSize,
-                    progress = 100,
-                    downloadSpeed = 0L,
-                    mimeType = accurateMime,
-                    status = DownloadStatus.COMPLETED,
-                    completedDate = java.util.Date(),
-                    errorMessage = null
-                )
-                repository.update(completedItem)
-                onComplete(completedItem)
             } catch (e: Exception) {
                 Log.w(TAG, "Error downloading music: ${e.message}", e)
-                val errorItem = downloadItem.copy(
-                    status = DownloadStatus.FAILED,
-                    errorMessage = e.message ?: "Audio download error"
-                )
-                repository.update(errorItem)
-                onError(errorItem, e.message ?: "Audio download error")
+                val latest = repository.getDownloadById(downloadItem.id) ?: downloadItem
+                if (latest.status != DownloadStatus.PAUSED && latest.status != DownloadStatus.CANCELLED) {
+                    val errorItem = latest.copy(
+                        status = DownloadStatus.FAILED,
+                        downloadSpeed = 0L,
+                        errorMessage = e.message ?: "Audio download error"
+                    )
+                    repository.update(errorItem)
+                    onError(errorItem, e.message ?: "Audio download error")
+                }
             }
         }
     }

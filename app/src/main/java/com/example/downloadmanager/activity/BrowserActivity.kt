@@ -211,58 +211,58 @@ class BrowserActivity : AppCompatActivity() {
 
         val items = listOf(
             DetectedLinkItem(
-                title = "Beastie Boys - Now Get Busy (The WIRED CD CC-BY MP3)",
-                url = "https://webtorrent.io/torrents/The%20WIRED%20CD%20-%20Rip.%20Sample.%20Mash.%20Share/01%20-%20Beastie%20Boys%20-%20Now%20Get%20Busy.mp3",
+                title = "SoundHelix Song 1 (Electronic Synth MP3)",
+                url = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
                 downloadType = DownloadType.MUSIC,
                 badgeLabel = "MUSIC • MP3"
             ),
             DetectedLinkItem(
-                title = "David Byrne - My Fair Lady (The WIRED CD CC-BY MP3)",
-                url = "https://webtorrent.io/torrents/The%20WIRED%20CD%20-%20Rip.%20Sample.%20Mash.%20Share/02%20-%20David%20Byrne%20-%20My%20Fair%20Lady.mp3",
+                title = "SoundHelix Song 2 (Ambient Groove MP3)",
+                url = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3",
                 downloadType = DownloadType.MUSIC,
                 badgeLabel = "MUSIC • MP3"
             ),
             DetectedLinkItem(
-                title = "My Morning Jacket - One Big Holiday (CC-BY MP3)",
-                url = "https://webtorrent.io/torrents/The%20WIRED%20CD%20-%20Rip.%20Sample.%20Mash.%20Share/04%20-%20My%20Morning%20Jacket%20-%20One%20Big%20Holiday.mp3",
+                title = "Elephants Dream Orchestral Score (CC-BY MP3)",
+                url = "https://archive.org/download/ElephantsDream/ED-CM-5.1-DVD-C.mp3",
                 downloadType = DownloadType.MUSIC,
                 badgeLabel = "MUSIC • MP3"
             ),
             DetectedLinkItem(
-                title = "Big Buck Bunny (1080p Open Movie MP4)",
-                url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+                title = "Big Buck Bunny (720p Open Movie MP4)",
+                url = "https://archive.org/download/BigBuckBunny_124/Content/big_buck_bunny_720p_surround.mp4",
                 downloadType = DownloadType.VIDEO,
                 badgeLabel = "VIDEO • HD MP4"
             ),
             DetectedLinkItem(
-                title = "For Bigger Blazes (720p Fast Showcase MP4)",
-                url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+                title = "Sintel Open Movie (Surround MP4)",
+                url = "https://archive.org/download/Sintel/sintel-2048-surround_512kb.mp4",
                 downloadType = DownloadType.VIDEO,
-                badgeLabel = "VIDEO • 720P"
+                badgeLabel = "VIDEO • MP4"
             ),
             DetectedLinkItem(
-                title = "Tears of Steel (Open Sci-Fi Short MP4)",
-                url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
+                title = "Elephants Dream Open Movie (MP4)",
+                url = "https://archive.org/download/ElephantsDream/ed_1024_512kb.mp4",
                 downloadType = DownloadType.VIDEO,
-                badgeLabel = "VIDEO • 1080P"
+                badgeLabel = "VIDEO • MP4"
             ),
             DetectedLinkItem(
-                title = "The WIRED CD - 16 Track Bundle (Multi-File Magnet)",
+                title = "Elephants Dream Audio & Video Bundle (Multi-File Magnet)",
                 url = TorrentDownloadManager.SAMPLE_MAGNET_WIRED_CD,
                 downloadType = DownloadType.MAGNET,
-                badgeLabel = "MAGNET • 10 FILES"
+                badgeLabel = "MAGNET • SWARM"
             ),
             DetectedLinkItem(
-                title = "Sintel Open Movie Bundle (MP4 + 9 Subtitles Magnet)",
+                title = "Sintel Open Movie Bundle (Multi-File Magnet)",
                 url = TorrentDownloadManager.SAMPLE_MAGNET_SINTEL,
                 downloadType = DownloadType.MAGNET,
-                badgeLabel = "MAGNET • 11 FILES"
+                badgeLabel = "MAGNET • SWARM"
             ),
             DetectedLinkItem(
                 title = "Big Buck Bunny Swarm Bundle (Multi-File Magnet)",
                 url = TorrentDownloadManager.SAMPLE_MAGNET_BIG_BUCK_BUNNY,
                 downloadType = DownloadType.MAGNET,
-                badgeLabel = "MAGNET • 3 FILES"
+                badgeLabel = "MAGNET • SWARM"
             ),
             DetectedLinkItem(
                 title = "W3C Sample Technical Specification.pdf",
@@ -305,28 +305,28 @@ class BrowserActivity : AppCompatActivity() {
                 binding.tvPageDescription.text = "High-definition MP4 streams with stereo AAC audio."
                 listOf(
                     DetectedLinkItem(
-                        title = "For Bigger Blazes (720p HD MP4)",
-                        url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+                        title = "Big Buck Bunny (720p HD MP4)",
+                        url = "https://archive.org/download/BigBuckBunny_124/Content/big_buck_bunny_720p_surround.mp4",
                         downloadType = DownloadType.VIDEO,
                         badgeLabel = "VIDEO • 720P"
                     ),
                     DetectedLinkItem(
-                        title = "For Bigger Escapes (720p HD MP4)",
-                        url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
+                        title = "Sintel Open Movie (MP4)",
+                        url = "https://archive.org/download/Sintel/sintel-2048-surround_512kb.mp4",
+                        downloadType = DownloadType.VIDEO,
+                        badgeLabel = "VIDEO • MP4"
+                    ),
+                    DetectedLinkItem(
+                        title = "Elephants Dream Open Movie (MP4)",
+                        url = "https://archive.org/download/ElephantsDream/ed_1024_512kb.mp4",
+                        downloadType = DownloadType.VIDEO,
+                        badgeLabel = "VIDEO • MP4"
+                    ),
+                    DetectedLinkItem(
+                        title = "Tears of Steel (720p Sci-Fi MP4)",
+                        url = "https://archive.org/download/Tears-of-Steel/tears_of_steel_720p.mp4",
                         downloadType = DownloadType.VIDEO,
                         badgeLabel = "VIDEO • 720P"
-                    ),
-                    DetectedLinkItem(
-                        title = "Big Buck Bunny (1080p Full Movie MP4)",
-                        url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-                        downloadType = DownloadType.VIDEO,
-                        badgeLabel = "VIDEO • 1080P"
-                    ),
-                    DetectedLinkItem(
-                        title = "Tears of Steel (1080p Sci-Fi MP4)",
-                        url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
-                        downloadType = DownloadType.VIDEO,
-                        badgeLabel = "VIDEO • 1080P"
                     )
                 )
             }
@@ -336,25 +336,25 @@ class BrowserActivity : AppCompatActivity() {
                 binding.tvPageDescription.text = "Multi-file magnet links with selectable audio, video, and subtitle files."
                 listOf(
                     DetectedLinkItem(
-                        title = "The WIRED CD (10 Files • MP3 Album)",
+                        title = "Elephants Dream Bundle (MP3 / FLAC / OGG / MP4 Magnet)",
                         url = TorrentDownloadManager.SAMPLE_MAGNET_WIRED_CD,
                         downloadType = DownloadType.MAGNET,
                         badgeLabel = "MAGNET"
                     ),
                     DetectedLinkItem(
-                        title = "Sintel Open Movie (11 Files • MP4 + Subtitles)",
+                        title = "Sintel Open Movie (Multi-File MP4 + Subtitles Magnet)",
                         url = TorrentDownloadManager.SAMPLE_MAGNET_SINTEL,
                         downloadType = DownloadType.MAGNET,
                         badgeLabel = "MAGNET"
                     ),
                     DetectedLinkItem(
-                        title = "Big Buck Bunny (3 Files • MP4 + SRT + Poster)",
+                        title = "Big Buck Bunny (720p MP4 + Poster Magnet)",
                         url = TorrentDownloadManager.SAMPLE_MAGNET_BIG_BUCK_BUNNY,
                         downloadType = DownloadType.MAGNET,
                         badgeLabel = "MAGNET"
                     ),
                     DetectedLinkItem(
-                        title = "Cosmos Laundromat (3 Files • MP4 + SRT + Poster)",
+                        title = "Tears of Steel (1080p/720p MP4 + FLAC Magnet)",
                         url = TorrentDownloadManager.SAMPLE_MAGNET_COSMOS_LAUNDROMAT,
                         downloadType = DownloadType.MAGNET,
                         badgeLabel = "MAGNET"

@@ -1,0 +1,6 @@
+{
+  "summary":  "Implementation plan for eliminating bundled sample asset substitutions, ensuring real network error reporting, robust YouTube/web media streaming, real BitTorrent P2P/WebSeed downloads, and strict media playback without silent fallbacks.",
+  "updatedAt":  "2026-11-09T17:52:30.637612698Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

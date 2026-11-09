@@ -15,16 +15,16 @@ import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
 
 /**
- * Real YouTube & YouTube Music stream extractor using InnerTube ANDROID_VR / iOS / Embedded clients.
+ * Real YouTube & YouTube Music stream extractor using InnerTube ANDROID_VR / iOS clients.
  * Extracts both progressive muxed MP4 streams (video + audio) and adaptive HD video / M4A & Opus audio streams.
  */
 class YouTubeExtractor(@Suppress("unused") private val context: Context) {
 
     private val okHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(12, TimeUnit.SECONDS)
-            .writeTimeout(10, TimeUnit.SECONDS)
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(12, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .followRedirects(true)
             .followSslRedirects(true)
@@ -35,7 +35,16 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context) {
         private const val TAG = "YouTubeExtractor"
 
         const val VR_USER_AGENT =
-            "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 14; en_US; Quest 3; Build/UP1A.231005.007.A1; Cronet/132.0.6808.3)"
+            "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+
+        const val IOS_USER_AGENT =
+            "com.google.ios.youtube/20.03.02 (iPhone16,2; U; CPU iOS 18_2_1 like Mac OS X;)"
+
+        const val ANDROID_TESTSUITE_USER_AGENT =
+            "com.google.android.youtube/1.9 (Linux; U; Android 12; US) gzip"
+
+        const val DEFAULT_MOBILE_USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
         private val cache = ConcurrentHashMap<String, Pair<Long, YouTubeVideoInfo>>()
         private const val CACHE_TTL_MS = 10 * 60 * 1000L // 10 minutes
@@ -51,6 +60,23 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context) {
             }
             val vParam = Regex("[?&]v=([a-zA-Z0-9_-]{11})").find(url)
             return vParam?.groupValues?.getOrNull(1)
+        }
+
+        /**
+         * Returns the exact User-Agent required by a signed `googlevideo.com` stream URL
+         * based on its `c=` client query parameter so YouTube CDN does not reject with HTTP 403.
+         */
+        fun getUserAgentForStreamUrl(streamUrl: String): String {
+            if (!streamUrl.contains("googlevideo.com", ignoreCase = true)) {
+                return DEFAULT_MOBILE_USER_AGENT
+            }
+            val clientParam = Regex("[?&]c=([^&]+)").find(streamUrl)?.groupValues?.getOrNull(1)?.uppercase()
+            return when (clientParam) {
+                "IOS" -> IOS_USER_AGENT
+                "ANDROID_TESTSUITE" -> ANDROID_TESTSUITE_USER_AGENT
+                "ANDROID_VR" -> VR_USER_AGENT
+                else -> VR_USER_AGENT
+            }
         }
     }
 
@@ -118,6 +144,22 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context) {
         }
     }
 
+    private fun fetchVisitorData(videoId: String): String? {
+        return try {
+            val req = Request.Builder()
+                .url("https://www.youtube.com/embed/$videoId")
+                .header("User-Agent", DEFAULT_MOBILE_USER_AGENT)
+                .build()
+            okHttpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val html = resp.body?.string().orEmpty()
+                Regex(""""VISITOR_DATA"\s*:\s*"([^"]+)"""").find(html)?.groupValues?.getOrNull(1)
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun fetchFromInnerTube(videoId: String): InnerTubeResult {
         val clients = listOf(
             Triple(
@@ -127,46 +169,43 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context) {
             ),
             Triple(
                 "IOS",
-                "19.45.4",
-                "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)"
+                "20.03.02",
+                IOS_USER_AGENT
             ),
             Triple(
                 "ANDROID_VR",
                 "1.56.21",
-                "com.google.android.apps.youtube.vr.oculus/1.56.21 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+                VR_USER_AGENT
             ),
             Triple(
-                "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
-                "2.0",
-                "Mozilla/5.0 (PlayStation; PlayStation 4/12.00) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.4 Safari/605.1.15"
+                "ANDROID_TESTSUITE",
+                "1.9",
+                ANDROID_TESTSUITE_USER_AGENT
             )
         )
 
         var extractedVideoInfo: VideoInfo? = null
         val allFormats = mutableListOf<VideoFormat>()
+        var visitorData: String? = null
 
-        for ((clientName, clientVersion, userAgent) in clients) {
+        for ((index, clientTriple) in clients.withIndex()) {
+            val (clientName, clientVersion, userAgent) = clientTriple
             try {
+                if (index > 0 && visitorData == null) {
+                    visitorData = fetchVisitorData(videoId)
+                }
+                val visitorField = if (!visitorData.isNullOrBlank()) {
+                    """, "visitorData": "$visitorData""""
+                } else {
+                    ""
+                }
+
                 val payload = when (clientName) {
-                    "TVHTML5_SIMPLY_EMBEDDED_PLAYER" -> """
-                        {
-                          "videoId": "$videoId",
-                          "context": {
-                            "client": {
-                              "clientName": "$clientName",
-                              "clientVersion": "$clientVersion",
-                              "hl": "en",
-                              "gl": "US"
-                            },
-                            "thirdParty": {
-                              "embedUrl": "https://www.youtube.com/"
-                            }
-                          }
-                        }
-                    """.trimIndent()
                     "IOS" -> """
                         {
                           "videoId": "$videoId",
+                          "contentCheckOk": true,
+                          "racyCheckOk": true,
                           "context": {
                             "client": {
                               "clientName": "IOS",
@@ -174,9 +213,27 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context) {
                               "deviceMake": "Apple",
                               "deviceModel": "iPhone16,2",
                               "osName": "iPhone",
-                              "osVersion": "18.1.0.22B83",
+                              "osVersion": "18.2.1.22C161",
                               "hl": "en",
-                              "gl": "US"
+                              "gl": "US"$visitorField
+                            }
+                          }
+                        }
+                    """.trimIndent()
+                    "ANDROID_TESTSUITE" -> """
+                        {
+                          "videoId": "$videoId",
+                          "contentCheckOk": true,
+                          "racyCheckOk": true,
+                          "context": {
+                            "client": {
+                              "clientName": "ANDROID_TESTSUITE",
+                              "clientVersion": "$clientVersion",
+                              "androidSdkVersion": 31,
+                              "osName": "Android",
+                              "osVersion": "12",
+                              "hl": "en",
+                              "gl": "US"$visitorField
                             }
                           }
                         }
@@ -184,15 +241,17 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context) {
                     else -> """
                         {
                           "videoId": "$videoId",
+                          "contentCheckOk": true,
+                          "racyCheckOk": true,
                           "context": {
                             "client": {
                               "clientName": "$clientName",
                               "clientVersion": "$clientVersion",
-                              "androidSdkVersion": 34,
+                              "androidSdkVersion": 32,
                               "osName": "Android",
-                              "osVersion": "14",
+                              "osVersion": "12L",
                               "hl": "en",
-                              "gl": "US"
+                              "gl": "US"$visitorField
                             }
                           }
                         }
@@ -202,15 +261,20 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context) {
                 val clientIdHeader = when (clientName) {
                     "ANDROID_VR" -> "28"
                     "IOS" -> "5"
-                    else -> "85"
+                    "ANDROID_TESTSUITE" -> "30"
+                    else -> "28"
                 }
 
-                val req = Request.Builder()
+                val reqBuilder = Request.Builder()
                     .url("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
                     .header("User-Agent", userAgent)
                     .header("Content-Type", "application/json")
                     .header("X-YouTube-Client-Name", clientIdHeader)
                     .header("X-YouTube-Client-Version", clientVersion)
+                if (!visitorData.isNullOrBlank()) {
+                    reqBuilder.header("X-Goog-Visitor-Id", visitorData)
+                }
+                val req = reqBuilder
                     .post(payload.toRequestBody("application/json".toMediaType()))
                     .build()
 
@@ -363,7 +427,7 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context) {
             val oembedUrl = "https://www.youtube.com/oembed?url=$encodedWatch&format=json"
             val req = Request.Builder()
                 .url(oembedUrl)
-                .header("User-Agent", "Mozilla/5.0 (Android 14; Mobile)")
+                .header("User-Agent", DEFAULT_MOBILE_USER_AGENT)
                 .build()
             okHttpClient.newCall(req).execute().use { response ->
                 if (!response.isSuccessful) return null

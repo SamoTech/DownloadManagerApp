@@ -6,15 +6,12 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.util.Log
-import com.example.downloadmanager.R
 import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadType
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.nio.ByteBuffer
-import kotlin.math.abs
 
 /**
  * Media inspection, container magic-byte detection, MP4+M4A muxing, DASH audio normalization,
@@ -553,65 +550,6 @@ object MediaAssetHelper {
                 extractor.release()
             } catch (_: Exception) {
             }
-        }
-    }
-
-    fun getRawResourceForMedia(filename: String, isVideo: Boolean, seed: String = filename): Int {
-        if (isVideo) {
-            return if (abs(seed.hashCode()) % 2 == 0) R.raw.luca_hd_video_1 else R.raw.luca_hd_video_2
-        }
-        val ext = filename.substringAfterLast(".", "").lowercase()
-        return when (ext) {
-            "flac" -> R.raw.luca_music_flac
-            "m4a", "aac" -> R.raw.luca_music_m4a
-            "ogg", "opus" -> R.raw.luca_music_ogg
-            else -> if (abs(seed.hashCode()) % 2 == 0) R.raw.luca_music_track_1 else R.raw.luca_music_track_2
-        }
-    }
-
-    fun writeVerifiedMediaAssetToFile(
-        context: Context,
-        targetFile: File,
-        isVideo: Boolean,
-        seed: String = targetFile.name,
-        onProgressBytes: ((Long, Long) -> Unit)? = null
-    ): File {
-        targetFile.parentFile?.mkdirs()
-        val rawResId = getRawResourceForMedia(targetFile.name, isVideo, seed)
-        val rawBytes = context.resources.openRawResource(rawResId).use { it.readBytes() }
-        val totalBytes = rawBytes.size.toLong().coerceAtLeast(1L)
-
-        FileOutputStream(targetFile).use { fos ->
-            val chunkSize = 16 * 1024
-            var offset = 0
-            while (offset < rawBytes.size) {
-                val len = minOf(chunkSize, rawBytes.size - offset)
-                fos.write(rawBytes, offset, len)
-                offset += len
-                onProgressBytes?.invoke(offset.toLong(), totalBytes)
-            }
-            fos.flush()
-        }
-        return targetFile
-    }
-
-    /**
-     * Ensures [targetFile] is a valid playable media file; only writes a fallback asset if the file
-     * is missing, empty, or an HTML error page. Never overwrites a valid downloaded media file.
-     */
-    fun ensureValidMediaFile(
-        context: Context,
-        targetFile: File,
-        isVideo: Boolean,
-        seed: String = targetFile.name
-    ): File {
-        if (isValidPlayableMediaFile(targetFile, requireVideo = isVideo)) {
-            return targetFile
-        }
-        return try {
-            writeVerifiedMediaAssetToFile(context, targetFile, isVideo, seed)
-        } catch (_: Exception) {
-            targetFile
         }
     }
 
