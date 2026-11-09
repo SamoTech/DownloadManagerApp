@@ -841,6 +841,22 @@ class MediaPlayerActivity : AppCompatActivity() {
             invalidate()
         }
 
+        override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+            super.onSizeChanged(w, h, oldw, oldh)
+            if (w > 0 && h > 0) {
+                bgPaint.shader = LinearGradient(
+                    0f, 0f, w.toFloat(), h.toFloat(),
+                    intArrayOf(
+                        Color.parseColor("#090D16"),
+                        Color.parseColor("#0F172A"),
+                        Color.parseColor("#1E293B")
+                    ),
+                    null,
+                    Shader.TileMode.CLAMP
+                )
+            }
+        }
+
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             val w = width.toFloat()
@@ -849,16 +865,6 @@ class MediaPlayerActivity : AppCompatActivity() {
 
             val phase = (currentMs / 1000.0) * 2.2
 
-            bgPaint.shader = LinearGradient(
-                0f, 0f, w, h,
-                intArrayOf(
-                    Color.parseColor("#090D16"),
-                    Color.parseColor("#0F172A"),
-                    Color.parseColor("#1E293B")
-                ),
-                null,
-                Shader.TileMode.CLAMP
-            )
             canvas.drawRect(0f, 0f, w, h, bgPaint)
 
             val centerX = w / 2f + (cos(phase) * 32f).toFloat()

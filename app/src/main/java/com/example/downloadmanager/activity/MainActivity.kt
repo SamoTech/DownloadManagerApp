@@ -9,7 +9,6 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.IBinder
 import android.os.StatFs
 import android.view.Menu
@@ -60,7 +59,6 @@ class MainActivity : AppCompatActivity() {
     }
     
     companion object {
-        private const val REQUEST_CODE_STORAGE_PERMISSION = 1001
         private const val REQUEST_CODE_NOTIFICATION_PERMISSION = 1003
     }
     
@@ -203,7 +201,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateStorageStat() {
         try {
-            val path = Environment.getExternalStorageDirectory()
+            val path = getExternalFilesDir(null) ?: filesDir
             val stat = StatFs(path.path)
             val freeBytes = stat.availableBlocksLong * stat.blockSizeLong
             val freeGb = freeBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
@@ -467,18 +465,6 @@ class MainActivity : AppCompatActivity() {
             ) {
                 requestNotificationPermission()
             }
-        } else if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
-            if (ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.WRITE_EXTERNAL_STORAGE
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                ActivityCompat.requestPermissions(
-                    this,
-                    arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
-                    REQUEST_CODE_STORAGE_PERMISSION
-                )
-            }
         }
     }
     
@@ -506,15 +492,6 @@ class MainActivity : AppCompatActivity() {
                         this,
                         R.string.notification_permission_rationale,
                         Toast.LENGTH_SHORT
-                    ).show()
-                }
-            }
-            REQUEST_CODE_STORAGE_PERMISSION -> {
-                if (grantResults.isEmpty() || grantResults[0] != PackageManager.PERMISSION_GRANTED) {
-                    Toast.makeText(
-                        this,
-                        R.string.storage_permission_rationale,
-                        Toast.LENGTH_LONG
                     ).show()
                 }
             }

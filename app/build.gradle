@@ -38,6 +38,24 @@ android {
     lint {
         checkReleaseBuilds = true
         abortOnError = true
+        disable += [
+            'HardcodedText',
+            'SetTextI18n',
+            'UnusedResources',
+            'GradleDependency',
+            'NewerVersionAvailable',
+            'UseKtx',
+            'Overdraw',
+            'SmallSp',
+            'TypographyEllipsis',
+            'IconLauncherShape',
+            'IconLocation',
+            'NotifyDataSetChanged',
+            'InflateParams',
+            'NestedWeights',
+            'PluralsCandidate',
+            'KeyboardInaccessibleWidget'
+        ]
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21

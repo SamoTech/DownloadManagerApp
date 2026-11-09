@@ -33,7 +33,8 @@
             android:layout_height="228dp"
             android:background="@drawable/card_background"
             android:backgroundTint="#090D16"
-            android:clipToOutline="true">
+            android:clipToOutline="true"
+            tools:targetApi="s">
 
             <!-- Jetpack Media3 ExoPlayer TextureView Surface (prevents SurfaceView Z-order black screen) -->
             <androidx.media3.ui.PlayerView
