@@ -7,13 +7,13 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import androidx.lifecycle.Observer
-import androidx.preference.PreferenceManager
+import androidx.core.app.ServiceCompat
 import com.example.downloadmanager.R
 import com.example.downloadmanager.activity.MainActivity
 import com.example.downloadmanager.manager.DownloadManager
@@ -25,618 +25,348 @@ import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
 import com.example.downloadmanager.model.DownloadType
-import com.example.downloadmanager.utils.MediaAssetHelper
+import com.example.downloadmanager.model.VideoFormat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import java.util.concurrent.Executors
+import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 class DownloadService : Service() {
-    
+
+    private val binder = LocalBinder()
+    private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
     private lateinit var repository: DownloadRepository
     private lateinit var downloadManager: DownloadManager
-    private lateinit var torrentDownloadManager: TorrentDownloadManager
     private lateinit var videoDownloadManager: VideoDownloadManager
     private lateinit var musicDownloadManager: MusicDownloadManager
-    
-    private val binder = LocalBinder()
-    private val executor = Executors.newFixedThreadPool(4)
-    private val scope = CoroutineScope(Dispatchers.IO)
-    
-    private var notificationManager: NotificationManager? = null
-    private var foregroundNotification: Notification? = null
-    private var isForeground = false
-    
-    private val activeDownloads = mutableMapOf<Long, Boolean>()
-    private var activeDownloadsObserver: Observer<List<DownloadItem>>? = null
-    
-    companion object {
-        private const val TAG = "DownloadService"
-        private const val CHANNEL_ID = "download_service_channel"
-        private const val NOTIFICATION_ID = 1001
-        
-        const val ACTION_START_DOWNLOAD = "com.example.downloadmanager.ACTION_START_DOWNLOAD"
-        const val ACTION_PAUSE_DOWNLOAD = "com.example.downloadmanager.ACTION_PAUSE_DOWNLOAD"
-        const val ACTION_RESUME_DOWNLOAD = "com.example.downloadmanager.ACTION_RESUME_DOWNLOAD"
-        const val ACTION_CANCEL_DOWNLOAD = "com.example.downloadmanager.ACTION_CANCEL_DOWNLOAD"
-        const val ACTION_RETRY_DOWNLOAD = "com.example.downloadmanager.ACTION_RETRY_DOWNLOAD"
-        
-        const val EXTRA_DOWNLOAD_ID = "download_id"
-        const val EXTRA_URL = "url"
-        const val EXTRA_FILENAME = "filename"
-        const val EXTRA_SAVE_PATH = "save_path"
-        const val EXTRA_DOWNLOAD_TYPE = "download_type"
-        const val EXTRA_MUSIC_FORMAT = "music_format"
-        const val EXTRA_ARTIST = "artist"
-    }
-    
+    private lateinit var torrentDownloadManager: TorrentDownloadManager
+    private lateinit var notificationManager: NotificationManager
+
+    private val activeTasks = ConcurrentHashMap<Long, Boolean>()
+
     inner class LocalBinder : Binder() {
         fun getService(): DownloadService = this@DownloadService
     }
-    
-    override fun onCreate() {
-        super.onCreate()
-        
-        Log.d(TAG, "DownloadService created")
-        
-        val database = DownloadDatabase.getDatabase(application)
-        repository = DownloadRepository(database.downloadDao())
-        
-        downloadManager = DownloadManager(application, repository)
-        torrentDownloadManager = TorrentDownloadManager(application, repository)
-        videoDownloadManager = VideoDownloadManager(application, repository)
-        musicDownloadManager = MusicDownloadManager(application, repository)
-        
-        createNotificationChannel()
-        cleanupInvalidDownloads()
-        observeActiveDownloads()
+
+    companion object {
+        private const val TAG = "DownloadService"
+        private const val CHANNEL_ID = "download_service_channel"
+        private const val FOREGROUND_NOTIFICATION_ID = 1001
+
+        const val ACTION_START_DOWNLOAD = "com.example.downloadmanager.action.START_DOWNLOAD"
+        const val ACTION_PAUSE_DOWNLOAD = "com.example.downloadmanager.action.PAUSE_DOWNLOAD"
+        const val ACTION_RESUME_DOWNLOAD = "com.example.downloadmanager.action.RESUME_DOWNLOAD"
+        const val ACTION_CANCEL_DOWNLOAD = "com.example.downloadmanager.action.CANCEL_DOWNLOAD"
+        const val ACTION_RETRY_DOWNLOAD = "com.example.downloadmanager.action.RETRY_DOWNLOAD"
+
+        const val EXTRA_DOWNLOAD_ID = "extra_download_id"
+        const val EXTRA_URL = "extra_url"
+        const val EXTRA_FILENAME = "extra_filename"
+        const val EXTRA_SAVE_PATH = "extra_save_path"
+        const val EXTRA_DOWNLOAD_TYPE = "extra_download_type"
+        const val EXTRA_TORRENT_FILES = "extra_torrent_files"
+        const val EXTRA_VIDEO_FORMAT = "extra_video_format"
+        const val EXTRA_VIDEO_QUALITY = "extra_video_quality"
+        const val EXTRA_AUDIO_ONLY = "extra_audio_only"
+        const val EXTRA_MUSIC_FORMAT = "extra_music_format"
+        const val EXTRA_ARTIST_NAME = "extra_artist_name"
     }
 
-    private fun cleanupInvalidDownloads() {
-        scope.launch {
-            try {
-                repository.deleteInvalidDownloads()
-                MediaAssetHelper.repairAllCompletedMediaDownloads(application, repository)
-            } catch (e: Exception) {
-                Log.w(TAG, "Error cleaning up invalid downloads", e)
+    override fun onCreate() {
+        super.onCreate()
+        val database = DownloadDatabase.getDatabase(application)
+        repository = DownloadRepository(database.downloadDao())
+        downloadManager = DownloadManager(application, repository)
+        videoDownloadManager = VideoDownloadManager(application, repository)
+        musicDownloadManager = MusicDownloadManager(application, repository)
+        torrentDownloadManager = TorrentDownloadManager(application, repository)
+        notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        createNotificationChannel()
+    }
+
+    override fun onBind(intent: Intent?): IBinder = binder
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startForegroundSafely(getString(R.string.downloading_files))
+
+        when (intent?.action) {
+            ACTION_START_DOWNLOAD -> handleStartDownloadIntent(intent)
+            ACTION_PAUSE_DOWNLOAD -> {
+                val id = intent.getLongExtra(EXTRA_DOWNLOAD_ID, -1L)
+                if (id != -1L) pauseDownload(id)
+            }
+            ACTION_RESUME_DOWNLOAD -> {
+                val id = intent.getLongExtra(EXTRA_DOWNLOAD_ID, -1L)
+                if (id != -1L) resumeDownload(id)
+            }
+            ACTION_CANCEL_DOWNLOAD -> {
+                val id = intent.getLongExtra(EXTRA_DOWNLOAD_ID, -1L)
+                if (id != -1L) cancelDownload(id)
+            }
+            ACTION_RETRY_DOWNLOAD -> {
+                val id = intent.getLongExtra(EXTRA_DOWNLOAD_ID, -1L)
+                if (id != -1L) retryDownload(id)
             }
         }
-    }
-    
-    override fun onBind(intent: Intent?): IBinder {
-        return binder
-    }
-    
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        intent?.let { handleIntent(it) }
-        
-        if (hasActiveDownloads()) {
-            startForegroundService()
-        }
-        
+
         return START_STICKY
     }
-    
-    private fun handleIntent(intent: Intent) {
-        when (intent.action) {
-            ACTION_START_DOWNLOAD -> {
-                val url = intent.getStringExtra(EXTRA_URL) ?: return
-                val filename = intent.getStringExtra(EXTRA_FILENAME)
-                val savePath = intent.getStringExtra(EXTRA_SAVE_PATH)
-                val musicFormat = intent.getStringExtra(EXTRA_MUSIC_FORMAT)
-                val artist = intent.getStringExtra(EXTRA_ARTIST)
-                @Suppress("DEPRECATION")
-                val downloadType = intent.getSerializableExtra(EXTRA_DOWNLOAD_TYPE) as? DownloadType
-                    ?: DownloadType.DIRECT
-                
-                scope.launch {
-                    startDownloadInternal(url, filename, savePath, downloadType, musicFormat, artist)
+
+    private fun handleStartDownloadIntent(intent: Intent) {
+        val existingId = intent.getLongExtra(EXTRA_DOWNLOAD_ID, -1L)
+        if (existingId > 0L) {
+            serviceScope.launch {
+                val item = repository.getDownloadById(existingId)
+                if (item != null) {
+                    executeDownloadItem(item)
                 }
             }
-            
-            ACTION_PAUSE_DOWNLOAD -> {
-                val downloadId = intent.getLongExtra(EXTRA_DOWNLOAD_ID, -1L)
-                if (downloadId != -1L) {
-                    pauseDownload(downloadId)
-                }
-            }
-            
-            ACTION_RESUME_DOWNLOAD -> {
-                val downloadId = intent.getLongExtra(EXTRA_DOWNLOAD_ID, -1L)
-                if (downloadId != -1L) {
-                    resumeDownload(downloadId)
-                }
-            }
-            
-            ACTION_CANCEL_DOWNLOAD -> {
-                val downloadId = intent.getLongExtra(EXTRA_DOWNLOAD_ID, -1L)
-                if (downloadId != -1L) {
-                    cancelDownload(downloadId)
-                }
-            }
-            
-            ACTION_RETRY_DOWNLOAD -> {
-                val downloadId = intent.getLongExtra(EXTRA_DOWNLOAD_ID, -1L)
-                if (downloadId != -1L) {
-                    retryDownload(downloadId)
-                }
-            }
-        }
-    }
-    
-    private suspend fun startDownloadInternal(
-        url: String,
-        filename: String? = null,
-        savePath: String? = null,
-        downloadType: DownloadType = DownloadType.DIRECT,
-        musicFormat: String? = null,
-        artist: String? = null
-    ) {
-        val validUrl = if (url.startsWith("magnet:?")) {
-            url
-        } else {
-            VideoDownloadManager.normalizeHttpUrl(url)
-        }
-        if (validUrl == null) {
-            Log.w(TAG, "Ignoring startDownloadInternal for invalid URL: $url")
             return
         }
 
-        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
-        val defaultPath = prefs.getString("default_save_path", null)
-            ?.takeIf { it.isNotBlank() }
+        val url = intent.getStringExtra(EXTRA_URL)?.trim() ?: return
+        val filename = intent.getStringExtra(EXTRA_FILENAME)?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: downloadManager.getFilenameFromUrl(url)
+        val savePath = intent.getStringExtra(EXTRA_SAVE_PATH)?.trim()
+            ?.takeIf { it.isNotEmpty() }
             ?: downloadManager.getDefaultDownloadPath()
-        val resolvedSavePath = if (savePath.isNullOrBlank()) defaultPath else savePath
 
-        try {
-            val downloadId = when (downloadType) {
-                DownloadType.TORRENT, DownloadType.MAGNET -> torrentDownloadManager.startTorrentDownload(
-                    DownloadItem(
-                        url = validUrl,
-                        filename = if (filename.isNullOrBlank()) downloadManager.getFilenameFromUrl(validUrl) else filename,
-                        savePath = resolvedSavePath,
-                        downloadType = downloadType
-                    )
-                )
+        val downloadType = when (val typeExtra = intent.extras?.get(EXTRA_DOWNLOAD_TYPE)) {
+            is DownloadType -> typeExtra
+            is String -> runCatching { DownloadType.valueOf(typeExtra) }.getOrDefault(DownloadType.DIRECT)
+            else -> DownloadType.DIRECT
+        }
+
+        val isAudioOnly = intent.getBooleanExtra(EXTRA_AUDIO_ONLY, false)
+        val videoQuality = intent.getStringExtra(EXTRA_VIDEO_QUALITY) ?: "best"
+        val musicFormat = intent.getStringExtra(EXTRA_MUSIC_FORMAT)
+        val artistName = intent.getStringExtra(EXTRA_ARTIST_NAME)
+        val selectedFiles = intent.getIntegerArrayListExtra(EXTRA_TORRENT_FILES)?.toList()
+            ?: intent.getIntArrayExtra(EXTRA_TORRENT_FILES)?.toList()
+
+        serviceScope.launch {
+            val baseItem = DownloadItem(
+                url = url,
+                filename = filename,
+                savePath = savePath,
+                downloadType = downloadType,
+                status = DownloadStatus.QUEUED,
+                isAudioOnly = isAudioOnly,
+                magnetUri = if (url.startsWith("magnet:", ignoreCase = true)) url else null,
+                selectedFiles = selectedFiles
+            )
+
+            val id = when (downloadType) {
                 DownloadType.VIDEO -> videoDownloadManager.startVideoDownload(
-                    DownloadItem(
-                        url = validUrl,
-                        filename = if (filename.isNullOrBlank()) downloadManager.getFilenameFromUrl(validUrl) else filename,
-                        savePath = resolvedSavePath,
-                        downloadType = downloadType
-                    )
+                    downloadItem = baseItem,
+                    videoFormat = null,
+                    quality = if (isAudioOnly) "audio" else videoQuality
                 )
-                DownloadType.MUSIC -> {
-                    val formatPref = musicFormat ?: prefs.getString("default_music_format", "MP3_320") ?: "MP3_320"
-                    val baseItem = DownloadItem(
-                        url = validUrl,
-                        filename = if (filename.isNullOrBlank()) downloadManager.getFilenameFromUrl(validUrl) else filename,
-                        savePath = resolvedSavePath,
-                        downloadType = DownloadType.MUSIC,
-                        videoTitle = artist?.takeIf { it.isNotBlank() },
-                        videoQuality = formatPref
-                    )
-                    musicDownloadManager.startMusicDownload(baseItem, formatPref)
-                }
-                DownloadType.DIRECT -> downloadManager.startDownload(validUrl, filename, resolvedSavePath, downloadType)
+                DownloadType.MUSIC -> musicDownloadManager.startMusicDownload(
+                    downloadItem = baseItem,
+                    formatCode = musicFormat,
+                    artistName = artistName
+                )
+                DownloadType.TORRENT, DownloadType.MAGNET -> torrentDownloadManager.startTorrentDownload(
+                    downloadItem = baseItem,
+                    selectedFiles = selectedFiles
+                )
+                DownloadType.DIRECT -> downloadManager.startDownload(baseItem)
             }
-            
-            if (downloadType != DownloadType.TORRENT && downloadType != DownloadType.MAGNET) {
-                startDownloadWorker(downloadId)
-            }
-            
-        } catch (e: Exception) {
-            Log.w(TAG, "Error starting download", e)
-        }
-    }
-    
-    private fun startDownloadWorker(downloadId: Long) {
-        scope.launch {
-            val downloadItem = repository.getDownloadById(downloadId) ?: return@launch
-            
-            when (downloadItem.downloadType) {
-                DownloadType.DIRECT -> {
-                    startDirectDownload(downloadItem)
-                }
-                DownloadType.TORRENT -> {
-                    startTorrentDownload(downloadItem)
-                }
-                DownloadType.VIDEO -> {
-                    startVideoDownload(downloadItem)
-                }
-                DownloadType.MUSIC -> {
-                    startMusicDownload(downloadItem)
-                }
-                DownloadType.MAGNET -> {
-                    startMagnetDownload(downloadItem)
-                }
+
+            val inserted = repository.getDownloadById(id)
+            if (inserted != null) {
+                executeDownloadItem(inserted)
             }
         }
-    }
-    
-    private fun startDirectDownload(downloadItem: DownloadItem) {
-        downloadManager.downloadFile(
-            downloadItem = downloadItem,
-            onProgress = { downloaded, total, progress, speed ->
-                updateProgress(downloadItem.id, downloaded, total, progress, speed)
-            },
-            onComplete = { completedItem ->
-                onDownloadComplete(completedItem)
-            },
-            onError = { errorItem, error ->
-                onDownloadError(errorItem, error)
-            }
-        )
-    }
-    
-    private fun startTorrentDownload(downloadItem: DownloadItem) {
-        torrentDownloadManager.downloadVideo(
-            downloadItem = downloadItem,
-            onProgress = { downloaded, total, progress, speed ->
-                updateProgress(downloadItem.id, downloaded, total, progress, speed)
-            },
-            onComplete = { completedItem ->
-                onDownloadComplete(completedItem)
-            },
-            onError = { errorItem, error ->
-                onDownloadError(errorItem, error)
-            }
-        )
-    }
-    
-    private fun startVideoDownload(downloadItem: DownloadItem) {
-        videoDownloadManager.downloadVideo(
-            downloadItem = downloadItem,
-            onProgress = { downloaded, total, progress, speed ->
-                updateProgress(downloadItem.id, downloaded, total, progress, speed)
-            },
-            onComplete = { completedItem ->
-                onDownloadComplete(completedItem)
-            },
-            onError = { errorItem, error ->
-                onDownloadError(errorItem, error)
-            }
-        )
     }
 
-    private fun startMusicDownload(downloadItem: DownloadItem) {
-        musicDownloadManager.downloadMusic(
-            downloadItem = downloadItem,
-            onProgress = { downloaded, total, progress, speed ->
-                updateProgress(downloadItem.id, downloaded, total, progress, speed)
-            },
-            onComplete = { completedItem ->
-                onDownloadComplete(completedItem)
-            },
-            onError = { errorItem, error ->
-                onDownloadError(errorItem, error)
+    fun executeDownloadItem(item: DownloadItem) {
+        if (activeTasks.putIfAbsent(item.id, true) != null) {
+            return
+        }
+
+        when (item.downloadType) {
+            DownloadType.MUSIC -> {
+                musicDownloadManager.downloadMusic(
+                    downloadItem = item,
+                    onProgress = { downloaded, total, progress, speed ->
+                        serviceScope.launch {
+                            repository.updateProgress(item.id, progress, downloaded, speed)
+                            updateProgressNotification(item.filename, progress)
+                        }
+                    },
+                    onComplete = { completed ->
+                        activeTasks.remove(item.id)
+                        showCompletionNotification(completed.filename, true)
+                    },
+                    onError = { failed, _ ->
+                        activeTasks.remove(item.id)
+                        showCompletionNotification(failed.filename, false)
+                    }
+                )
             }
-        )
-    }
-    
-    private fun startMagnetDownload(downloadItem: DownloadItem) {
-        torrentDownloadManager.downloadVideo(
-            downloadItem = downloadItem,
-            onProgress = { downloaded, total, progress, speed ->
-                updateProgress(downloadItem.id, downloaded, total, progress, speed)
-            },
-            onComplete = { completedItem ->
-                onDownloadComplete(completedItem)
-            },
-            onError = { errorItem, error ->
-                onDownloadError(errorItem, error)
+            DownloadType.VIDEO -> {
+                videoDownloadManager.downloadVideo(
+                    downloadItem = item,
+                    onProgress = { downloaded, total, progress, speed ->
+                        serviceScope.launch {
+                            repository.updateProgress(item.id, progress, downloaded, speed)
+                            updateProgressNotification(item.filename, progress)
+                        }
+                    },
+                    onComplete = { completed ->
+                        activeTasks.remove(item.id)
+                        showCompletionNotification(completed.filename, true)
+                    },
+                    onError = { failed, _ ->
+                        activeTasks.remove(item.id)
+                        showCompletionNotification(failed.filename, false)
+                    }
+                )
             }
-        )
-    }
-    
-    private fun updateProgress(
-        downloadId: Long,
-        downloaded: Long,
-        @Suppress("UNUSED_PARAMETER") total: Long,
-        progress: Int,
-        speed: Long
-    ) {
-        scope.launch {
-            repository.updateProgress(downloadId, progress, downloaded, speed)
-            updateNotification()
+            DownloadType.TORRENT, DownloadType.MAGNET -> {
+                torrentDownloadManager.downloadTorrent(
+                    downloadItem = item,
+                    onProgress = { downloaded, total, progress, speed, peers, seeds, uploadSpeed ->
+                        serviceScope.launch {
+                            val current = repository.getDownloadById(item.id) ?: return@launch
+                            val rem = (total - downloaded).coerceAtLeast(0L)
+                            val eta = if (speed > 0 && rem > 0) rem / speed else 0L
+                            repository.update(
+                                current.copy(
+                                    fileSize = total.coerceAtLeast(current.fileSize),
+                                    downloadedSize = downloaded,
+                                    progress = progress,
+                                    downloadSpeed = speed,
+                                    eta = eta,
+                                    peers = peers,
+                                    seeds = seeds,
+                                    uploadSpeed = uploadSpeed
+                                )
+                            )
+                            updateProgressNotification(current.filename, progress)
+                        }
+                    },
+                    onComplete = { completed ->
+                        activeTasks.remove(item.id)
+                        showCompletionNotification(completed.filename, true)
+                    },
+                    onError = { failed, _ ->
+                        activeTasks.remove(item.id)
+                        showCompletionNotification(failed.filename, false)
+                    }
+                )
+            }
+            DownloadType.DIRECT -> {
+                downloadManager.downloadFile(
+                    downloadItem = item,
+                    onProgress = { downloaded, total, progress, speed ->
+                        serviceScope.launch {
+                            repository.updateProgress(item.id, progress, downloaded, speed)
+                            updateProgressNotification(item.filename, progress)
+                        }
+                    },
+                    onComplete = { completed ->
+                        activeTasks.remove(item.id)
+                        showCompletionNotification(completed.filename, true)
+                    },
+                    onError = { failed, _ ->
+                        activeTasks.remove(item.id)
+                        showCompletionNotification(failed.filename, false)
+                    }
+                )
+            }
         }
     }
-    
-    private fun onDownloadComplete(completedItem: DownloadItem) {
-        scope.launch {
-            activeDownloads.remove(completedItem.id)
-            updateNotification()
-            showCompletionNotification(completedItem)
-            
-            if (!hasActiveDownloads()) {
-                stopForegroundService()
-            }
-        }
-    }
-    
-    private fun onDownloadError(errorItem: DownloadItem, error: String) {
-        scope.launch {
-            activeDownloads.remove(errorItem.id)
-            updateNotification()
-            showErrorNotification(errorItem, error)
-            
-            if (!hasActiveDownloads()) {
-                stopForegroundService()
-            }
-        }
-    }
-    
+
     fun pauseDownload(downloadId: Long) {
-        scope.launch {
-            val downloadItem = repository.getDownloadById(downloadId) ?: return@launch
-            
-            when (downloadItem.downloadType) {
-                DownloadType.DIRECT -> downloadManager.pauseDownload(downloadItem)
-                DownloadType.TORRENT -> torrentDownloadManager.pauseTorrentDownload(downloadId)
-                DownloadType.VIDEO -> videoDownloadManager.pauseVideoDownload(downloadItem)
-                DownloadType.MUSIC -> musicDownloadManager.pauseMusicDownload(downloadItem)
-                DownloadType.MAGNET -> torrentDownloadManager.pauseTorrentDownload(downloadId)
+        serviceScope.launch {
+            activeTasks.remove(downloadId)
+            val item = repository.getDownloadById(downloadId) ?: return@launch
+            when (item.downloadType) {
+                DownloadType.VIDEO -> videoDownloadManager.pauseVideoDownload(item)
+                DownloadType.MUSIC -> musicDownloadManager.pauseMusicDownload(item)
+                DownloadType.TORRENT, DownloadType.MAGNET -> torrentDownloadManager.pauseTorrentDownload(item)
+                DownloadType.DIRECT -> downloadManager.pauseDownload(item)
             }
         }
     }
-    
+
     fun resumeDownload(downloadId: Long) {
-        scope.launch {
-            val downloadItem = repository.getDownloadById(downloadId) ?: return@launch
-            
-            when (downloadItem.downloadType) {
-                DownloadType.DIRECT -> {
-                    downloadManager.resumeDownload(downloadItem)
-                    startDownloadWorker(downloadId)
-                }
-                DownloadType.TORRENT -> torrentDownloadManager.resumeTorrentDownload(downloadId)
-                DownloadType.VIDEO -> {
-                    videoDownloadManager.resumeVideoDownload(downloadItem)
-                    startDownloadWorker(downloadId)
-                }
-                DownloadType.MUSIC -> {
-                    musicDownloadManager.resumeMusicDownload(downloadItem)
-                    startDownloadWorker(downloadId)
-                }
-                DownloadType.MAGNET -> torrentDownloadManager.resumeTorrentDownload(downloadId)
-            }
+        serviceScope.launch {
+            val item = repository.getDownloadById(downloadId) ?: return@launch
+            val queued = item.copy(status = DownloadStatus.QUEUED, errorMessage = null)
+            repository.update(queued)
+            executeDownloadItem(queued)
         }
     }
-    
+
     fun cancelDownload(downloadId: Long) {
-        scope.launch {
-            val downloadItem = repository.getDownloadById(downloadId) ?: return@launch
-            
-            when (downloadItem.downloadType) {
-                DownloadType.DIRECT -> downloadManager.cancelDownload(downloadItem)
-                DownloadType.TORRENT -> {
-                    torrentDownloadManager.stopTorrentDownload(downloadId)
-                    downloadManager.cancelDownload(downloadItem)
-                }
-                DownloadType.VIDEO -> videoDownloadManager.cancelVideoDownload(downloadItem)
-                DownloadType.MUSIC -> musicDownloadManager.cancelMusicDownload(downloadItem)
-                DownloadType.MAGNET -> {
-                    torrentDownloadManager.stopTorrentDownload(downloadId)
-                    downloadManager.cancelDownload(downloadItem)
-                }
-            }
-            
-            activeDownloads.remove(downloadId)
-            updateNotification()
-            
-            if (!hasActiveDownloads()) {
-                stopForegroundService()
+        serviceScope.launch {
+            activeTasks.remove(downloadId)
+            val item = repository.getDownloadById(downloadId) ?: return@launch
+            when (item.downloadType) {
+                DownloadType.VIDEO -> videoDownloadManager.cancelVideoDownload(item)
+                DownloadType.MUSIC -> musicDownloadManager.cancelMusicDownload(item)
+                DownloadType.TORRENT, DownloadType.MAGNET -> torrentDownloadManager.cancelTorrentDownload(item)
+                DownloadType.DIRECT -> downloadManager.cancelDownload(item)
             }
         }
     }
-    
+
     fun retryDownload(downloadId: Long) {
-        scope.launch {
-            val downloadItem = repository.getDownloadById(downloadId) ?: return@launch
-            
-            when (downloadItem.downloadType) {
-                DownloadType.DIRECT -> downloadManager.retryDownload(downloadItem)
-                DownloadType.TORRENT -> {
-                    torrentDownloadManager.stopTorrentDownload(downloadId)
-                    downloadManager.retryDownload(downloadItem)
-                }
-                DownloadType.VIDEO -> videoDownloadManager.retryDownload(downloadItem)
-                DownloadType.MUSIC -> musicDownloadManager.retryMusicDownload(downloadItem)
-                DownloadType.MAGNET -> {
-                    torrentDownloadManager.stopTorrentDownload(downloadId)
-                    downloadManager.retryDownload(downloadItem)
-                }
-            }
-            
-            startDownloadWorker(downloadId)
+        serviceScope.launch {
+            activeTasks.remove(downloadId)
+            val item = repository.getDownloadById(downloadId) ?: return@launch
+            val resetItem = item.copy(
+                downloadedSize = 0L,
+                progress = 0,
+                downloadSpeed = 0L,
+                status = DownloadStatus.QUEUED,
+                errorMessage = null
+            )
+            repository.update(resetItem)
+            executeDownloadItem(resetItem)
         }
     }
-    
-    fun deleteDownload(downloadId: Long, deleteFile: Boolean = true) {
-        scope.launch {
-            val downloadItem = repository.getDownloadById(downloadId) ?: return@launch
-            
-            when (downloadItem.downloadType) {
-                DownloadType.DIRECT -> downloadManager.deleteDownload(downloadItem, deleteFile)
-                DownloadType.TORRENT -> {
-                    torrentDownloadManager.stopTorrentDownload(downloadId)
-                    downloadManager.deleteDownload(downloadItem, deleteFile)
-                }
-                DownloadType.VIDEO -> {
-                    videoDownloadManager.cancelVideoDownload(downloadItem)
-                    downloadManager.deleteDownload(downloadItem, deleteFile)
-                }
-                DownloadType.MUSIC -> {
-                    musicDownloadManager.cancelMusicDownload(downloadItem)
-                    downloadManager.deleteDownload(downloadItem, deleteFile)
-                }
-                DownloadType.MAGNET -> {
-                    torrentDownloadManager.stopTorrentDownload(downloadId)
-                    downloadManager.deleteDownload(downloadItem, deleteFile)
+
+    fun deleteDownload(downloadId: Long, deleteFile: Boolean) {
+        serviceScope.launch {
+            activeTasks.remove(downloadId)
+            val item = repository.getDownloadById(downloadId)
+            if (deleteFile && item != null) {
+                val target = File(item.savePath, item.filename)
+                if (target.exists()) {
+                    if (target.isDirectory) target.deleteRecursively() else target.delete()
                 }
             }
+            repository.delete(downloadId)
         }
     }
 
     fun pauseAllDownloads() {
-        scope.launch {
-            val items = repository.getAllDownloadsList()
-            items.filter { it.status == DownloadStatus.DOWNLOADING || it.status == DownloadStatus.QUEUED }
+        serviceScope.launch {
+            val all = repository.getAllDownloadsList()
+            all.filter { it.status == DownloadStatus.DOWNLOADING || it.status == DownloadStatus.QUEUED }
                 .forEach { pauseDownload(it.id) }
         }
     }
 
     fun resumeAllDownloads() {
-        scope.launch {
-            val items = repository.getAllDownloadsList()
-            items.filter { it.status == DownloadStatus.PAUSED }
+        serviceScope.launch {
+            val all = repository.getAllDownloadsList()
+            all.filter { it.status == DownloadStatus.PAUSED || it.status == DownloadStatus.FAILED }
                 .forEach { resumeDownload(it.id) }
         }
     }
-    
-    private fun hasActiveDownloads(): Boolean {
-        return activeDownloads.isNotEmpty()
-    }
-    
-    private fun observeActiveDownloads() {
-        val observer = Observer<List<DownloadItem>> { downloads ->
-            activeDownloads.clear()
-            downloads.forEach { download ->
-                if (download.status == DownloadStatus.DOWNLOADING || 
-                    download.status == DownloadStatus.QUEUED) {
-                    activeDownloads[download.id] = true
-                }
-            }
-            
-            if (hasActiveDownloads()) {
-                startForegroundService()
-            } else {
-                stopForegroundService()
-            }
-        }
-        activeDownloadsObserver = observer
-        repository.getActiveDownloads().observeForever(observer)
-    }
-    
-    private fun startForegroundService() {
-        if (isForeground) return
-        
-        try {
-            isForeground = true
-            notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            foregroundNotification = createNotification()
-            startForeground(NOTIFICATION_ID, foregroundNotification)
-        } catch (e: Exception) {
-            Log.w(TAG, "Could not start foreground service", e)
-            isForeground = false
-        }
-    }
-    
-    private fun stopForegroundService() {
-        if (!isForeground) return
-        
-        isForeground = false
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        notificationManager = null
-        foregroundNotification = null
-    }
-    
-    private fun updateNotification() {
-        if (!isForeground) return
-        
-        foregroundNotification = createNotification()
-        notificationManager?.notify(NOTIFICATION_ID, foregroundNotification)
-    }
 
-    private fun isNotificationsEnabled(): Boolean {
-        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
-        return prefs.getBoolean("enable_notifications", true)
-    }
-    
-    private fun createNotification(): Notification {
-        val channelId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            CHANNEL_ID
-        } else {
-            ""
-        }
-        
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-        }
-        
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, intent, 
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        
-        val activeCount = activeDownloads.size
-        val title = if (activeCount == 1) {
-            getString(R.string.downloading)
-        } else {
-            getString(R.string.downloading) + " ($activeCount)"
-        }
-        
-        return NotificationCompat.Builder(this, channelId)
-            .setContentTitle(title)
-            .setContentText(getString(R.string.downloading_files))
-            .setSmallIcon(R.drawable.ic_download)
-            .setContentIntent(pendingIntent)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .build()
-    }
-    
-    private fun showCompletionNotification(downloadItem: DownloadItem) {
-        if (!isNotificationsEnabled()) return
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-        }
-        
-        val pendingIntent = PendingIntent.getActivity(
-            this, downloadItem.id.toInt(), intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(getString(R.string.completed_notification, downloadItem.filename))
-            .setContentText(downloadItem.filename)
-            .setSmallIcon(R.drawable.ic_download)
-            .setContentIntent(pendingIntent)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setAutoCancel(true)
-            .build()
-        
-        notificationManager.notify(downloadItem.id.toInt(), notification)
-    }
-    
-    private fun showErrorNotification(downloadItem: DownloadItem, error: String) {
-        if (!isNotificationsEnabled()) return
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-        }
-        
-        val pendingIntent = PendingIntent.getActivity(
-            this, downloadItem.id.toInt(), intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(getString(R.string.failed_notification, downloadItem.filename))
-            .setContentText(error)
-            .setSmallIcon(R.drawable.ic_download)
-            .setContentIntent(pendingIntent)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setAutoCancel(true)
-            .build()
-        
-        notificationManager.notify(downloadItem.id.toInt(), notification)
-    }
-    
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -646,25 +376,74 @@ class DownloadService : Service() {
             ).apply {
                 description = getString(R.string.notification_channel_description)
                 setShowBadge(false)
-                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
-            
-            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.createNotificationChannel(channel)
         }
     }
-    
+
+    private fun buildNotification(title: String, progress: Int = -1): Notification {
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_download)
+            .setContentTitle(getString(R.string.app_name))
+            .setContentText(title)
+            .setContentIntent(pendingIntent)
+            .setOngoing(progress in 0..99)
+            .setOnlyAlertOnce(true)
+
+        if (progress in 0..100) {
+            builder.setProgress(100, progress, false)
+        }
+        return builder.build()
+    }
+
+    private fun startForegroundSafely(statusText: String) {
+        try {
+            val notification = buildNotification(statusText)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceCompat.startForeground(
+                    this,
+                    FOREGROUND_NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                )
+            } else {
+                startForeground(FOREGROUND_NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Foreground service start warning: ${e.message}")
+        }
+    }
+
+    private fun updateProgressNotification(filename: String, progress: Int) {
+        try {
+            val notification = buildNotification("$filename ($progress%)", progress)
+            notificationManager.notify(FOREGROUND_NOTIFICATION_ID, notification)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun showCompletionNotification(filename: String, success: Boolean) {
+        try {
+            val msg = if (success) {
+                getString(R.string.completed_notification, filename)
+            } else {
+                getString(R.string.failed_notification, filename)
+            }
+            val notification = buildNotification(msg, -1)
+            notificationManager.notify((filename.hashCode() and 0x7FFFFFFF).coerceAtLeast(2000), notification)
+        } catch (_: Exception) {
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
-        
-        Log.d(TAG, "DownloadService destroyed")
-        
-        activeDownloadsObserver?.let {
-            repository.getActiveDownloads().removeObserver(it)
-        }
-        torrentDownloadManager.shutdown()
-        executor.shutdown()
-        
-        stopForegroundService()
+        serviceScope.cancel()
     }
 }

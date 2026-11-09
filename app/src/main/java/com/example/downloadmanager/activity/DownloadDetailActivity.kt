@@ -278,14 +278,16 @@ class DownloadDetailActivity : AppCompatActivity() {
     }
     
     private fun openFile(downloadItem: DownloadItem) {
+        val resolvedFile = MediaAssetHelper.resolvePlayableFile(downloadItem)
+        val candidateName = resolvedFile?.name ?: downloadItem.filename
         val isVideo = MediaAssetHelper.isVideoFileOrType(
-            downloadItem.filename,
+            candidateName,
             downloadItem.downloadType,
             downloadItem.isAudioOnly,
             downloadItem.mimeType
         )
         val isAudio = !isVideo && MediaAssetHelper.isAudioFileOrType(
-            downloadItem.filename,
+            candidateName,
             downloadItem.downloadType,
             downloadItem.isAudioOnly,
             downloadItem.mimeType
@@ -299,8 +301,8 @@ class DownloadDetailActivity : AppCompatActivity() {
         }
 
         try {
-            val file = File(downloadItem.savePath, downloadItem.filename)
-            if (file.exists()) {
+            val file = resolvedFile ?: File(downloadItem.savePath, downloadItem.filename)
+            if (file.exists() && file.isFile) {
                 val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
                 val intent = Intent(Intent.ACTION_VIEW).apply {
                     setDataAndType(uri, downloadItem.mimeType.ifBlank { "*/*" })

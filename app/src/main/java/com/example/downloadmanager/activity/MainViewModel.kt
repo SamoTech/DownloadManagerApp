@@ -4,7 +4,7 @@ import androidx.lifecycle.LiveData
 import androidx.lifecycle.MediatorLiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
-import androidx.lifecycle.switchMap
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
@@ -13,115 +13,124 @@ import com.example.downloadmanager.model.DownloadType
 import kotlinx.coroutines.launch
 
 class MainViewModel(val repository: DownloadRepository) : ViewModel() {
-    
-    private val _currentFilter = MutableLiveData(DownloadFilter.ALL)
-    val currentFilter: LiveData<DownloadFilter> = _currentFilter
 
-    private val _searchQuery = MutableLiveData("")
-    val searchQuery: LiveData<String> = _searchQuery
-
-    private val _sortOrder = MutableLiveData(SortOrder.DATE_DESC)
-    val sortOrder: LiveData<SortOrder> = _sortOrder
-
-    val allDownloads: LiveData<List<DownloadItem>> = repository.allDownloads
-    
-    private val filteredSource: LiveData<List<DownloadItem>> = _currentFilter.switchMap { filter ->
-        when (filter) {
-            DownloadFilter.ALL -> repository.allDownloads
-            DownloadFilter.ACTIVE -> repository.getActiveDownloads()
-            DownloadFilter.COMPLETED -> repository.getCompletedDownloads()
-            DownloadFilter.MUSIC -> repository.getDownloadsByType(DownloadType.MUSIC)
-            DownloadFilter.VIDEO -> repository.getDownloadsByType(DownloadType.VIDEO)
-            DownloadFilter.TORRENT -> repository.getDownloadsByType(DownloadType.TORRENT)
-        }
-    }
-
-    val downloads: LiveData<List<DownloadItem>> = MediatorLiveData<List<DownloadItem>>().apply {
-        fun updateList() {
-            val baseList = filteredSource.value ?: emptyList()
-            val query = _searchQuery.value?.trim().orEmpty()
-            val sort = _sortOrder.value ?: SortOrder.DATE_DESC
-
-            val searched = if (query.isEmpty()) {
-                baseList
-            } else {
-                baseList.filter { item ->
-                    item.filename.contains(query, ignoreCase = true) ||
-                        item.url.contains(query, ignoreCase = true) ||
-                        (item.videoTitle?.contains(query, ignoreCase = true) == true) ||
-                        (item.videoQuality?.contains(query, ignoreCase = true) == true)
-                }
-            }
-
-            value = when (sort) {
-                SortOrder.DATE_DESC -> searched.sortedByDescending { it.addedDate.time }
-                SortOrder.DATE_ASC -> searched.sortedBy { it.addedDate.time }
-                SortOrder.NAME_ASC -> searched.sortedBy { it.filename.lowercase() }
-                SortOrder.SIZE_DESC -> searched.sortedByDescending { it.fileSize }
-                SortOrder.PROGRESS_DESC -> searched.sortedByDescending { it.progress }
-            }
-        }
-
-        addSource(filteredSource) { updateList() }
-        addSource(_searchQuery) { updateList() }
-        addSource(_sortOrder) { updateList() }
-    }
-    
-    enum class DownloadFilter {
-        ALL,
-        ACTIVE,
-        COMPLETED,
-        MUSIC,
-        VIDEO,
-        TORRENT
+    enum class FilterType {
+        ALL, ACTIVE, COMPLETED, MUSIC, VIDEO, TORRENT
     }
 
     enum class SortOrder {
-        DATE_DESC,
-        DATE_ASC,
-        NAME_ASC,
-        SIZE_DESC,
-        PROGRESS_DESC
+        DATE_DESC, DATE_ASC, NAME_ASC, SIZE_DESC, PROGRESS_DESC
     }
-    
+
+    val allDownloads: LiveData<List<DownloadItem>> = repository.allDownloads
+
+    private val currentFilter = MutableLiveData(FilterType.ALL)
+    private val searchQuery = MutableLiveData("")
+    private val _sortOrder = MutableLiveData(SortOrder.DATE_DESC)
+    val sortOrder: LiveData<SortOrder> = _sortOrder
+
+    private val _downloads = MediatorLiveData<List<DownloadItem>>()
+    val downloads: LiveData<List<DownloadItem>> = _downloads
+
+    init {
+        _downloads.addSource(allDownloads) { recomputeDownloads() }
+        _downloads.addSource(currentFilter) { recomputeDownloads() }
+        _downloads.addSource(searchQuery) { recomputeDownloads() }
+        _downloads.addSource(_sortOrder) { recomputeDownloads() }
+    }
+
+    private fun recomputeDownloads() {
+        val rawList = allDownloads.value ?: emptyList()
+        val filter = currentFilter.value ?: FilterType.ALL
+        val query = searchQuery.value?.trim().orEmpty()
+        val order = _sortOrder.value ?: SortOrder.DATE_DESC
+
+        val filteredByTab = when (filter) {
+            FilterType.ALL -> rawList
+            FilterType.ACTIVE -> rawList.filter {
+                it.status == DownloadStatus.DOWNLOADING ||
+                    it.status == DownloadStatus.QUEUED ||
+                    it.status == DownloadStatus.PAUSED
+            }
+            FilterType.COMPLETED -> rawList.filter { it.status == DownloadStatus.COMPLETED }
+            FilterType.MUSIC -> rawList.filter {
+                it.downloadType == DownloadType.MUSIC || it.isAudioOnly
+            }
+            FilterType.VIDEO -> rawList.filter {
+                it.downloadType == DownloadType.VIDEO && !it.isAudioOnly
+            }
+            FilterType.TORRENT -> rawList.filter {
+                it.downloadType == DownloadType.TORRENT || it.downloadType == DownloadType.MAGNET
+            }
+        }
+
+        val searched = if (query.isEmpty()) {
+            filteredByTab
+        } else {
+            filteredByTab.filter { item ->
+                item.filename.contains(query, ignoreCase = true) ||
+                    item.url.contains(query, ignoreCase = true) ||
+                    (item.videoTitle?.contains(query, ignoreCase = true) == true) ||
+                    (item.torrentName?.contains(query, ignoreCase = true) == true)
+            }
+        }
+
+        val sorted = when (order) {
+            SortOrder.DATE_DESC -> searched.sortedByDescending { it.addedDate.time }
+            SortOrder.DATE_ASC -> searched.sortedBy { it.addedDate.time }
+            SortOrder.NAME_ASC -> searched.sortedBy { it.filename.lowercase() }
+            SortOrder.SIZE_DESC -> searched.sortedByDescending { it.fileSize }
+            SortOrder.PROGRESS_DESC -> searched.sortedByDescending { it.progress }
+        }
+
+        _downloads.value = sorted
+    }
+
     fun showAllDownloads() {
-        _currentFilter.value = DownloadFilter.ALL
+        currentFilter.value = FilterType.ALL
     }
-    
+
     fun showActiveDownloads() {
-        _currentFilter.value = DownloadFilter.ACTIVE
+        currentFilter.value = FilterType.ACTIVE
     }
-    
+
     fun showCompletedDownloads() {
-        _currentFilter.value = DownloadFilter.COMPLETED
+        currentFilter.value = FilterType.COMPLETED
     }
 
     fun showMusicDownloads() {
-        _currentFilter.value = DownloadFilter.MUSIC
+        currentFilter.value = FilterType.MUSIC
     }
-    
-    fun showTorrentDownloads() {
-        _currentFilter.value = DownloadFilter.TORRENT
-    }
-    
+
     fun showVideoDownloads() {
-        _currentFilter.value = DownloadFilter.VIDEO
+        currentFilter.value = FilterType.VIDEO
+    }
+
+    fun showTorrentDownloads() {
+        currentFilter.value = FilterType.TORRENT
     }
 
     fun setSearchQuery(query: String) {
-        _searchQuery.value = query
+        searchQuery.value = query
     }
 
     fun setSortOrder(order: SortOrder) {
         _sortOrder.value = order
     }
-    
+
     fun refreshDownloads() {
-        _currentFilter.value = _currentFilter.value ?: DownloadFilter.ALL
+        recomputeDownloads()
     }
-    
+
     fun deleteDownload(downloadId: Long) {
         viewModelScope.launch {
+            val item = repository.getDownloadById(downloadId)
+            item?.let {
+                val file = java.io.File(it.savePath, it.filename)
+                if (file.exists()) {
+                    if (file.isDirectory) file.deleteRecursively() else file.delete()
+                }
+            }
             repository.delete(downloadId)
         }
     }
@@ -131,35 +140,12 @@ class MainViewModel(val repository: DownloadRepository) : ViewModel() {
             repository.deleteCompletedDownloads()
         }
     }
-    
-    fun pauseDownload(downloadId: Long) {
-        viewModelScope.launch {
-            repository.updateStatus(downloadId, DownloadStatus.PAUSED)
-        }
-    }
-    
-    fun resumeDownload(downloadId: Long) {
-        viewModelScope.launch {
-            repository.updateStatus(downloadId, DownloadStatus.QUEUED)
-        }
-    }
-    
-    fun retryDownload(downloadId: Long) {
-        viewModelScope.launch {
-            val download = repository.getDownloadById(downloadId) ?: return@launch
-            val resetDownload = download.copy(
-                downloadedSize = 0,
-                progress = 0,
-                status = DownloadStatus.QUEUED,
-                errorMessage = null
-            )
-            repository.update(resetDownload)
-        }
-    }
 }
 
-class MainViewModelFactory(private val repository: DownloadRepository) : androidx.lifecycle.ViewModelProvider.Factory {
-    override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
+class MainViewModelFactory(
+    private val repository: DownloadRepository
+) : ViewModelProvider.Factory {
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(MainViewModel::class.java)) {
             @Suppress("UNCHECKED_CAST")
             return MainViewModel(repository) as T

@@ -1,7 +1,6 @@
 package com.example.downloadmanager.activity
 
 import android.content.Intent
-import android.content.res.ColorStateList
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.LayoutInflater
@@ -11,21 +10,16 @@ import android.view.inputmethod.EditorInfo
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
-import androidx.core.widget.ImageViewCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.example.downloadmanager.R
 import com.example.downloadmanager.databinding.ActivityBrowserBinding
-import com.example.downloadmanager.manager.DownloadManager
 import com.example.downloadmanager.manager.MusicDownloadManager
-import com.example.downloadmanager.model.DownloadDatabase
-import com.example.downloadmanager.model.DownloadRepository
+import com.example.downloadmanager.manager.TorrentDownloadManager
+import com.example.downloadmanager.manager.VideoDownloadManager
 import com.example.downloadmanager.model.DownloadType
-import com.example.downloadmanager.service.DownloadService
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.chip.ChipGroup
@@ -35,119 +29,80 @@ import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import java.net.URLDecoder
 import java.net.URLEncoder
-import java.util.Collections
+import java.util.Locale
 import java.util.concurrent.TimeUnit
-
-data class DetectedWebLink(
-    val url: String,
-    val title: String,
-    val downloadType: DownloadType,
-    val platformOrExt: String,
-    val isNavigablePage: Boolean = false
-)
 
 class BrowserActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityBrowserBinding
-    private lateinit var repository: DownloadRepository
-    private lateinit var downloadManager: DownloadManager
-    private lateinit var browserContentAdapter: DetectedLinksAdapter
+    private lateinit var contentAdapter: DetectedLinkAdapter
 
-    private val detectedLinks = Collections.synchronizedMap(linkedMapOf<String, DetectedWebLink>())
-    private val pageItems = mutableListOf<DetectedWebLink>()
+    private val detectedLinks = mutableListOf<DetectedLinkItem>()
+    private val historyBackStack = ArrayDeque<String>()
+    private val historyForwardStack = ArrayDeque<String>()
+    private var currentUrl: String = "hub://discovery"
 
-    private val historyStack = mutableListOf<String>()
-    private var historyIndex = -1
-
-    private val okHttpClient: OkHttpClient by lazy {
+    private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(20, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
             .build()
     }
 
-    companion object {
-        private const val HUB_URL = "luca://media-discovery-hub"
-
-        private val DOWNLOADABLE_EXTENSIONS = setOf(
-            "mp3", "flac", "wav", "m4a", "aac", "ogg", "opus",
-            "mp4", "mkv", "webm", "avi", "mov", "m3u8",
-            "torrent", "zip", "rar", "7z", "apk", "pdf", "iso", "tar", "gz"
-        )
-
-        private val AUDIO_EXTS = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg", "opus")
-        private val VIDEO_EXTS = setOf("mp4", "mkv", "webm", "avi", "mov", "m3u8")
-    }
+    data class DetectedLinkItem(
+        val title: String,
+        val url: String,
+        val downloadType: DownloadType,
+        val badgeLabel: String
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         binding = ActivityBrowserBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        val database = DownloadDatabase.getDatabase(application)
-        repository = DownloadRepository(database.downloadDao())
-        downloadManager = DownloadManager(application, repository)
+        contentAdapter = DetectedLinkAdapter(emptyList()) { item ->
+            openInAddDownload(item)
+        }
+        binding.rvBrowserContent.apply {
+            layoutManager = LinearLayoutManager(this@BrowserActivity)
+            adapter = contentAdapter
+        }
 
-        browserContentAdapter = DetectedLinksAdapter(
-            items = emptyList(),
-            onDownloadClick = { link ->
-                startDownloadFromBrowser(link)
-            },
-            onItemClick = { link ->
-                if (link.isNavigablePage) {
-                    navigateTo(link.url, addToHistory = true)
-                } else {
-                    startActivity(Intent(this, AddDownloadActivity::class.java).apply {
-                        putExtra("download_type", link.downloadType.name)
-                        putExtra("preset_url", link.url)
-                    })
-                }
-            }
-        )
-        binding.rvBrowserContent.layoutManager = LinearLayoutManager(this)
-        binding.rvBrowserContent.adapter = browserContentAdapter
+        setupListeners()
 
-        setupControls()
-
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                if (historyIndex > 0) {
-                    historyIndex--
-                    navigateTo(historyStack[historyIndex], addToHistory = false)
-                } else {
-                    finish()
-                }
-            }
-        })
-
-        val initialUrl = intent.getStringExtra("initial_url")
+        val initialUrl = intent.getStringExtra("url")
         if (!initialUrl.isNullOrBlank()) {
-            navigateTo(initialUrl, addToHistory = true)
+            navigateTo(initialUrl, pushHistory = false)
         } else {
-            navigateTo(HUB_URL, addToHistory = true)
+            loadBuiltInDiscoveryHub(pushHistory = false)
         }
     }
 
-    private fun setupControls() {
+    private fun setupListeners() {
         binding.btnCloseBrowser.setOnClickListener {
             finish()
         }
 
         binding.btnBrowserGo.setOnClickListener {
-            navigateTo(binding.etBrowserUrl.text.toString(), addToHistory = true)
+            val query = binding.etBrowserUrl.text?.toString()?.trim().orEmpty()
+            if (query.isNotEmpty()) {
+                navigateTo(query, pushHistory = true)
+            }
         }
 
         binding.etBrowserUrl.setOnEditorActionListener { _, actionId, event ->
             if (actionId == EditorInfo.IME_ACTION_GO ||
-                actionId == EditorInfo.IME_ACTION_DONE ||
-                (event != null && event.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)
+                actionId == EditorInfo.IME_ACTION_SEARCH ||
+                (event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)
             ) {
-                navigateTo(binding.etBrowserUrl.text.toString(), addToHistory = true)
+                val query = binding.etBrowserUrl.text?.toString()?.trim().orEmpty()
+                if (query.isNotEmpty()) {
+                    navigateTo(query, pushHistory = true)
+                }
                 true
             } else {
                 false
@@ -155,652 +110,536 @@ class BrowserActivity : AppCompatActivity() {
         }
 
         binding.btnBrowserReload.setOnClickListener {
-            val current = historyStack.getOrNull(historyIndex) ?: HUB_URL
-            navigateTo(current, addToHistory = false)
+            navigateTo(currentUrl, pushHistory = false)
+        }
+
+        binding.btnScanPage.setOnClickListener {
+            navigateTo(currentUrl, pushHistory = false)
         }
 
         binding.btnNavBack.setOnClickListener {
-            if (historyIndex > 0) {
-                historyIndex--
-                navigateTo(historyStack[historyIndex], addToHistory = false)
+            if (historyBackStack.isNotEmpty()) {
+                historyForwardStack.addLast(currentUrl)
+                val prev = historyBackStack.removeLast()
+                navigateTo(prev, pushHistory = false)
+            } else if (currentUrl != "hub://discovery") {
+                loadBuiltInDiscoveryHub(pushHistory = false)
+            } else {
+                finish()
             }
         }
 
         binding.btnNavForward.setOnClickListener {
-            if (historyIndex < historyStack.lastIndex) {
-                historyIndex++
-                navigateTo(historyStack[historyIndex], addToHistory = false)
+            if (historyForwardStack.isNotEmpty()) {
+                historyBackStack.addLast(currentUrl)
+                val next = historyForwardStack.removeLast()
+                navigateTo(next, pushHistory = false)
             }
-        }
-
-        binding.btnScanPage.setOnClickListener {
-            val current = historyStack.getOrNull(historyIndex) ?: HUB_URL
-            navigateTo(current, addToHistory = false)
-            Toast.makeText(
-                this,
-                "Scanned page: ${detectedLinks.size} downloadable links ready",
-                Toast.LENGTH_SHORT
-            ).show()
-        }
-
-        binding.fabDetectedLinks.setOnClickListener {
-            showDetectedLinksSheet()
         }
 
         binding.chipSiteSampleHub.setOnClickListener {
-            navigateTo(HUB_URL, addToHistory = true)
+            loadBuiltInDiscoveryHub(pushHistory = true)
         }
         binding.chipSiteArchiveAudio.setOnClickListener {
-            navigateTo("https://archive.org/details/audio", addToHistory = true)
+            loadCuratedCategoryHub("archive_audio", pushHistory = true)
         }
         binding.chipSiteSoundCloud.setOnClickListener {
-            navigateTo("https://soundcloud.com/discover", addToHistory = true)
+            loadCuratedCategoryHub("indie_music", pushHistory = true)
         }
         binding.chipSiteBandcamp.setOnClickListener {
-            navigateTo("https://bandcamp.com", addToHistory = true)
+            loadCuratedCategoryHub("open_video", pushHistory = true)
         }
         binding.chipSiteWikimedia.setOnClickListener {
-            navigateTo("https://commons.wikimedia.org/wiki/Category:Audio_files_of_music", addToHistory = true)
+            loadCuratedCategoryHub("torrents", pushHistory = true)
+        }
+
+        binding.fabDetectedLinks.setOnClickListener {
+            showDetectedLinksBottomSheet()
         }
     }
 
-    private fun updateNavButtons() {
-        binding.btnNavBack.alpha = if (historyIndex > 0) 1.0f else 0.4f
-        binding.btnNavForward.alpha = if (historyIndex < historyStack.lastIndex) 1.0f else 0.4f
-    }
-
-    private fun navigateTo(rawInput: String, addToHistory: Boolean) {
+    private fun navigateTo(rawInput: String, pushHistory: Boolean) {
         val trimmed = rawInput.trim()
         if (trimmed.isEmpty()) return
 
-        val resolvedUrl = when {
-            trimmed.equals(HUB_URL, ignoreCase = true) -> HUB_URL
-            else -> AddDownloadActivity.normalizeAndValidateUrl(trimmed)
-                ?: "https://html.duckduckgo.com/html/?q=${URLEncoder.encode(trimmed, "UTF-8")}"
+        if (pushHistory && currentUrl != trimmed) {
+            historyBackStack.addLast(currentUrl)
+            historyForwardStack.clear()
         }
 
-        if (addToHistory) {
-            while (historyStack.lastIndex > historyIndex) {
-                historyStack.removeAt(historyStack.lastIndex)
+        when {
+            trimmed.equals("hub://discovery", ignoreCase = true) ||
+                trimmed.equals("app://hub", ignoreCase = true) -> {
+                loadBuiltInDiscoveryHub(pushHistory = false)
             }
-            historyStack.add(resolvedUrl)
-            historyIndex = historyStack.lastIndex
-        }
-        updateNavButtons()
-        binding.etBrowserUrl.setText(resolvedUrl)
-
-        if (resolvedUrl == HUB_URL) {
-            loadBuiltInDiscoveryHub()
-        } else {
-            crawlAndInspectWebPage(resolvedUrl)
+            trimmed.startsWith("hub://", ignoreCase = true) -> {
+                loadCuratedCategoryHub(trimmed.removePrefix("hub://"), pushHistory = false)
+            }
+            trimmed.startsWith("magnet:", ignoreCase = true) -> {
+                openInAddDownload(
+                    DetectedLinkItem(
+                        title = "Magnet Swarm Download",
+                        url = trimmed,
+                        downloadType = DownloadType.MAGNET,
+                        badgeLabel = "MAGNET"
+                    )
+                )
+            }
+            else -> {
+                val targetUrl = when {
+                    trimmed.startsWith("http://", ignoreCase = true) ||
+                        trimmed.startsWith("https://", ignoreCase = true) -> trimmed
+                    trimmed.contains(".") && !trimmed.contains(" ") -> "https://$trimmed"
+                    else -> "https://duckduckgo.com/html/?q=${URLEncoder.encode(trimmed, "UTF-8")}"
+                }
+                inspectRemoteWebpage(targetUrl)
+            }
         }
     }
 
-    private fun loadBuiltInDiscoveryHub() {
-        detectedLinks.clear()
-        pageItems.clear()
-
-        binding.progressBarWeb.visibility = View.GONE
-        binding.tvPageTitle.text = "Luca Smart Browser Discovery Hub"
-        binding.tvPageBadge.text = "10 LINKS DETECTED"
+    private fun loadBuiltInDiscoveryHub(pushHistory: Boolean) {
+        if (pushHistory && currentUrl != "hub://discovery") {
+            historyBackStack.addLast(currentUrl)
+            historyForwardStack.clear()
+        }
+        currentUrl = "hub://discovery"
+        binding.etBrowserUrl.setText("hub://discovery")
+        binding.tvPageTitle.text = "Media & Torrent Discovery Hub"
+        binding.tvPageBadge.text = "VERIFIED STREAMS"
         binding.tvPageDescription.text =
-            "All downloadable music tracks, HD videos, torrents, and documents on this page have been automatically detected below. Tap 'Get' on any item or enter any website URL above."
+            "Tap Get on any verified Creative Commons audio track, HD video stream, multi-file magnet link, or document below."
 
-        val hubLinks = listOf(
-            DetectedWebLink(
-                url = "https://archive.org/download/open_symphony_audio/symphony_no_9_320kbps.mp3",
-                title = "Beethoven_Symphony_No_9_320kbps.mp3",
+        val items = listOf(
+            DetectedLinkItem(
+                title = "Beastie Boys - Now Get Busy (The WIRED CD CC-BY MP3)",
+                url = "https://webtorrent.io/torrents/The%20WIRED%20CD%20-%20Rip.%20Sample.%20Mash.%20Share/01%20-%20Beastie%20Boys%20-%20Now%20Get%20Busy.mp3",
                 downloadType = DownloadType.MUSIC,
-                platformOrExt = "ARCHIVE.ORG • MP3"
+                badgeLabel = "MUSIC • MP3"
             ),
-            DetectedWebLink(
-                url = "https://soundcloud.com/royaltyfree/midnight-synthwave-session",
-                title = "Midnight_Synthwave_Session.mp3",
+            DetectedLinkItem(
+                title = "David Byrne - My Fair Lady (The WIRED CD CC-BY MP3)",
+                url = "https://webtorrent.io/torrents/The%20WIRED%20CD%20-%20Rip.%20Sample.%20Mash.%20Share/02%20-%20David%20Byrne%20-%20My%20Fair%20Lady.mp3",
                 downloadType = DownloadType.MUSIC,
-                platformOrExt = "SOUNDCLOUD"
+                badgeLabel = "MUSIC • MP3"
             ),
-            DetectedWebLink(
-                url = "https://indiecollective.bandcamp.com/track/lofi-study-beats-vol-4",
-                title = "LoFi_Study_Beats_Vol_4.flac",
+            DetectedLinkItem(
+                title = "My Morning Jacket - One Big Holiday (CC-BY MP3)",
+                url = "https://webtorrent.io/torrents/The%20WIRED%20CD%20-%20Rip.%20Sample.%20Mash.%20Share/04%20-%20My%20Morning%20Jacket%20-%20One%20Big%20Holiday.mp3",
                 downloadType = DownloadType.MUSIC,
-                platformOrExt = "BANDCAMP • FLAC"
+                badgeLabel = "MUSIC • MP3"
             ),
-            DetectedWebLink(
-                url = "https://music.youtube.com/watch?v=acoustic_horizon_hq",
-                title = "Acoustic_Horizon_Unplugged.m4a",
-                downloadType = DownloadType.MUSIC,
-                platformOrExt = "YOUTUBE MUSIC"
+            DetectedLinkItem(
+                title = "Big Buck Bunny (1080p Open Movie MP4)",
+                url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+                downloadType = DownloadType.VIDEO,
+                badgeLabel = "VIDEO • HD MP4"
             ),
-            DetectedWebLink(
-                url = "https://audiomack.com/electronic-vibes/song/neon-skyline-mix",
-                title = "Neon_Skyline_Mix.mp3",
-                downloadType = DownloadType.MUSIC,
-                platformOrExt = "AUDIOMACK"
-            ),
-            DetectedWebLink(
-                url = "https://archive.org/download/open_ambient_synth/ambient_dreams.ogg",
-                title = "Ambient_Dreams_Studio.ogg",
-                downloadType = DownloadType.MUSIC,
-                platformOrExt = "OGG AUDIO"
-            ),
-            DetectedWebLink(
+            DetectedLinkItem(
+                title = "For Bigger Blazes (720p Fast Showcase MP4)",
                 url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
-                title = "For_Bigger_Blazes_720p_HD.mp4",
                 downloadType = DownloadType.VIDEO,
-                platformOrExt = "MP4 VIDEO"
+                badgeLabel = "VIDEO • 720P"
             ),
-            DetectedWebLink(
-                url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/WeAreGoingOnBullrun.mp4",
-                title = "Bullrun_Documentary_Clip_HD.mp4",
+            DetectedLinkItem(
+                title = "Tears of Steel (Open Sci-Fi Short MP4)",
+                url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
                 downloadType = DownloadType.VIDEO,
-                platformOrExt = "MP4 VIDEO"
+                badgeLabel = "VIDEO • 1080P"
             ),
-            DetectedWebLink(
-                url = "https://releases.ubuntu.com/24.04/ubuntu-24.04.1-desktop-amd64.iso.torrent",
-                title = "ubuntu-24.04.1-desktop-amd64.iso.torrent",
-                downloadType = DownloadType.TORRENT,
-                platformOrExt = "TORRENT"
+            DetectedLinkItem(
+                title = "The WIRED CD - 16 Track Bundle (Multi-File Magnet)",
+                url = TorrentDownloadManager.SAMPLE_MAGNET_WIRED_CD,
+                downloadType = DownloadType.MAGNET,
+                badgeLabel = "MAGNET • 10 FILES"
             ),
-            DetectedWebLink(
+            DetectedLinkItem(
+                title = "Sintel Open Movie Bundle (MP4 + 9 Subtitles Magnet)",
+                url = TorrentDownloadManager.SAMPLE_MAGNET_SINTEL,
+                downloadType = DownloadType.MAGNET,
+                badgeLabel = "MAGNET • 11 FILES"
+            ),
+            DetectedLinkItem(
+                title = "Big Buck Bunny Swarm Bundle (Multi-File Magnet)",
+                url = TorrentDownloadManager.SAMPLE_MAGNET_BIG_BUCK_BUNNY,
+                downloadType = DownloadType.MAGNET,
+                badgeLabel = "MAGNET • 3 FILES"
+            ),
+            DetectedLinkItem(
+                title = "W3C Sample Technical Specification.pdf",
                 url = "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
-                title = "W3C_Reference_Manual.pdf",
                 downloadType = DownloadType.DIRECT,
-                platformOrExt = "PDF DOCUMENT"
+                badgeLabel = "DIRECT • PDF"
             )
         )
 
-        for (item in hubLinks) {
-            detectedLinks[item.url] = item
-            pageItems.add(item)
-        }
-
-        browserContentAdapter.updateItems(pageItems.toList())
-        updateDetectedBadge()
+        updateDetectedList(items)
     }
 
-    private fun crawlAndInspectWebPage(targetUrl: String) {
-        detectedLinks.clear()
-        pageItems.clear()
-        browserContentAdapter.updateItems(emptyList())
+    private fun loadCuratedCategoryHub(category: String, pushHistory: Boolean) {
+        val hubUri = "hub://$category"
+        if (pushHistory && currentUrl != hubUri) {
+            historyBackStack.addLast(currentUrl)
+            historyForwardStack.clear()
+        }
+        currentUrl = hubUri
+        binding.etBrowserUrl.setText(hubUri)
 
+        val tracks = MusicDownloadManager.getSampleMusicTracks()
+        val items = when (category) {
+            "archive_audio", "indie_music" -> {
+                binding.tvPageTitle.text = "Creative Commons Studio Audio Hub"
+                binding.tvPageBadge.text = "AUDIO STREAMS"
+                binding.tvPageDescription.text = "Verified direct MP3 audio streams ready for instant download and playback."
+                tracks.map {
+                    DetectedLinkItem(
+                        title = "${it.artist} - ${it.title}",
+                        url = it.url,
+                        downloadType = DownloadType.MUSIC,
+                        badgeLabel = "MUSIC • MP3"
+                    )
+                }
+            }
+            "open_video" -> {
+                binding.tvPageTitle.text = "Open HD Video Showcase"
+                binding.tvPageBadge.text = "HD VIDEO"
+                binding.tvPageDescription.text = "High-definition MP4 streams with stereo AAC audio."
+                listOf(
+                    DetectedLinkItem(
+                        title = "For Bigger Blazes (720p HD MP4)",
+                        url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+                        downloadType = DownloadType.VIDEO,
+                        badgeLabel = "VIDEO • 720P"
+                    ),
+                    DetectedLinkItem(
+                        title = "For Bigger Escapes (720p HD MP4)",
+                        url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
+                        downloadType = DownloadType.VIDEO,
+                        badgeLabel = "VIDEO • 720P"
+                    ),
+                    DetectedLinkItem(
+                        title = "Big Buck Bunny (1080p Full Movie MP4)",
+                        url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+                        downloadType = DownloadType.VIDEO,
+                        badgeLabel = "VIDEO • 1080P"
+                    ),
+                    DetectedLinkItem(
+                        title = "Tears of Steel (1080p Sci-Fi MP4)",
+                        url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
+                        downloadType = DownloadType.VIDEO,
+                        badgeLabel = "VIDEO • 1080P"
+                    )
+                )
+            }
+            else -> {
+                binding.tvPageTitle.text = "Verified BitTorrent & Magnet Bundles"
+                binding.tvPageBadge.text = "SWARM READY"
+                binding.tvPageDescription.text = "Multi-file magnet links with selectable audio, video, and subtitle files."
+                listOf(
+                    DetectedLinkItem(
+                        title = "The WIRED CD (10 Files • MP3 Album)",
+                        url = TorrentDownloadManager.SAMPLE_MAGNET_WIRED_CD,
+                        downloadType = DownloadType.MAGNET,
+                        badgeLabel = "MAGNET"
+                    ),
+                    DetectedLinkItem(
+                        title = "Sintel Open Movie (11 Files • MP4 + Subtitles)",
+                        url = TorrentDownloadManager.SAMPLE_MAGNET_SINTEL,
+                        downloadType = DownloadType.MAGNET,
+                        badgeLabel = "MAGNET"
+                    ),
+                    DetectedLinkItem(
+                        title = "Big Buck Bunny (3 Files • MP4 + SRT + Poster)",
+                        url = TorrentDownloadManager.SAMPLE_MAGNET_BIG_BUCK_BUNNY,
+                        downloadType = DownloadType.MAGNET,
+                        badgeLabel = "MAGNET"
+                    ),
+                    DetectedLinkItem(
+                        title = "Cosmos Laundromat (3 Files • MP4 + SRT + Poster)",
+                        url = TorrentDownloadManager.SAMPLE_MAGNET_COSMOS_LAUNDROMAT,
+                        downloadType = DownloadType.MAGNET,
+                        badgeLabel = "MAGNET"
+                    )
+                )
+            }
+        }
+        updateDetectedList(items)
+    }
+
+    private fun inspectRemoteWebpage(targetUrl: String) {
+        currentUrl = targetUrl
+        binding.etBrowserUrl.setText(targetUrl)
         binding.progressBarWeb.visibility = View.VISIBLE
-        binding.progressBarWeb.progress = 35
-        binding.tvPageTitle.text = "Scanning ${targetUrl.substringAfter("://").substringBefore("/")}..."
-        binding.tvPageBadge.text = "SCANNING"
-        binding.tvPageDescription.text = "Fetching webpage DOM & inspecting media/file streams..."
-        binding.tvSnifferStatus.text = "Inspecting $targetUrl..."
+        binding.progressBarWeb.progress = 30
+        binding.tvSnifferStatus.text = "Scanning $targetUrl..."
 
         lifecycleScope.launch {
-            try {
-                // First check if the entered URL itself is a direct media/music/video/torrent URL
-                inspectAndRegisterCandidateUrl(targetUrl, null, isPrimaryUrl = true)
+            val results = withContext(Dispatchers.IO) {
+                sniffWebpageLinks(targetUrl)
+            }
+            binding.progressBarWeb.progress = 100
+            binding.progressBarWeb.visibility = View.GONE
 
-                val pageResult = withContext(Dispatchers.IO) {
-                    val request = Request.Builder()
-                        .url(targetUrl)
-                        .header(
-                            "User-Agent",
-                            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+            binding.tvPageTitle.text = results.pageTitle
+            binding.tvPageBadge.text = "${results.links.size} LINKS"
+            binding.tvPageDescription.text = results.pageDescription
+
+            updateDetectedList(results.links)
+        }
+    }
+
+    private data class SniffResult(
+        val pageTitle: String,
+        val pageDescription: String,
+        val links: List<DetectedLinkItem>
+    )
+
+    private fun sniffWebpageLinks(url: String): SniffResult {
+        val discovered = mutableListOf<DetectedLinkItem>()
+
+        // Always allow downloading the page URL itself if it's a known video/music/direct resource
+        if (VideoDownloadManager.isYouTubeUrl(url) || VideoDownloadManager.isWatchPageUrl(url)) {
+            discovered.add(
+                DetectedLinkItem(
+                    title = "Video Stream ($url)",
+                    url = url,
+                    downloadType = DownloadType.VIDEO,
+                    badgeLabel = "VIDEO"
+                )
+            )
+            discovered.add(
+                DetectedLinkItem(
+                    title = "Audio Track Extraction ($url)",
+                    url = url,
+                    downloadType = DownloadType.MUSIC,
+                    badgeLabel = "MUSIC • M4A"
+                )
+            )
+        } else if (MusicDownloadManager.isMusicUrl(url)) {
+            discovered.add(
+                DetectedLinkItem(
+                    title = "Music Stream ($url)",
+                    url = url,
+                    downloadType = DownloadType.MUSIC,
+                    badgeLabel = "MUSIC"
+                )
+            )
+        }
+
+        return try {
+            val req = Request.Builder()
+                .url(url)
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+                )
+                .build()
+
+            httpClient.newCall(req).execute().use { response ->
+                val finalUrl = response.request.url.toString()
+                val contentType = (response.header("Content-Type") ?: "").lowercase(Locale.US)
+
+                if (!contentType.startsWith("text/html") && !contentType.startsWith("application/xhtml")) {
+                    val fileName = finalUrl.substringAfterLast('/').substringBefore('?').ifBlank { "Direct_Stream" }
+                    val type = when {
+                        contentType.startsWith("audio/") -> DownloadType.MUSIC
+                        contentType.startsWith("video/") -> DownloadType.VIDEO
+                        else -> DownloadType.DIRECT
+                    }
+                    discovered.add(
+                        0,
+                        DetectedLinkItem(
+                            title = fileName,
+                            url = finalUrl,
+                            downloadType = type,
+                            badgeLabel = type.name
                         )
-                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                        .build()
-
-                    okHttpClient.newCall(request).execute().use { response ->
-                        val contentType = response.header("Content-Type") ?: ""
-                        val finalUrl = response.request.url.toString()
-                        val bodyStr = if (contentType.contains("text") ||
-                            contentType.contains("html") ||
-                            contentType.contains("xml") ||
-                            contentType.contains("json") ||
-                            contentType.isEmpty()
-                        ) {
-                            response.body?.string() ?: ""
-                        } else {
-                            ""
-                        }
-                        Triple(finalUrl, contentType, bodyStr)
-                    }
+                    )
+                    return SniffResult(
+                        pageTitle = fileName,
+                        pageDescription = "Direct downloadable resource ($contentType)",
+                        links = discovered.distinctBy { it.url + it.downloadType.name }
+                    )
                 }
 
-                val (finalUrl, contentType, html) = pageResult
-                binding.progressBarWeb.progress = 85
+                val html = response.body?.string().orEmpty()
+                val title = Regex("<title[^>]*>(.*?)</title>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+                    .find(html)?.groupValues?.getOrNull(1)
+                    ?.replace(Regex("\\s+"), " ")
+                    ?.trim()
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: finalUrl
 
-                if (contentType.startsWith("audio/") ||
-                    contentType.startsWith("video/") ||
-                    contentType.contains("octet-stream") ||
-                    contentType.contains("bittorrent") ||
-                    contentType.contains("pdf")
-                ) {
-                    val type = classifyUrl(finalUrl, contentType)
-                    val filename = downloadManager.getFilenameFromUrl(finalUrl)
-                    registerDetectedLink(finalUrl, filename, type, type.name)
+                // Extract magnet links
+                val magnetRegex = Regex("""magnet:\?xt=urn:btih:[a-zA-Z0-9\-._~%&+=:/?#@!$'()*+,;]+""", RegexOption.IGNORE_CASE)
+                for (m in magnetRegex.findAll(html)) {
+                    val mag = m.value.replace("&amp;", "&")
+                    val dn = mag.substringAfter("dn=", "").substringBefore("&")
+                        .let { runCatching { java.net.URLDecoder.decode(it, "UTF-8") }.getOrDefault(it) }
+                        .ifBlank { "Magnet Swarm Link" }
+                    discovered.add(
+                        DetectedLinkItem(
+                            title = dn,
+                            url = mag,
+                            downloadType = DownloadType.MAGNET,
+                            badgeLabel = "MAGNET"
+                        )
+                    )
                 }
 
-                val navigableLinks = mutableListOf<DetectedWebLink>()
+                // Extract <video>, <audio>, <source>, and <a href="..."> media/file links
+                val baseHttp = finalUrl.toHttpUrlOrNull()
+                val hrefRegex = Regex("""(?:href|src)=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                for (m in hrefRegex.findAll(html)) {
+                    val rawHref = m.groupValues.getOrNull(1)?.replace("&amp;", "&")?.trim() ?: continue
+                    val resolved = if (rawHref.startsWith("http://", ignoreCase = true) ||
+                        rawHref.startsWith("https://", ignoreCase = true)
+                    ) {
+                        rawHref
+                    } else {
+                        baseHttp?.resolve(rawHref)?.toString()
+                    } ?: continue
 
-                if (html.isNotEmpty()) {
-                    val pageTitle = extractHtmlTitle(html)
-                        ?: extractMetaTag(html, "og:title")
-                        ?: finalUrl.substringAfter("://")
-                    val pageDesc = extractMetaTag(html, "og:description")
-                        ?: extractMetaTag(html, "description")
-                        ?: "Inspected webpage for downloadable audio, video, torrents, and files."
-
-                    binding.tvPageTitle.text = cleanHtmlEntities(pageTitle)
-                    binding.tvPageDescription.text = cleanHtmlEntities(pageDesc)
-
-                    // 1. Extract <meta property="og:audio|og:video|twitter:player:stream">
-                    for (prop in listOf("og:audio", "og:video", "og:video:url", "twitter:player:stream")) {
-                        extractMetaTag(html, prop)?.let { mediaUrl ->
-                            val resolved = resolveRelativeUrl(finalUrl, mediaUrl)
-                            if (resolved != null) {
-                                inspectAndRegisterCandidateUrl(resolved, pageTitle, isPrimaryUrl = true)
-                            }
-                        }
+                    val cleanLower = resolved.lowercase(Locale.US).substringBefore('?').substringBefore('#')
+                    val ext = cleanLower.substringAfterLast('.', "")
+                    val itemType = when {
+                        ext in setOf("mp3", "flac", "m4a", "wav", "ogg", "aac", "opus") -> DownloadType.MUSIC
+                        ext in setOf("mp4", "mkv", "webm", "mov", "avi", "m4v") -> DownloadType.VIDEO
+                        ext == "torrent" -> DownloadType.TORRENT
+                        ext in setOf("zip", "rar", "7z", "apk", "pdf", "iso", "epub") -> DownloadType.DIRECT
+                        else -> null
                     }
-
-                    // 2. Extract <audio src>, <video src>, <source src>
-                    val mediaSrcRegex = Regex(
-                        """<(?:audio|video|source)[^>]+src=["']([^"']+)["']""",
-                        RegexOption.IGNORE_CASE
-                    )
-                    for (match in mediaSrcRegex.findAll(html)) {
-                        val rawSrc = match.groupValues.getOrNull(1) ?: continue
-                        val resolved = resolveRelativeUrl(finalUrl, rawSrc) ?: continue
-                        inspectAndRegisterCandidateUrl(resolved, pageTitle, isPrimaryUrl = true)
-                    }
-
-                    // 3. Extract direct media URLs embedded in JSON / scripts on the page
-                    val directMediaUrlRegex = Regex(
-                        """https?://[^\s"'<>\\]+\.(?:mp3|flac|wav|m4a|aac|ogg|opus|mp4|webm|mkv|torrent|zip|apk|pdf)(?:\?[^\s"'<>\\]*)?""",
-                        RegexOption.IGNORE_CASE
-                    )
-                    for (match in directMediaUrlRegex.findAll(html)) {
-                        val mediaUrl = match.value.replace("\\/", "/")
-                        inspectAndRegisterCandidateUrl(mediaUrl, null, isPrimaryUrl = false)
-                    }
-
-                    // 4. Extract <a href="...">text</a>
-                    val anchorRegex = Regex(
-                        """<a\s+[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>""",
-                        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
-                    )
-                    for (match in anchorRegex.findAll(html)) {
-                        val rawHref = match.groupValues.getOrNull(1)?.trim() ?: continue
-                        val rawInner = match.groupValues.getOrNull(2)
-                            ?.replace(Regex("<[^>]+>"), " ")
-                            ?.replace(Regex("\\s+"), " ")
-                            ?.trim()
-                        val resolved = resolveRelativeUrl(finalUrl, rawHref) ?: continue
-
-                        val beforeCount = detectedLinks.size
-                        inspectAndRegisterCandidateUrl(resolved, rawInner, isPrimaryUrl = false)
-                        if (detectedLinks.size == beforeCount &&
-                            resolved.startsWith("http") &&
-                            !rawInner.isNullOrBlank() &&
-                            rawInner.length in 4..85 &&
-                            navigableLinks.size < 25
-                        ) {
-                            navigableLinks.add(
-                                DetectedWebLink(
-                                    url = resolved,
-                                    title = cleanHtmlEntities(rawInner),
-                                    downloadType = DownloadType.DIRECT,
-                                    platformOrExt = "WEB PAGE",
-                                    isNavigablePage = true
-                                )
+                    if (itemType != null) {
+                        val name = resolved.substringBefore('?').substringAfterLast('/')
+                            .let { runCatching { java.net.URLDecoder.decode(it, "UTF-8") }.getOrDefault(it) }
+                            .ifBlank { resolved }
+                        discovered.add(
+                            DetectedLinkItem(
+                                title = name,
+                                url = resolved,
+                                downloadType = itemType,
+                                badgeLabel = "${itemType.name} • ${ext.uppercase(Locale.US)}"
                             )
-                        }
+                        )
                     }
                 }
 
-                // Synthesize platform-specific downloadable streams when visiting known music/video domains
-                populateKnownPlatformStreamsIfNeeded(finalUrl, binding.tvPageTitle.text.toString())
+                if (discovered.isEmpty()) {
+                    discovered.add(
+                        DetectedLinkItem(
+                            title = title,
+                            url = finalUrl,
+                            downloadType = DownloadType.VIDEO,
+                            badgeLabel = "PAGE MEDIA"
+                        )
+                    )
+                }
 
-                pageItems.clear()
-                pageItems.addAll(detectedLinks.values)
-                pageItems.addAll(navigableLinks.distinctBy { it.url })
-
-                binding.progressBarWeb.visibility = View.GONE
-                binding.tvPageBadge.text = "${detectedLinks.size} DETECTED"
-                browserContentAdapter.updateItems(pageItems.toList())
-                updateDetectedBadge()
-
-            } catch (e: Exception) {
-                // Even if offline or site blocks crawler, provide downloadable stream extraction for the URL
-                populateKnownPlatformStreamsIfNeeded(targetUrl, targetUrl.substringAfter("://"))
-                pageItems.clear()
-                pageItems.addAll(detectedLinks.values)
-                binding.progressBarWeb.visibility = View.GONE
-                binding.tvPageTitle.text = targetUrl.substringAfter("://").substringBefore("/")
-                binding.tvPageBadge.text = "${detectedLinks.size} DETECTED"
-                binding.tvPageDescription.text =
-                    "Extracted downloadable streams for ${targetUrl.substringAfter("://").substringBefore("/")}."
-                browserContentAdapter.updateItems(pageItems.toList())
-                updateDetectedBadge()
+                SniffResult(
+                    pageTitle = title,
+                    pageDescription = "Scanned $finalUrl — found ${discovered.size} downloadable stream(s).",
+                    links = discovered.distinctBy { it.url + it.downloadType.name }
+                )
             }
-        }
-    }
-
-    private fun populateKnownPlatformStreamsIfNeeded(url: String, pageTitle: String) {
-        val lower = url.lowercase()
-        val platform = MusicDownloadManager.detectMusicPlatform(url)
-        if (platform != null) {
-            val cleanTitle = pageTitle.ifBlank { "$platform Audio Stream" }
-            registerDetectedLink(
-                url = url,
-                rawTitle = buildCleanTitle(url, "$cleanTitle (MP3 320kbps)", "mp3"),
-                type = DownloadType.MUSIC,
-                badge = "${platform.uppercase()} • 320K"
-            )
-            registerDetectedLink(
-                url = "$url#flac",
-                rawTitle = buildCleanTitle(url, "$cleanTitle (FLAC Lossless)", "flac"),
-                type = DownloadType.MUSIC,
-                badge = "${platform.uppercase()} • FLAC"
-            )
-        } else if (lower.contains("youtube.com") || lower.contains("youtu.be") || lower.contains("vimeo.com")) {
-            val cleanTitle = pageTitle.ifBlank { "Video Stream" }
-            registerDetectedLink(
-                url = url,
-                rawTitle = buildCleanTitle(url, "$cleanTitle (1080p MP4)", "mp4"),
-                type = DownloadType.VIDEO,
-                badge = "VIDEO • 1080P"
-            )
-            registerDetectedLink(
-                url = "$url#audio",
-                rawTitle = buildCleanTitle(url, "$cleanTitle (Audio M4A)", "m4a"),
-                type = DownloadType.MUSIC,
-                badge = "AUDIO • M4A"
+        } catch (e: Exception) {
+            SniffResult(
+                pageTitle = url,
+                pageDescription = "Could not reach remote host (${e.message ?: "offline"}). Tap below to queue URL or browse built-in hub.",
+                links = discovered.ifEmpty {
+                    listOf(
+                        DetectedLinkItem(
+                            title = url.substringAfterLast('/').ifBlank { url },
+                            url = url,
+                            downloadType = DownloadType.DIRECT,
+                            badgeLabel = "URL"
+                        )
+                    )
+                }
             )
         }
     }
 
-    private fun resolveRelativeUrl(baseUrl: String, href: String): String? {
-        val trimmed = cleanHtmlEntities(href.trim())
-        if (trimmed.isEmpty() ||
-            trimmed.startsWith("javascript:", ignoreCase = true) ||
-            trimmed.startsWith("mailto:", ignoreCase = true) ||
-            trimmed.startsWith("tel:", ignoreCase = true) ||
-            trimmed.startsWith("#")
-        ) {
-            return null
-        }
-        if (trimmed.startsWith("magnet:?")) return trimmed
-
-        // Unwrap DuckDuckGo redirect links (?uddg=...)
-        if (trimmed.contains("uddg=")) {
-            val encodedTarget = trimmed.substringAfter("uddg=").substringBefore("&")
-            try {
-                val decoded = URLDecoder.decode(encodedTarget, "UTF-8")
-                if (decoded.startsWith("http")) return decoded
-            } catch (_: Exception) {
-            }
-        }
-
-        val baseHttp = baseUrl.toHttpUrlOrNull()
-        val resolved = baseHttp?.resolve(trimmed)?.toString()
-            ?: AddDownloadActivity.normalizeAndValidateUrl(trimmed)
-        return resolved
+    private fun updateDetectedList(items: List<DetectedLinkItem>) {
+        detectedLinks.clear()
+        detectedLinks.addAll(items)
+        contentAdapter.submitList(items)
+        binding.fabDetectedLinks.text = "Detected (${items.size})"
+        binding.tvSnifferStatus.text = "${items.size} downloadable items ready"
     }
 
-    private fun cleanHtmlEntities(input: String): String {
-        return input
-            .replace("&amp;", "&")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&nbsp;", " ")
-            .trim()
-    }
-
-    private fun extractMetaTag(html: String, property: String): String? {
-        val regex = Regex(
-            """<meta[^>]+(?:property|name)=["']$property["'][^>]+content=["']([^"']+)["']""",
-            RegexOption.IGNORE_CASE
-        )
-        return regex.find(html)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() }
-    }
-
-    private fun extractHtmlTitle(html: String): String? {
-        val start = html.indexOf("<title>", ignoreCase = true)
-        val end = html.indexOf("</title>", ignoreCase = true)
-        if (start >= 0 && end > start + 7) {
-            return html.substring(start + 7, end).trim().takeIf { it.isNotEmpty() }
-        }
-        return null
-    }
-
-    private fun inspectAndRegisterCandidateUrl(
-        rawUrl: String,
-        rawTitle: String?,
-        isPrimaryUrl: Boolean
-    ) {
-        if (rawUrl.startsWith("magnet:?")) {
-            registerDetectedLink(
-                url = rawUrl,
-                rawTitle = rawTitle?.takeIf { it.isNotBlank() } ?: "Magnet_Torrent.torrent",
-                type = DownloadType.MAGNET,
-                badge = "MAGNET"
-            )
-            return
-        }
-
-        val validUrl = AddDownloadActivity.normalizeAndValidateUrl(rawUrl) ?: return
-        val lower = validUrl.lowercase()
-        val cleanPath = lower.substringBefore("?").substringBefore("#")
-        val ext = cleanPath.substringAfterLast(".", "")
-
-        val musicPlatform = MusicDownloadManager.detectMusicPlatform(validUrl)
-        if (musicPlatform != null && (isPrimaryUrl || isLikelyMediaOrTrackUrl(validUrl, ext))) {
-            val title = buildCleanTitle(validUrl, rawTitle, if (ext in AUDIO_EXTS) ext else "mp3")
-            registerDetectedLink(validUrl, title, DownloadType.MUSIC, musicPlatform.uppercase())
-            return
-        }
-
-        if (ext in VIDEO_EXTS ||
-            lower.contains("youtube.com/watch") ||
-            lower.contains("youtu.be/") ||
-            lower.contains("vimeo.com/") ||
-            lower.contains("dailymotion.com/video") ||
-            lower.contains("tiktok.com/")
-        ) {
-            val title = buildCleanTitle(validUrl, rawTitle, if (ext in VIDEO_EXTS) ext else "mp4")
-            registerDetectedLink(
-                validUrl,
-                title,
-                DownloadType.VIDEO,
-                if (ext in VIDEO_EXTS) ext.uppercase() else "VIDEO"
-            )
-            return
-        }
-
-        if (ext == "torrent") {
-            val title = buildCleanTitle(validUrl, rawTitle, "torrent")
-            registerDetectedLink(validUrl, title, DownloadType.TORRENT, "TORRENT")
-            return
-        }
-
-        if (ext in DOWNLOADABLE_EXTENSIONS) {
-            val type = when (ext) {
-                in AUDIO_EXTS -> DownloadType.MUSIC
-                in VIDEO_EXTS -> DownloadType.VIDEO
-                "torrent" -> DownloadType.TORRENT
-                else -> DownloadType.DIRECT
-            }
-            val title = buildCleanTitle(validUrl, rawTitle, ext)
-            registerDetectedLink(validUrl, title, type, ext.uppercase())
-        }
-    }
-
-    private fun isLikelyMediaOrTrackUrl(url: String, ext: String): Boolean {
-        if (ext in AUDIO_EXTS) return true
-        val lower = url.lowercase()
-        val path = lower.substringAfter("://").substringAfter("/", "")
-        return path.length > 4 &&
-            !path.endsWith("login") &&
-            !path.endsWith("signup") &&
-            !path.endsWith("terms") &&
-            !path.endsWith("privacy")
-    }
-
-    private fun buildCleanTitle(url: String, rawTitle: String?, defaultExt: String): String {
-        val baseFromTitle = rawTitle?.trim()
-            ?.replace("\n", " ")
-            ?.takeIf { it.length in 3..90 }
-        val base = baseFromTitle ?: downloadManager.getFilenameFromUrl(url).substringBeforeLast(".")
-        val sanitized = base.replace(Regex("[^a-zA-Z0-9 _\\-.()]"), "_").trim()
-        return if (sanitized.lowercase().endsWith(".$defaultExt")) {
-            sanitized
-        } else {
-            "$sanitized.$defaultExt"
-        }
-    }
-
-    private fun classifyUrl(url: String, mimeType: String?): DownloadType {
-        if (url.startsWith("magnet:?")) return DownloadType.MAGNET
-        if (url.endsWith(".torrent", ignoreCase = true)) return DownloadType.TORRENT
-        if (MusicDownloadManager.isMusicUrl(url) || mimeType?.startsWith("audio/") == true) {
-            return DownloadType.MUSIC
-        }
-        if (mimeType?.startsWith("video/") == true ||
-            url.contains("youtube.com") || url.contains("youtu.be") || url.contains("vimeo.com")
-        ) {
-            return DownloadType.VIDEO
-        }
-        return DownloadType.DIRECT
-    }
-
-    private fun registerDetectedLink(
-        url: String,
-        rawTitle: String,
-        type: DownloadType,
-        badge: String
-    ) {
-        val cleanUrl = url.substringBefore("#")
-        if (!detectedLinks.containsKey(url)) {
-            detectedLinks[url] = DetectedWebLink(
-                url = cleanUrl,
-                title = rawTitle,
-                downloadType = type,
-                platformOrExt = badge,
-                isNavigablePage = false
-            )
-        }
-    }
-
-    private fun updateDetectedBadge() {
-        val count = detectedLinks.size
-        binding.fabDetectedLinks.text = "Detected ($count)"
-        binding.tvSnifferStatus.text = if (count > 0) {
-            "$count downloadable media/file links detected"
-        } else {
-            "Link Detector Active • Enter any URL above"
-        }
-    }
-
-    private fun startDownloadFromBrowser(item: DetectedWebLink) {
-        val savePath = downloadManager.getDefaultDownloadPath()
-        Intent(this, DownloadService::class.java).apply {
-            action = DownloadService.ACTION_START_DOWNLOAD
-            putExtra(DownloadService.EXTRA_URL, item.url)
-            putExtra(DownloadService.EXTRA_FILENAME, item.title)
-            putExtra(DownloadService.EXTRA_SAVE_PATH, savePath)
-            putExtra(DownloadService.EXTRA_DOWNLOAD_TYPE, item.downloadType)
-            startService(this)
-        }
-        Toast.makeText(
-            this,
-            "Downloading: ${item.title}",
-            Toast.LENGTH_SHORT
-        ).show()
-    }
-
-    private fun showDetectedLinksSheet() {
+    private fun showDetectedLinksBottomSheet() {
         val dialog = BottomSheetDialog(this)
         val view = layoutInflater.inflate(R.layout.bottom_sheet_detected_links, null)
         dialog.setContentView(view)
 
-        val tvSheetTitle = view.findViewById<TextView>(R.id.tvSheetTitle)
+        val rvDetected = view.findViewById<RecyclerView>(R.id.rvDetectedLinks)
+        val tvNoLinks = view.findViewById<TextView>(R.id.tvNoDetectedLinks)
         val btnDownloadAll = view.findViewById<MaterialButton>(R.id.btnDownloadAllDetected)
         val chipGroupFilter = view.findViewById<ChipGroup>(R.id.chipGroupDetectedFilter)
-        val tvNoDetectedLinks = view.findViewById<TextView>(R.id.tvNoDetectedLinks)
-        val rvDetectedLinks = view.findViewById<RecyclerView>(R.id.rvDetectedLinks)
 
-        val allItems = detectedLinks.values.toList()
-        tvSheetTitle.text = "Detected Links (${allItems.size})"
-
-        var displayedItems = allItems
-        val sheetAdapter = DetectedLinksAdapter(
-            items = displayedItems,
-            onDownloadClick = { link ->
-                startDownloadFromBrowser(link)
-            },
-            onItemClick = { link ->
-                dialog.dismiss()
-                startActivity(Intent(this, AddDownloadActivity::class.java).apply {
-                    putExtra("download_type", link.downloadType.name)
-                    putExtra("preset_url", link.url)
-                })
-            }
-        )
-
-        rvDetectedLinks.layoutManager = LinearLayoutManager(this)
-        rvDetectedLinks.adapter = sheetAdapter
+        val sheetAdapter = DetectedLinkAdapter(detectedLinks.toList()) { selected ->
+            dialog.dismiss()
+            openInAddDownload(selected)
+        }
+        rvDetected.layoutManager = LinearLayoutManager(this)
+        rvDetected.adapter = sheetAdapter
 
         fun applyFilter(checkedId: Int) {
-            displayedItems = when (checkedId) {
-                R.id.chipFilterMusic -> allItems.filter { it.downloadType == DownloadType.MUSIC }
-                R.id.chipFilterVideo -> allItems.filter { it.downloadType == DownloadType.VIDEO }
-                R.id.chipFilterFiles -> allItems.filter {
+            val filtered = when (checkedId) {
+                R.id.chipFilterMusic -> detectedLinks.filter { it.downloadType == DownloadType.MUSIC }
+                R.id.chipFilterVideo -> detectedLinks.filter { it.downloadType == DownloadType.VIDEO }
+                R.id.chipFilterFiles -> detectedLinks.filter {
                     it.downloadType == DownloadType.DIRECT ||
                         it.downloadType == DownloadType.TORRENT ||
                         it.downloadType == DownloadType.MAGNET
                 }
-                else -> allItems
+                else -> detectedLinks.toList()
             }
-            sheetAdapter.updateItems(displayedItems)
-            tvNoDetectedLinks.visibility = if (displayedItems.isEmpty()) View.VISIBLE else View.GONE
-            rvDetectedLinks.visibility = if (displayedItems.isEmpty()) View.GONE else View.VISIBLE
+            sheetAdapter.submitList(filtered)
+            tvNoLinks.visibility = if (filtered.isEmpty()) View.VISIBLE else View.GONE
+            rvDetected.visibility = if (filtered.isEmpty()) View.GONE else View.VISIBLE
         }
 
-        applyFilter(R.id.chipFilterAll)
-
         chipGroupFilter.setOnCheckedStateChangeListener { _, checkedIds ->
-            val checkedId = checkedIds.firstOrNull() ?: R.id.chipFilterAll
-            applyFilter(checkedId)
+            applyFilter(checkedIds.firstOrNull() ?: R.id.chipFilterAll)
         }
 
         btnDownloadAll.setOnClickListener {
-            if (displayedItems.isEmpty()) {
-                Toast.makeText(this, "No links to download in this filter", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-            displayedItems.forEach { startDownloadFromBrowser(it) }
-            Toast.makeText(
-                this,
-                "Queued ${displayedItems.size} downloads",
-                Toast.LENGTH_SHORT
-            ).show()
+            val first = detectedLinks.firstOrNull()
             dialog.dismiss()
+            if (first != null) {
+                openInAddDownload(first)
+            } else {
+                Toast.makeText(this, "No links detected", Toast.LENGTH_SHORT).show()
+            }
         }
 
+        applyFilter(R.id.chipFilterAll)
         dialog.show()
     }
 
-    private inner class DetectedLinksAdapter(
-        private var items: List<DetectedWebLink>,
-        private val onDownloadClick: (DetectedWebLink) -> Unit,
-        private val onItemClick: (DetectedWebLink) -> Unit
-    ) : RecyclerView.Adapter<DetectedLinksAdapter.ViewHolder>() {
+    private fun openInAddDownload(item: DetectedLinkItem) {
+        val intent = Intent(this, AddDownloadActivity::class.java).apply {
+            putExtra("download_type", item.downloadType.name)
+            putExtra("preset_url", item.url)
+            putExtra("preset_title", item.title)
+        }
+        startActivity(intent)
+    }
 
-        fun updateItems(newItems: List<DetectedWebLink>) {
-            items = newItems
+    private class DetectedLinkAdapter(
+        initialItems: List<DetectedLinkItem>,
+        private val onDownloadClicked: (DetectedLinkItem) -> Unit
+    ) : RecyclerView.Adapter<DetectedLinkAdapter.ViewHolder>() {
+
+        private val items = initialItems.toMutableList()
+
+        fun submitList(newItems: List<DetectedLinkItem>) {
+            items.clear()
+            items.addAll(newItems)
             notifyDataSetChanged()
         }
 
-        inner class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+        class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
             val ivIcon: ImageView = view.findViewById(R.id.ivDetectedIcon)
             val tvTitle: TextView = view.findViewById(R.id.tvDetectedTitle)
             val tvBadge: TextView = view.findViewById(R.id.tvDetectedTypeBadge)
@@ -809,48 +648,27 @@ class BrowserActivity : AppCompatActivity() {
         }
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
-            val v = LayoutInflater.from(parent.context)
+            val view = LayoutInflater.from(parent.context)
                 .inflate(R.layout.item_detected_link, parent, false)
-            return ViewHolder(v)
+            return ViewHolder(view)
         }
 
         override fun onBindViewHolder(holder: ViewHolder, position: Int) {
             val item = items[position]
             holder.tvTitle.text = item.title
+            holder.tvBadge.text = item.badgeLabel
             holder.tvUrl.text = item.url
-            holder.tvBadge.text = item.platformOrExt
 
-            if (item.isNavigablePage) {
-                val color = ContextCompat.getColor(holder.itemView.context, R.color.colorPrimary)
-                holder.ivIcon.setImageResource(R.drawable.ic_browser)
-                ImageViewCompat.setImageTintList(holder.ivIcon, ColorStateList.valueOf(color))
-                holder.tvBadge.setTextColor(color)
-                holder.btnDownload.text = "Open"
-                holder.btnDownload.setIconResource(R.drawable.ic_open)
-                holder.btnDownload.setOnClickListener {
-                    onItemClick(item)
-                }
-            } else {
-                val (iconRes, colorRes) = when (item.downloadType) {
-                    DownloadType.MUSIC -> R.drawable.ic_music to R.color.category_music
-                    DownloadType.VIDEO -> R.drawable.ic_video to R.color.category_video
-                    DownloadType.TORRENT, DownloadType.MAGNET -> R.drawable.ic_torrent to R.color.category_torrent
-                    DownloadType.DIRECT -> R.drawable.ic_file to R.color.category_direct
-                }
-                val color = ContextCompat.getColor(holder.itemView.context, colorRes)
-                holder.ivIcon.setImageResource(iconRes)
-                ImageViewCompat.setImageTintList(holder.ivIcon, ColorStateList.valueOf(color))
-                holder.tvBadge.setTextColor(color)
-                holder.btnDownload.text = "Get"
-                holder.btnDownload.setIconResource(R.drawable.ic_download)
-                holder.btnDownload.setOnClickListener {
-                    onDownloadClick(item)
-                }
+            val iconRes = when (item.downloadType) {
+                DownloadType.MUSIC -> R.drawable.ic_music
+                DownloadType.VIDEO -> R.drawable.ic_video
+                DownloadType.TORRENT, DownloadType.MAGNET -> R.drawable.ic_torrent
+                DownloadType.DIRECT -> R.drawable.ic_file
             }
+            holder.ivIcon.setImageResource(iconRes)
 
-            holder.itemView.setOnClickListener {
-                onItemClick(item)
-            }
+            holder.btnDownload.setOnClickListener { onDownloadClicked(item) }
+            holder.itemView.setOnClickListener { onDownloadClicked(item) }
         }
 
         override fun getItemCount(): Int = items.size

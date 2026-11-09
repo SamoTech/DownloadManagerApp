@@ -2,123 +2,60 @@
 <LinearLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
-    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/colorBackground"
-    android:orientation="vertical"
-    tools:context=".activity.MediaPlayerActivity">
+    android:orientation="vertical">
 
     <com.google.android.material.appbar.MaterialToolbar
         android:id="@+id/toolbar"
         android:layout_width="match_parent"
         android:layout_height="?attr/actionBarSize"
         android:background="@color/colorHeaderBg"
-        app:navigationIconTint="@android:color/white"
+        app:navigationIcon="@drawable/ic_back"
+        app:navigationIconTint="@color/white"
         app:title="@string/media_player"
-        app:titleTextColor="@android:color/white" />
+        app:titleTextColor="@color/white" />
 
-    <!-- Media Stage Card (ExoPlayer TextureView Video Surface + Audio Spectrum Visualizer) -->
-    <LinearLayout
+    <!-- Stage Card: Video PlayerView + Audio Artwork -->
+    <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:background="@color/colorHeaderBg"
-        android:orientation="vertical"
-        android:paddingHorizontal="16dp"
-        android:paddingBottom="14dp">
+        android:layout_height="240dp"
+        android:layout_marginHorizontal="14dp"
+        android:layout_marginTop="12dp"
+        app:cardBackgroundColor="@color/colorHeaderBg"
+        app:cardCornerRadius="18dp"
+        app:cardElevation="4dp">
 
         <FrameLayout
-            android:id="@+id/mediaStageContainer"
             android:layout_width="match_parent"
-            android:layout_height="228dp"
-            android:background="@drawable/card_background"
-            android:backgroundTint="#090D16"
-            android:clipToOutline="true"
-            tools:targetApi="s">
+            android:layout_height="match_parent">
 
-            <!-- Jetpack Media3 ExoPlayer TextureView Surface (prevents SurfaceView Z-order black screen) -->
             <androidx.media3.ui.PlayerView
                 android:id="@+id/playerView"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
-                android:layout_gravity="center"
                 android:visibility="gone"
                 app:resize_mode="fit"
-                app:shutter_background_color="#090D16"
-                app:surface_type="texture_view"
-                app:use_controller="false" />
+                app:use_controller="true" />
 
-            <!-- Fallback Live Animated Video Stage (if hardware decoder is unavailable) -->
-            <FrameLayout
-                android:id="@+id/videoOverlayContainer"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:visibility="gone" />
-
-            <!-- Video Top HUD Bar (shown during video playback) -->
             <LinearLayout
-                android:id="@+id/videoHudBar"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_gravity="top"
-                android:background="#990F172A"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:paddingHorizontal="12dp"
-                android:paddingVertical="8dp"
-                android:visibility="gone">
-
-                <ImageView
-                    android:layout_width="18dp"
-                    android:layout_height="18dp"
-                    android:contentDescription="@string/videos"
-                    android:src="@drawable/ic_video"
-                    app:tint="@color/colorAccent" />
-
-                <TextView
-                    android:id="@+id/tvVideoHudTitle"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginHorizontal="8dp"
-                    android:layout_weight="1"
-                    android:ellipsize="end"
-                    android:maxLines="1"
-                    android:text="Video.mp4"
-                    android:textColor="@android:color/white"
-                    android:textSize="13sp"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:id="@+id/tvVideoHudBadge"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:background="@drawable/icon_badge_background"
-                    android:paddingHorizontal="8dp"
-                    android:paddingVertical="2dp"
-                    android:text="H.264 + AAC"
-                    android:textColor="@color/colorPrimary"
-                    android:textSize="10sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-            <!-- Audio Art, Codec Badge & Live Spectrum Overlay -->
-            <LinearLayout
-                android:id="@+id/audioVisualizerContainer"
+                android:id="@+id/audioContainer"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:gravity="center"
                 android:orientation="vertical"
-                android:padding="14dp">
+                android:padding="16dp">
 
                 <FrameLayout
-                    android:layout_width="60dp"
-                    android:layout_height="60dp"
+                    android:layout_width="84dp"
+                    android:layout_height="84dp"
                     android:background="@drawable/icon_badge_background">
 
                     <ImageView
-                        android:id="@+id/ivMediaArtwork"
-                        android:layout_width="32dp"
-                        android:layout_height="32dp"
+                        android:id="@+id/ivArtwork"
+                        android:layout_width="44dp"
+                        android:layout_height="44dp"
                         android:layout_gravity="center"
                         android:contentDescription="@string/media_player"
                         android:src="@drawable/ic_music"
@@ -126,212 +63,167 @@
                 </FrameLayout>
 
                 <TextView
-                    android:id="@+id/tvNowPlayingBadge"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:background="@drawable/icon_badge_background"
-                    android:paddingHorizontal="10dp"
-                    android:paddingVertical="3dp"
-                    android:text="MP3 44.1KHZ STEREO • 320 KBPS"
-                    android:textColor="@color/colorPrimary"
-                    android:textSize="10sp"
-                    android:textStyle="bold" />
-
-                <TextView
                     android:id="@+id/tvMediaTitle"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
+                    android:layout_marginTop="14dp"
                     android:ellipsize="end"
                     android:gravity="center"
-                    android:maxLines="1"
-                    android:text="Select a downloaded track or video below"
-                    android:textColor="@android:color/white"
-                    android:textSize="15sp"
+                    android:maxLines="2"
+                    android:text="Select a track or video to play"
+                    android:textColor="@color/white"
+                    android:textSize="16sp"
                     android:textStyle="bold" />
 
                 <TextView
                     android:id="@+id/tvMediaSubtitle"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
+                    android:layout_marginTop="4dp"
                     android:ellipsize="end"
                     android:gravity="center"
                     android:maxLines="1"
-                    android:text="Media3 ExoPlayer • H.264, AAC, MP3, FLAC, OGG, WAV"
-                    android:textColor="#94A3B8"
-                    android:textSize="11sp" />
-
-                <!-- Live Audio Spectrum Bars Container -->
-                <FrameLayout
-                    android:id="@+id/audioSpectrumHost"
-                    android:layout_width="match_parent"
-                    android:layout_height="38dp"
-                    android:layout_marginTop="8dp" />
+                    android:text="Ready"
+                    android:textColor="@color/light_gray"
+                    android:textSize="12sp" />
             </LinearLayout>
         </FrameLayout>
+    </com.google.android.material.card.MaterialCardView>
 
-        <!-- Active Codec & Audio Output Status Bar -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
-
-            <TextView
-                android:id="@+id/tvCodecStatus"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:ellipsize="end"
-                android:maxLines="1"
-                android:text="Codec: Media3 ExoPlayer • Stereo Audio Active"
-                android:textColor="#38BDF8"
-                android:textSize="11sp"
-                android:textStyle="bold" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnVolumeToggle"
-                style="@style/Widget.Material3.Button.TextButton"
-                android:layout_width="wrap_content"
-                android:layout_height="30dp"
-                android:insetTop="0dp"
-                android:insetBottom="0dp"
-                android:minWidth="64dp"
-                android:paddingHorizontal="8dp"
-                android:paddingVertical="0dp"
-                android:text="VOL 100%"
-                android:textColor="@color/colorAccent"
-                android:textSize="11sp"
-                android:textStyle="bold" />
-        </LinearLayout>
-
-        <!-- SeekBar & Timestamps -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
-
-            <TextView
-                android:id="@+id/tvCurrentTime"
-                android:layout_width="44dp"
-                android:layout_height="wrap_content"
-                android:text="00:00"
-                android:textColor="#CBD5E1"
-                android:textSize="12sp" />
-
-            <SeekBar
-                android:id="@+id/seekBarMedia"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:max="1000"
-                android:progress="0"
-                android:progressTint="@color/colorAccent"
-                android:thumbTint="@color/colorAccent" />
-
-            <TextView
-                android:id="@+id/tvTotalDuration"
-                android:layout_width="44dp"
-                android:layout_height="wrap_content"
-                android:gravity="end"
-                android:text="00:00"
-                android:textColor="#CBD5E1"
-                android:textSize="12sp" />
-        </LinearLayout>
-
-        <!-- Transport Controls -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:gravity="center"
-            android:orientation="horizontal">
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnPlaybackSpeed"
-                style="@style/Widget.Material3.Button.TextButton"
-                android:layout_width="56dp"
-                android:layout_height="40dp"
-                android:insetTop="0dp"
-                android:insetBottom="0dp"
-                android:padding="0dp"
-                android:text="1.0x"
-                android:textColor="#CBD5E1"
-                android:textSize="12sp"
-                android:textStyle="bold" />
-
-            <ImageButton
-                android:id="@+id/btnPrevTrack"
-                android:layout_width="48dp"
-                android:layout_height="48dp"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:contentDescription="Previous"
-                android:src="@drawable/ic_skip_previous"
-                app:tint="@android:color/white" />
-
-            <com.google.android.material.floatingactionbutton.FloatingActionButton
-                android:id="@+id/fabPlayPause"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginHorizontal="18dp"
-                android:contentDescription="@string/resume"
-                android:src="@drawable/ic_play"
-                app:backgroundTint="@color/colorAccent"
-                app:fabCustomSize="56dp"
-                app:tint="@android:color/white" />
-
-            <ImageButton
-                android:id="@+id/btnNextTrack"
-                android:layout_width="48dp"
-                android:layout_height="48dp"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:contentDescription="Next"
-                android:src="@drawable/ic_skip_next"
-                app:tint="@android:color/white" />
-
-            <ImageButton
-                android:id="@+id/btnRepeatToggle"
-                android:layout_width="48dp"
-                android:layout_height="48dp"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:contentDescription="Repeat"
-                android:src="@drawable/ic_repeat"
-                app:tint="#94A3B8" />
-        </LinearLayout>
-    </LinearLayout>
-
-    <!-- Playlist / Media Library Section -->
-    <LinearLayout
+    <!-- Transport Controls Card -->
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/controlsCard"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:paddingHorizontal="16dp"
-        android:paddingTop="12dp"
-        android:paddingBottom="6dp">
+        android:layout_marginHorizontal="14dp"
+        android:layout_marginTop="10dp"
+        app:cardBackgroundColor="@color/colorSurface"
+        app:cardCornerRadius="16dp"
+        app:cardElevation="2dp"
+        app:strokeColor="@color/colorBorder"
+        app:strokeWidth="1dp">
 
-        <TextView
-            android:layout_width="0dp"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="PLAYABLE MEDIA QUEUE (VIDEOS &amp; MUSIC)"
-            android:textColor="@color/colorPrimary"
-            android:textSize="12sp"
-            android:textStyle="bold" />
+            android:orientation="vertical"
+            android:padding="14dp">
 
-        <TextView
-            android:id="@+id/tvQueueCount"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="0 items"
-            android:textColor="@color/gray"
-            android:textSize="12sp" />
-    </LinearLayout>
+            <com.google.android.material.slider.Slider
+                android:id="@+id/seekSlider"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:value="0"
+                android:valueFrom="0"
+                android:valueTo="100"
+                app:labelBehavior="gone"
+                app:thumbColor="@color/colorPrimary"
+                app:trackColorActive="@color/colorPrimary"
+                app:trackColorInactive="@color/light_gray" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/tvCurrentTime"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="00:00"
+                    android:textColor="@color/gray"
+                    android:textSize="12sp" />
+
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="0dp"
+                    android:layout_weight="1" />
+
+                <TextView
+                    android:id="@+id/tvTotalTime"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="00:00"
+                    android:textColor="@color/gray"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnRewind"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="44dp"
+                    android:text="-10s"
+                    android:textColor="@color/colorOnSurface" />
+
+                <com.google.android.material.floatingactionbutton.FloatingActionButton
+                    android:id="@+id/btnPlayPause"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginHorizontal="20dp"
+                    android:contentDescription="@string/resume"
+                    android:src="@drawable/ic_pause"
+                    app:backgroundTint="@color/colorPrimary"
+                    app:tint="@color/white" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnForward"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="44dp"
+                    android:text="+10s"
+                    android:textColor="@color/colorOnSurface" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnSpeed"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_marginEnd="6dp"
+                    android:layout_weight="1"
+                    android:text="Speed: 1.0x"
+                    android:textSize="12sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnShareMedia"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:text="@string/share"
+                    android:textSize="12sp"
+                    app:icon="@drawable/ic_share" />
+            </LinearLayout>
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- Completed Media Queue Header + List -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginHorizontal="16dp"
+        android:layout_marginTop="12dp"
+        android:layout_marginBottom="4dp"
+        android:text="Downloaded Media Queue"
+        android:textColor="@color/colorOnSurface"
+        android:textSize="14sp"
+        android:textStyle="bold" />
 
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rvMediaQueue"
@@ -339,7 +231,7 @@
         android:layout_height="0dp"
         android:layout_weight="1"
         android:clipToPadding="false"
-        android:paddingHorizontal="12dp"
+        android:paddingHorizontal="14dp"
         android:paddingBottom="16dp" />
 
 </LinearLayout>

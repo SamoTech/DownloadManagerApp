@@ -353,31 +353,117 @@
                 android:padding="16dp"
                 android:visibility="gone">
 
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/torrent_settings"
+                        android:textColor="@color/colorOnSurface"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnFetchTorrentFiles"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="38dp"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:text="Fetch Files"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="@string/torrent_settings"
-                    android:textColor="@color/colorOnSurface"
-                    android:textSize="16sp"
-                    android:textStyle="bold" />
+                    android:layout_marginTop="8dp"
+                    android:text="Quick-test verified multi-file Magnet links:"
+                    android:textColor="@color/gray"
+                    android:textSize="12sp" />
+
+                <HorizontalScrollView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:scrollbars="none">
+
+                    <com.google.android.material.chip.ChipGroup
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        app:singleLine="true">
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chipSampleMagnet1"
+                            style="@style/Widget.Material3.Chip.Suggestion"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="WIRED CD (16 MP3s)" />
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chipSampleMagnet2"
+                            style="@style/Widget.Material3.Chip.Suggestion"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Sintel (MP4 + 9 Subtitles)" />
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chipSampleMagnet3"
+                            style="@style/Widget.Material3.Chip.Suggestion"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Big Buck Bunny (3 Files)" />
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chipSampleMagnet4"
+                            style="@style/Widget.Material3.Chip.Suggestion"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Cosmos Laundromat" />
+                    </com.google.android.material.chip.ChipGroup>
+                </HorizontalScrollView>
 
                 <com.google.android.material.divider.MaterialDivider
                     android:layout_width="match_parent"
                     android:layout_height="1dp"
                     android:layout_marginVertical="8dp" />
 
+                <ProgressBar
+                    android:id="@+id/progressBarTorrentFetch"
+                    style="?android:attr/progressBarStyleHorizontal"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:indeterminate="true"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/tvTorrentMetaSummary"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="Paste a magnet:? link or tap Fetch Files to load the torrent file tree."
+                    android:textColor="@color/colorPrimary"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
                 <com.google.android.material.checkbox.MaterialCheckBox
                     android:id="@+id/cbSelectAllFiles"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:checked="true"
                     android:text="@string/select_all_files" />
 
                 <androidx.recyclerview.widget.RecyclerView
                     android:id="@+id/rvTorrentFiles"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:maxHeight="260dp" />
+                    android:layout_marginTop="4dp"
+                    android:nestedScrollingEnabled="false" />
 
                 <com.google.android.material.textfield.TextInputLayout
                     android:layout_width="match_parent"

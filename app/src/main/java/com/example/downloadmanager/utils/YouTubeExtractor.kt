@@ -10,20 +10,21 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
-import kotlin.math.abs
 
 /**
- * YouTube video extractor for getting video metadata and playable MP4 stream URLs.
+ * Real YouTube & YouTube Music stream extractor using InnerTube ANDROID_VR / iOS / Embedded clients.
+ * Extracts both progressive muxed MP4 streams (video + audio) and adaptive HD video / M4A & Opus audio streams.
  */
 class YouTubeExtractor(@Suppress("unused") private val context: Context) {
 
     private val okHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(20, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .writeTimeout(20, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(12, TimeUnit.SECONDS)
+            .writeTimeout(10, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .followRedirects(true)
             .followSslRedirects(true)
@@ -33,31 +34,23 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context) {
     companion object {
         private const val TAG = "YouTubeExtractor"
 
+        const val VR_USER_AGENT =
+            "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 14; en_US; Quest 3; Build/UP1A.231005.007.A1; Cronet/132.0.6808.3)"
+
+        private val cache = ConcurrentHashMap<String, Pair<Long, YouTubeVideoInfo>>()
+        private const val CACHE_TTL_MS = 10 * 60 * 1000L // 10 minutes
+
         private val YOUTUBE_VIDEO_ID_PATTERN = Pattern.compile(
-            "(?:youtube\\.com/(?:[^/]+/.+/(?:shorts/)?|embed/|v/|shorts/|watch\\?v=|watch\\?.+&v=)|youtu\\.be/)([^&?/#\\s]+)"
+            "(?:(?:music\\.|www\\.|m\\.)?youtube\\.com/(?:[^/]+/.+/(?:shorts/)?|embed/|v/|shorts/|live/|watch\\?v=|watch\\?.+&v=)|youtu\\.be/)([a-zA-Z0-9_-]{11})"
         )
-
-        // Reliable HD H.264 MP4 fallback streams when YouTube cipher/DRM blocks direct googlevideo CDN access
-        private val PLAYABLE_MP4_STREAMS = listOf(
-            "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
-            "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
-            "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/WeAreGoingOnBullrun.mp4",
-            "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4",
-            "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoy.mp4"
-        )
-
-        fun getPlayableFallbackMp4Url(seed: String): String {
-            val idx = abs(seed.hashCode()) % PLAYABLE_MP4_STREAMS.size
-            return PLAYABLE_MP4_STREAMS[idx]
-        }
 
         fun extractVideoIdFromUrl(url: String): String? {
-            val matcher = YOUTUBE_VIDEO_ID_PATTERN.matcher(url)
-            return if (matcher.find()) {
-                matcher.group(1)?.takeIf { it.isNotBlank() }
-            } else {
-                null
+            val matcher = YOUTUBE_VIDEO_ID_PATTERN.matcher(url.trim())
+            if (matcher.find()) {
+                return matcher.group(1)?.takeIf { it.isNotBlank() }
             }
+            val vParam = Regex("[?&]v=([a-zA-Z0-9_-]{11})").find(url)
+            return vParam?.groupValues?.getOrNull(1)
         }
     }
 
@@ -81,291 +74,316 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context) {
         val format: String
     )
 
+    private data class InnerTubeResult(
+        val videoInfo: VideoInfo?,
+        val formats: List<VideoFormat>
+    )
+
     fun extract(url: String): YouTubeVideoInfo? {
         return try {
             val videoId = extractVideoIdFromUrl(url) ?: return null
-            val videoInfo = getVideoInfo(videoId) ?: VideoInfo(
+            val cached = cache[videoId]
+            if (cached != null && System.currentTimeMillis() - cached.first < CACHE_TTL_MS && cached.second.formats.isNotEmpty()) {
+                return cached.second
+            }
+
+            val innerTube = fetchFromInnerTube(videoId)
+            val fallbackInfo = innerTube.videoInfo ?: fetchOEmbedVideoInfo(videoId) ?: VideoInfo(
                 id = videoId,
                 title = "YouTube_Video_$videoId",
                 url = "https://www.youtube.com/watch?v=$videoId",
                 thumbnailUrl = "https://img.youtube.com/vi/$videoId/hqdefault.jpg"
             )
-            val formats = extractFormats(videoId)
 
-            YouTubeVideoInfo(
+            val result = YouTubeVideoInfo(
                 videoId = videoId,
-                title = videoInfo.title,
+                title = fallbackInfo.title,
                 url = "https://www.youtube.com/watch?v=$videoId",
-                thumbnailUrl = videoInfo.thumbnailUrl ?: "",
-                duration = videoInfo.duration,
-                viewCount = videoInfo.views,
-                author = videoInfo.author ?: "YouTube Creator",
-                uploadDate = videoInfo.uploadDate ?: "Recent",
-                description = videoInfo.description ?: "",
-                formats = formats,
+                thumbnailUrl = fallbackInfo.thumbnailUrl ?: "https://img.youtube.com/vi/$videoId/hqdefault.jpg",
+                duration = fallbackInfo.duration,
+                viewCount = fallbackInfo.views,
+                author = fallbackInfo.author ?: "YouTube",
+                uploadDate = fallbackInfo.uploadDate ?: "",
+                description = fallbackInfo.description ?: "",
+                formats = innerTube.formats,
                 subtitles = emptyList()
             )
+            if (result.formats.isNotEmpty()) {
+                cache[videoId] = System.currentTimeMillis() to result
+            }
+            result
         } catch (e: Exception) {
-            Log.w(TAG, "Error extracting YouTube video info", e)
+            Log.w(TAG, "Error extracting YouTube video info: ${e.message}", e)
             null
         }
     }
 
-    private fun getVideoInfo(videoId: String): VideoInfo? {
-        val watchUrl = "https://www.youtube.com/watch?v=$videoId"
-        val defaultThumb = "https://img.youtube.com/vi/$videoId/hqdefault.jpg"
+    private fun fetchFromInnerTube(videoId: String): InnerTubeResult {
+        val clients = listOf(
+            Triple(
+                "ANDROID_VR",
+                "1.60.19",
+                VR_USER_AGENT
+            ),
+            Triple(
+                "IOS",
+                "19.45.4",
+                "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)"
+            ),
+            Triple(
+                "ANDROID_VR",
+                "1.56.21",
+                "com.google.android.apps.youtube.vr.oculus/1.56.21 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+            ),
+            Triple(
+                "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+                "2.0",
+                "Mozilla/5.0 (PlayStation; PlayStation 4/12.00) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.4 Safari/605.1.15"
+            )
+        )
 
-        // 1. Try YouTube oEmbed API first (fast, lightweight, and never blocked by consent pages)
-        try {
-            val encodedWatch = URLEncoder.encode(watchUrl, "UTF-8")
-            val oembedUrl = "https://www.youtube.com/oembed?url=$encodedWatch&format=json"
-            val oembedReq = Request.Builder()
-                .url(oembedUrl)
-                .header("User-Agent", "Mozilla/5.0 (Android 14; Mobile)")
-                .build()
-            okHttpClient.newCall(oembedReq).execute().use { response ->
-                if (response.isSuccessful) {
-                    val body = response.body?.string().orEmpty()
-                    if (body.isNotEmpty()) {
-                        val json = JSONObject(body)
-                        val title = json.optString("title").takeIf { it.isNotBlank() }
-                        val author = json.optString("author_name").takeIf { it.isNotBlank() }
-                        val thumb = json.optString("thumbnail_url").takeIf { it.isNotBlank() } ?: defaultThumb
+        var extractedVideoInfo: VideoInfo? = null
+        val allFormats = mutableListOf<VideoFormat>()
+
+        for ((clientName, clientVersion, userAgent) in clients) {
+            try {
+                val payload = when (clientName) {
+                    "TVHTML5_SIMPLY_EMBEDDED_PLAYER" -> """
+                        {
+                          "videoId": "$videoId",
+                          "context": {
+                            "client": {
+                              "clientName": "$clientName",
+                              "clientVersion": "$clientVersion",
+                              "hl": "en",
+                              "gl": "US"
+                            },
+                            "thirdParty": {
+                              "embedUrl": "https://www.youtube.com/"
+                            }
+                          }
+                        }
+                    """.trimIndent()
+                    "IOS" -> """
+                        {
+                          "videoId": "$videoId",
+                          "context": {
+                            "client": {
+                              "clientName": "IOS",
+                              "clientVersion": "$clientVersion",
+                              "deviceMake": "Apple",
+                              "deviceModel": "iPhone16,2",
+                              "osName": "iPhone",
+                              "osVersion": "18.1.0.22B83",
+                              "hl": "en",
+                              "gl": "US"
+                            }
+                          }
+                        }
+                    """.trimIndent()
+                    else -> """
+                        {
+                          "videoId": "$videoId",
+                          "context": {
+                            "client": {
+                              "clientName": "$clientName",
+                              "clientVersion": "$clientVersion",
+                              "androidSdkVersion": 34,
+                              "osName": "Android",
+                              "osVersion": "14",
+                              "hl": "en",
+                              "gl": "US"
+                            }
+                          }
+                        }
+                    """.trimIndent()
+                }
+
+                val clientIdHeader = when (clientName) {
+                    "ANDROID_VR" -> "28"
+                    "IOS" -> "5"
+                    else -> "85"
+                }
+
+                val req = Request.Builder()
+                    .url("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
+                    .header("User-Agent", userAgent)
+                    .header("Content-Type", "application/json")
+                    .header("X-YouTube-Client-Name", clientIdHeader)
+                    .header("X-YouTube-Client-Version", clientVersion)
+                    .post(payload.toRequestBody("application/json".toMediaType()))
+                    .build()
+
+                okHttpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use
+                    val bodyStr = resp.body?.string().orEmpty()
+                    if (bodyStr.isEmpty()) return@use
+
+                    val root = JSONObject(bodyStr)
+                    val videoDetails = root.optJSONObject("videoDetails")
+                    if (videoDetails != null && extractedVideoInfo == null) {
+                        val title = videoDetails.optString("title").takeIf { it.isNotBlank() }
                         if (title != null) {
-                            return VideoInfo(
+                            val author = videoDetails.optString("author", "YouTube")
+                            val lengthSec = videoDetails.optString("lengthSeconds", "0").toLongOrNull() ?: 0L
+                            val views = videoDetails.optString("viewCount", "0").toLongOrNull() ?: 0L
+                            val shortDesc = videoDetails.optString("shortDescription", "")
+                            extractedVideoInfo = VideoInfo(
                                 id = videoId,
                                 title = title,
-                                url = watchUrl,
-                                thumbnailUrl = thumb,
-                                duration = 0L,
-                                views = 0L,
-                                author = author ?: "YouTube",
-                                uploadDate = "YouTube",
-                                description = title
+                                url = "https://www.youtube.com/watch?v=$videoId",
+                                thumbnailUrl = "https://img.youtube.com/vi/$videoId/hqdefault.jpg",
+                                duration = lengthSec * 1000L,
+                                views = views,
+                                author = author,
+                                uploadDate = "",
+                                description = shortDesc
                             )
                         }
                     }
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "oEmbed lookup fallback: ${e.message}")
-        }
 
-        // 2. Fallback to watch page HTML parsing
-        return try {
-            val response = okHttpClient.newCall(
-                Request.Builder()
-                    .url(watchUrl)
-                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 14)")
-                    .build()
-            ).execute()
-            val html = response.body?.string() ?: return null
+                    val streamingData = root.optJSONObject("streamingData") ?: return@use
 
-            val title = extractTitle(html, videoId)
-            val duration = extractDuration(html)
-            val viewCount = extractViewCount(html)
-            val author = extractAuthor(html)
-            val uploadDate = extractUploadDate(html)
-            val description = extractDescription(html)
+                    // 1. Progressive muxed formats (contain BOTH video + audio tracks in a standard non-fragmented MP4, e.g., itag 18, 22)
+                    val muxedArray = streamingData.optJSONArray("formats")
+                    if (muxedArray != null) {
+                        for (i in 0 until muxedArray.length()) {
+                            val fmtObj = muxedArray.optJSONObject(i) ?: continue
+                            val directUrl = fmtObj.optString("url").takeIf { it.startsWith("http") } ?: continue
+                            val itag = fmtObj.optInt("itag", 18)
+                            val mime = fmtObj.optString("mimeType", "video/mp4")
+                            val qualityLabel = fmtObj.optString("qualityLabel").ifBlank { "360p" }
+                            val width = fmtObj.optInt("width", 640)
+                            val height = fmtObj.optInt("height", 360)
+                            val fps = fmtObj.optInt("fps", 30)
+                            val bitrate = fmtObj.optInt("bitrate", 800_000)
+                            val approxDurationMs = fmtObj.optString("approxDurationMs", "0").toLongOrNull() ?: 0L
+                            val clen = fmtObj.optString("contentLength").toLongOrNull()
+                                ?: extractClenFromUrl(directUrl)
+                                ?: if (approxDurationMs > 0 && bitrate > 0) (approxDurationMs * bitrate) / 8000L else 0L
 
-            VideoInfo(
-                id = videoId,
-                title = title,
-                url = watchUrl,
-                thumbnailUrl = defaultThumb,
-                duration = duration,
-                views = viewCount,
-                author = author,
-                uploadDate = uploadDate,
-                description = description
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "Error getting video info from HTML", e)
-            null
-        }
-    }
-
-    private fun extractTitle(html: String, videoId: String): String {
-        val titlePattern = Pattern.compile("<title>(.*?)</title>")
-        val matcher = titlePattern.matcher(html)
-        return if (matcher.find()) {
-            val raw = matcher.group(1)?.replace(" - YouTube", "")?.trim().orEmpty()
-            if (raw.isNotBlank() && !raw.equals("YouTube", ignoreCase = true)) {
-                raw
-            } else {
-                "YouTube_Video_$videoId"
-            }
-        } else {
-            "YouTube_Video_$videoId"
-        }
-    }
-
-    private fun extractDuration(html: String): Long {
-        val durationPattern = Pattern.compile("\"lengthSeconds\":\"(\\d+)\"")
-        val matcher = durationPattern.matcher(html)
-        return if (matcher.find()) {
-            (matcher.group(1)?.toLongOrNull() ?: 0L) * 1000L
-        } else {
-            0L
-        }
-    }
-
-    private fun extractViewCount(html: String): Long {
-        val viewCountPattern = Pattern.compile("\"viewCount\":\"(\\d+)\"")
-        val matcher = viewCountPattern.matcher(html)
-        return if (matcher.find()) {
-            matcher.group(1)?.toLongOrNull() ?: 0L
-        } else {
-            0L
-        }
-    }
-
-    private fun extractAuthor(html: String): String {
-        val authorPattern = Pattern.compile("\"author\":\"(.*?)\"")
-        val matcher = authorPattern.matcher(html)
-        return if (matcher.find()) {
-            matcher.group(1) ?: "Unknown"
-        } else {
-            "Unknown"
-        }
-    }
-
-    private fun extractUploadDate(html: String): String {
-        val datePattern = Pattern.compile("\"dateText\":\"(.*?)\"")
-        val matcher = datePattern.matcher(html)
-        return if (matcher.find()) {
-            matcher.group(1) ?: "Unknown"
-        } else {
-            "Unknown"
-        }
-    }
-
-    private fun extractDescription(html: String): String {
-        val descriptionPattern = Pattern.compile("\"shortDescription\":\"(.*?)\"")
-        val matcher = descriptionPattern.matcher(html)
-        return if (matcher.find()) {
-            matcher.group(1) ?: ""
-        } else {
-            ""
-        }
-    }
-
-    private fun extractFormats(videoId: String): List<VideoFormat> {
-        val formats = mutableListOf<VideoFormat>()
-
-        // 1. Try YouTube InnerTube player endpoint for direct MP4 progressive stream URLs
-        try {
-            val innerTubeJson = """
-                {
-                  "videoId": "$videoId",
-                  "context": {
-                    "client": {
-                      "clientName": "ANDROID",
-                      "clientVersion": "19.09.37",
-                      "androidSdkVersion": 34,
-                      "hl": "en",
-                      "gl": "US"
+                            allFormats.add(
+                                VideoFormat(
+                                    formatId = "muxed_$itag",
+                                    url = directUrl,
+                                    quality = "$qualityLabel (Video+Audio)",
+                                    resolution = "${width}x${height}",
+                                    fps = fps,
+                                    bitrate = bitrate,
+                                    codec = "H.264+AAC",
+                                    container = if (mime.contains("webm")) "webm" else "mp4",
+                                    fileSize = clen,
+                                    isAudioOnly = false
+                                )
+                            )
+                        }
                     }
-                  }
-                }
-            """.trimIndent()
-            val req = Request.Builder()
-                .url("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
-                .header("User-Agent", "com.google.android.youtube/19.09.37 (Linux; U; Android 14) gzip")
-                .post(innerTubeJson.toRequestBody("application/json".toMediaType()))
-                .build()
 
-            okHttpClient.newCall(req).execute().use { resp ->
-                if (resp.isSuccessful) {
-                    val bodyStr = resp.body?.string().orEmpty()
-                    if (bodyStr.isNotEmpty()) {
-                        val root = JSONObject(bodyStr)
-                        val streamingData = root.optJSONObject("streamingData")
-                        val rawFormats = streamingData?.optJSONArray("formats")
-                        if (rawFormats != null) {
-                            for (i in 0 until rawFormats.length()) {
-                                val fmtObj = rawFormats.optJSONObject(i) ?: continue
-                                val directUrl = fmtObj.optString("url").takeIf { it.startsWith("http") } ?: continue
-                                val mime = fmtObj.optString("mimeType")
-                                val qualityLabel = fmtObj.optString("qualityLabel").ifBlank { "720p" }
-                                val width = fmtObj.optInt("width", 1280)
-                                val height = fmtObj.optInt("height", 720)
-                                val contentLength = fmtObj.optString("contentLength").toLongOrNull() ?: (12L * 1024 * 1024)
-                                val isAudio = mime.startsWith("audio/")
-                                formats.add(
+                    // 2. Adaptive formats (high-res video tracks and dedicated M4A/Opus audio tracks)
+                    val adaptiveArray = streamingData.optJSONArray("adaptiveFormats")
+                    if (adaptiveArray != null) {
+                        for (i in 0 until adaptiveArray.length()) {
+                            val fmtObj = adaptiveArray.optJSONObject(i) ?: continue
+                            val directUrl = fmtObj.optString("url").takeIf { it.startsWith("http") } ?: continue
+                            val itag = fmtObj.optInt("itag", 0)
+                            val mime = fmtObj.optString("mimeType", "")
+                            val isAudio = mime.startsWith("audio/")
+                            val bitrate = fmtObj.optInt("bitrate", 128_000)
+                            val approxDurationMs = fmtObj.optString("approxDurationMs", "0").toLongOrNull() ?: 0L
+                            val clen = fmtObj.optString("contentLength").toLongOrNull()
+                                ?: extractClenFromUrl(directUrl)
+                                ?: if (approxDurationMs > 0 && bitrate > 0) (approxDurationMs * bitrate) / 8000L else 0L
+
+                            if (isAudio) {
+                                val isM4a = mime.contains("mp4")
+                                val audioKbps = (bitrate / 1000).coerceAtLeast(48)
+                                val sampleRate = fmtObj.optString("audioSampleRate", "44100").toIntOrNull() ?: 44100
+                                allFormats.add(
                                     VideoFormat(
-                                        formatId = fmtObj.optInt("itag", 18).toString(),
+                                        formatId = "audio_$itag",
                                         url = directUrl,
-                                        quality = qualityLabel,
-                                        resolution = "${width}x${height}",
-                                        fps = fmtObj.optInt("fps", 30),
-                                        bitrate = fmtObj.optInt("bitrate", 1500),
-                                        codec = "H.264",
-                                        container = if (isAudio) "m4a" else "mp4",
-                                        fileSize = contentLength,
-                                        isAudioOnly = isAudio
+                                        quality = "${audioKbps}kbps ${if (isM4a) "M4A/AAC" else "WebM/Opus"}",
+                                        codec = if (isM4a) "AAC" else "Opus",
+                                        container = if (isM4a) "m4a" else "webm",
+                                        fileSize = clen,
+                                        isAudioOnly = true,
+                                        audioBitrate = audioKbps,
+                                        sampleRate = sampleRate
                                     )
                                 )
+                            } else if (mime.startsWith("video/")) {
+                                val isAvcMp4 = mime.contains("mp4") && mime.contains("avc1")
+                                val isWebm = mime.contains("webm")
+                                if (isAvcMp4 || isWebm) {
+                                    val qualityLabel = fmtObj.optString("qualityLabel").ifBlank { "720p" }
+                                    val width = fmtObj.optInt("width", 1280)
+                                    val height = fmtObj.optInt("height", 720)
+                                    val fps = fmtObj.optInt("fps", 30)
+                                    allFormats.add(
+                                        VideoFormat(
+                                            formatId = "adaptive_$itag",
+                                            url = directUrl,
+                                            quality = qualityLabel,
+                                            resolution = "${width}x${height}",
+                                            fps = fps,
+                                            bitrate = bitrate,
+                                            codec = if (isAvcMp4) "H.264" else "VP9",
+                                            container = if (isAvcMp4) "mp4" else "webm",
+                                            fileSize = clen,
+                                            isAudioOnly = false
+                                        )
+                                    )
+                                }
                             }
                         }
                     }
                 }
+
+                if (allFormats.isNotEmpty()) {
+                    break
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "InnerTube client $clientName failed: ${e.message}")
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "InnerTube direct stream lookup fallback: ${e.message}")
         }
 
-        if (formats.isNotEmpty()) {
-            return formats
+        return InnerTubeResult(extractedVideoInfo, allFormats)
+    }
+
+    private fun extractClenFromUrl(url: String): Long? {
+        val m = Regex("[?&]clen=(\\d+)").find(url)
+        return m?.groupValues?.getOrNull(1)?.toLongOrNull()
+    }
+
+    private fun fetchOEmbedVideoInfo(videoId: String): VideoInfo? {
+        val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+        val defaultThumb = "https://img.youtube.com/vi/$videoId/hqdefault.jpg"
+        return try {
+            val encodedWatch = URLEncoder.encode(watchUrl, "UTF-8")
+            val oembedUrl = "https://www.youtube.com/oembed?url=$encodedWatch&format=json"
+            val req = Request.Builder()
+                .url(oembedUrl)
+                .header("User-Agent", "Mozilla/5.0 (Android 14; Mobile)")
+                .build()
+            okHttpClient.newCall(req).execute().use { response ->
+                if (!response.isSuccessful) return null
+                val body = response.body?.string().orEmpty()
+                if (body.isEmpty()) return null
+                val json = JSONObject(body)
+                val title = json.optString("title").takeIf { it.isNotBlank() } ?: return null
+                val author = json.optString("author_name", "YouTube")
+                val thumb = json.optString("thumbnail_url").takeIf { it.isNotBlank() } ?: defaultThumb
+                VideoInfo(
+                    id = videoId,
+                    title = title,
+                    url = watchUrl,
+                    thumbnailUrl = thumb,
+                    author = author,
+                    description = title
+                )
+            }
+        } catch (_: Exception) {
+            null
         }
-
-        // 2. Fallback playable H.264 MP4 streams so downloaded YouTube MP4 files always play real video
-        val playableMp4Url = getPlayableFallbackMp4Url(videoId)
-
-        formats.add(
-            VideoFormat(
-                formatId = "22",
-                url = playableMp4Url,
-                quality = "720p HD",
-                resolution = "1280x720",
-                fps = 30,
-                bitrate = 2000,
-                codec = "H.264",
-                container = "mp4",
-                fileSize = 2498500L,
-                isAudioOnly = false
-            )
-        )
-
-        formats.add(
-            VideoFormat(
-                formatId = "18",
-                url = playableMp4Url,
-                quality = "360p",
-                resolution = "640x360",
-                fps = 30,
-                bitrate = 1000,
-                codec = "H.264",
-                container = "mp4",
-                fileSize = 2498500L,
-                isAudioOnly = false
-            )
-        )
-
-        formats.add(
-            VideoFormat(
-                formatId = "140",
-                url = playableMp4Url,
-                quality = "128kbps",
-                codec = "AAC",
-                container = "m4a",
-                fileSize = 2498500L,
-                isAudioOnly = true,
-                audioBitrate = 128,
-                sampleRate = 44100
-            )
-        )
-
-        return formats
     }
 }
