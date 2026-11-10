@@ -204,10 +204,10 @@ class BrowserActivity : AppCompatActivity() {
         }
         currentUrl = "hub://discovery"
         binding.etBrowserUrl.setText("hub://discovery")
-        binding.tvPageTitle.text = "Media & Torrent Discovery Hub"
-        binding.tvPageBadge.text = "VERIFIED STREAMS"
+        binding.tvPageTitle.text = "Media & Torrent Example Hub"
+        binding.tvPageBadge.text = "EXAMPLE LINKS"
         binding.tvPageDescription.text =
-            "Tap Get on any verified Creative Commons audio track, HD video stream, multi-file magnet link, or document below."
+            "Tap Get on any public Creative Commons audio track, open movie MP4 stream, multi-file magnet link, or document below."
 
         val items = listOf(
             DetectedLinkItem(
@@ -217,10 +217,10 @@ class BrowserActivity : AppCompatActivity() {
                 badgeLabel = "MUSIC • SOUNDCLOUD"
             ),
             DetectedLinkItem(
-                title = "Rick Astley - Never Gonna Give You Up (Spotify Track)",
+                title = "Rick Astley - Never Gonna Give You Up (Spotify 30s Preview / Opt-In Match)",
                 url = "https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8",
                 downloadType = DownloadType.MUSIC,
-                badgeLabel = "MUSIC • SPOTIFY"
+                badgeLabel = "MUSIC • SPOTIFY PREVIEW"
             ),
             DetectedLinkItem(
                 title = "SoundHelix Song 1 (Electronic Synth MP3)",
@@ -293,9 +293,9 @@ class BrowserActivity : AppCompatActivity() {
         val tracks = MusicDownloadManager.getSampleMusicTracks()
         val items = when (category) {
             "archive_audio", "indie_music" -> {
-                binding.tvPageTitle.text = "SoundCloud, Spotify & Studio Audio Hub"
-                binding.tvPageBadge.text = "AUDIO STREAMS"
-                binding.tvPageDescription.text = "Verified SoundCloud, Spotify, and direct MP3 audio streams ready for instant download."
+                binding.tvPageTitle.text = "Public Audio Example Links"
+                binding.tvPageBadge.text = "EXAMPLE AUDIO"
+                binding.tvPageDescription.text = "Example SoundCloud, Spotify 30s preview, and direct MP3 audio links."
                 tracks.map {
                     DetectedLinkItem(
                         title = "${it.artist} - ${it.title}",
@@ -306,9 +306,9 @@ class BrowserActivity : AppCompatActivity() {
                 }
             }
             "open_video" -> {
-                binding.tvPageTitle.text = "Open HD Video Showcase"
-                binding.tvPageBadge.text = "HD VIDEO"
-                binding.tvPageDescription.text = "High-definition MP4 streams with stereo AAC audio."
+                binding.tvPageTitle.text = "Open HD Video Example Links"
+                binding.tvPageBadge.text = "EXAMPLE VIDEO"
+                binding.tvPageDescription.text = "Open-licensed Creative Commons MP4 video streams."
                 listOf(
                     DetectedLinkItem(
                         title = "Big Buck Bunny (720p HD MP4)",
@@ -337,8 +337,8 @@ class BrowserActivity : AppCompatActivity() {
                 )
             }
             else -> {
-                binding.tvPageTitle.text = "Verified BitTorrent & Magnet Bundles"
-                binding.tvPageBadge.text = "SWARM READY"
+                binding.tvPageTitle.text = "BitTorrent & Magnet Example Bundles"
+                binding.tvPageBadge.text = "EXAMPLE MAGNETS"
                 binding.tvPageDescription.text = "Multi-file magnet links with selectable audio, video, and subtitle files."
                 listOf(
                     DetectedLinkItem(
@@ -400,9 +400,18 @@ class BrowserActivity : AppCompatActivity() {
     )
 
     private fun sniffWebpageLinks(url: String): SniffResult {
+        val classification = com.example.downloadmanager.utils.UrlClassifier.classify(url)
+        if (classification.kind == com.example.downloadmanager.utils.UrlClassifier.SourceKind.UNSUPPORTED) {
+            return SniffResult(
+                pageTitle = classification.platformName,
+                pageDescription = classification.unsupportedReason
+                    ?: "${classification.platformName} is not supported.",
+                links = emptyList()
+            )
+        }
+
         val discovered = mutableListOf<DetectedLinkItem>()
 
-        // Always allow downloading the page URL itself if it's a known social video/music/direct resource
         if (VideoDownloadManager.isSocialVideoUrl(url) || VideoDownloadManager.isWatchPageUrl(url)) {
             val platform = VideoDownloadManager.detectVideoPlatform(url) ?: "Social Video"
             discovered.add(

@@ -510,6 +510,15 @@ class MainActivity : AppCompatActivity() {
     
     private fun handleUrl(url: String) {
         if (url.startsWith("http") || url.startsWith("https") || url.startsWith("magnet:")) {
+            val classification = com.example.downloadmanager.utils.UrlClassifier.classify(url)
+            if (classification.kind == com.example.downloadmanager.utils.UrlClassifier.SourceKind.UNSUPPORTED) {
+                Toast.makeText(
+                    this,
+                    classification.unsupportedReason ?: "Unsupported platform: ${classification.platformName}",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
             android.app.AlertDialog.Builder(this)
                 .setTitle(R.string.add_download)
                 .setMessage(getString(R.string.download_url_confirmation, url))
@@ -525,17 +534,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun detectDownloadType(url: String): DownloadType {
-        return when {
-            url.startsWith("magnet:", ignoreCase = true) -> DownloadType.MAGNET
-            url.substringBefore("?").endsWith(".torrent", ignoreCase = true) -> DownloadType.TORRENT
-            MusicDownloadManager.isMusicUrl(url) -> DownloadType.MUSIC
-            com.example.downloadmanager.manager.VideoDownloadManager.isSocialVideoUrl(url) ||
-                com.example.downloadmanager.manager.VideoDownloadManager.isWatchPageUrl(url) -> DownloadType.VIDEO
+        val classification = com.example.downloadmanager.utils.UrlClassifier.classify(url)
+        return when (classification.kind) {
+            com.example.downloadmanager.utils.UrlClassifier.SourceKind.MAGNET -> DownloadType.MAGNET
+            com.example.downloadmanager.utils.UrlClassifier.SourceKind.TORRENT_FILE -> DownloadType.TORRENT
+            com.example.downloadmanager.utils.UrlClassifier.SourceKind.MUSIC_PLATFORM,
+            com.example.downloadmanager.utils.UrlClassifier.SourceKind.DIRECT_AUDIO -> DownloadType.MUSIC
+            com.example.downloadmanager.utils.UrlClassifier.SourceKind.VIDEO_PLATFORM,
+            com.example.downloadmanager.utils.UrlClassifier.SourceKind.DIRECT_VIDEO,
+            com.example.downloadmanager.utils.UrlClassifier.SourceKind.HLS_PLAYLIST -> DownloadType.VIDEO
             else -> DownloadType.DIRECT
         }
     }
     
     private fun startDownload(url: String) {
+        val classification = com.example.downloadmanager.utils.UrlClassifier.classify(url)
+        if (classification.kind == com.example.downloadmanager.utils.UrlClassifier.SourceKind.UNSUPPORTED) {
+            Toast.makeText(
+                this,
+                classification.unsupportedReason ?: "Unsupported platform: ${classification.platformName}",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
         val downloadType = detectDownloadType(url)
         
         val downloadManager = DownloadManager(application, viewModel.repository)
@@ -547,7 +568,7 @@ class MainActivity : AppCompatActivity() {
             putExtra(DownloadService.EXTRA_URL, url)
             putExtra(DownloadService.EXTRA_FILENAME, filename)
             putExtra(DownloadService.EXTRA_SAVE_PATH, savePath)
-            putExtra(DownloadService.EXTRA_DOWNLOAD_TYPE, downloadType)
+            putExtra(DownloadService.EXTRA_DOWNLOAD_TYPE, downloadType.name)
             startService(this)
         }
     }

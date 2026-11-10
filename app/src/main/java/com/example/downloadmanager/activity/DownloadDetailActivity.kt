@@ -108,7 +108,18 @@ class DownloadDetailActivity : AppCompatActivity() {
         binding.tvDownloadedSize.text = formatFileSize(downloadItem.downloadedSize)
         binding.tvProgress.text = getString(R.string.download_progress, downloadItem.progress)
         binding.progressBar.progress = downloadItem.progress
-        binding.tvStatus.text = getString(R.string.status, getStatusText(downloadItem.status))
+
+        val statusSummary = buildString {
+            append(getStatusText(downloadItem.status))
+            if (!downloadItem.integrityStatus.isNullOrBlank()) {
+                append(" • ")
+                append(downloadItem.integrityStatus)
+            }
+            if (downloadItem.isPreview) {
+                append(" • 30s Preview")
+            }
+        }
+        binding.tvStatus.text = getString(R.string.status, statusSummary)
         
         if (downloadItem.downloadSpeed > 0) {
             binding.tvDownloadSpeed.text = getString(R.string.download_speed, formatSpeed(downloadItem.downloadSpeed))
@@ -143,11 +154,18 @@ class DownloadDetailActivity : AppCompatActivity() {
         if (downloadItem.downloadType == DownloadType.TORRENT ||
             downloadItem.downloadType == DownloadType.MAGNET) {
             binding.torrentInfo.visibility = View.VISIBLE
-            val displaySeeds = downloadItem.seeds.coerceAtLeast(if (downloadItem.status == DownloadStatus.COMPLETED) 12 else 4)
-            val displayPeers = downloadItem.peers.coerceAtLeast(if (downloadItem.status == DownloadStatus.COMPLETED) 8 else 6)
-            binding.tvPeers.text = getString(R.string.peers, displayPeers)
-            binding.tvSeeds.text = getString(R.string.seeds, displaySeeds)
-            binding.tvTorrentHash.text = "InfoHash: ${downloadItem.torrentHash ?: "--"}"
+            binding.tvPeers.text = if (downloadItem.peers >= 0) {
+                getString(R.string.peers, downloadItem.peers)
+            } else {
+                getString(R.string.peers_unavailable)
+            }
+            binding.tvSeeds.text = if (downloadItem.seeds >= 0) {
+                getString(R.string.seeds, downloadItem.seeds)
+            } else {
+                getString(R.string.seeds_unavailable)
+            }
+            val integrityNote = downloadItem.integrityStatus?.let { " • Integrity: $it" }.orEmpty()
+            binding.tvTorrentHash.text = "InfoHash: ${downloadItem.torrentHash ?: "--"}$integrityNote"
             if (downloadItem.uploadSpeed > 0) {
                 binding.tvUploadSpeed.text = getString(
                     R.string.upload_speed,
@@ -164,8 +182,26 @@ class DownloadDetailActivity : AppCompatActivity() {
         if (downloadItem.downloadType == DownloadType.VIDEO ||
             downloadItem.downloadType == DownloadType.MUSIC) {
             binding.videoInfo.visibility = View.VISIBLE
-            binding.tvVideoTitle.text = downloadItem.videoTitle ?: downloadItem.filename
-            binding.tvVideoQuality.text = downloadItem.videoQuality ?: downloadItem.mimeType
+            val titleText = buildString {
+                append(downloadItem.videoTitle ?: downloadItem.filename)
+                if (downloadItem.isPreview) {
+                    append(" [30s Preview Clip]")
+                }
+            }
+            binding.tvVideoTitle.text = titleText
+
+            val qualityAndSource = buildString {
+                append(downloadItem.videoQuality ?: downloadItem.mimeType)
+                if (!downloadItem.sourceProvider.isNullOrBlank()) {
+                    append(" • Source: ${downloadItem.sourceProvider}")
+                }
+                if (!downloadItem.mediaSource.isNullOrBlank() &&
+                    downloadItem.mediaSource != downloadItem.sourceProvider
+                ) {
+                    append(" (via ${downloadItem.mediaSource})")
+                }
+            }
+            binding.tvVideoQuality.text = qualityAndSource
         } else {
             binding.videoInfo.visibility = View.GONE
         }
@@ -174,7 +210,7 @@ class DownloadDetailActivity : AppCompatActivity() {
     }
 
     private fun populateTorrentFilesSection(downloadItem: DownloadItem) {
-        val key = "${downloadItem.id}_${downloadItem.status}_${downloadItem.torrentFileCount}_${downloadItem.downloadedSize}"
+        val key = "${downloadItem.id}_${downloadItem.status}_${downloadItem.torrentFileCount}_${downloadItem.downloadedSize}_${downloadItem.integrityStatus}"
         if (key == lastRenderedTorrentKey && binding.llTorrentFilesList.childCount > 0) {
             return
         }
@@ -189,8 +225,18 @@ class DownloadDetailActivity : AppCompatActivity() {
             val density = resources.displayMetrics.density
 
             for (fileInfo in files) {
-                val diskFile = File(torrentDir, fileInfo.path)
-                val existsOnDisk = diskFile.exists() && diskFile.isFile && diskFile.length() > 0L
+                val safeContainedFile = runCatching {
+                    com.example.downloadmanager.utils.TorrentPathSafety.resolveContainedFile(torrentDir, fileInfo.path)
+                }.getOrNull()
+
+                val stateLabel = when (fileInfo.state) {
+                    com.example.downloadmanager.model.TorrentFileState.VERIFIED -> "✓ Verified"
+                    com.example.downloadmanager.model.TorrentFileState.UNVERIFIED_COMPLETE -> "✓ Complete (Unverified)"
+                    com.example.downloadmanager.model.TorrentFileState.PARTIAL -> "◐ Partial"
+                    com.example.downloadmanager.model.TorrentFileState.QUEUED -> "• Queued"
+                    com.example.downloadmanager.model.TorrentFileState.UNSELECTED -> "○ Unselected"
+                    com.example.downloadmanager.model.TorrentFileState.FAILED -> "✕ Failed"
+                }
 
                 val row = LinearLayout(this@DownloadDetailActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
@@ -199,22 +245,26 @@ class DownloadDetailActivity : AppCompatActivity() {
                     setPadding(0, padV, 0, padV)
                 }
 
+                val displayPath = fileInfo.path.ifBlank { fileInfo.name }
                 val tvName = TextView(this@DownloadDetailActivity).apply {
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                    val prefix = if (existsOnDisk) "✓ " else if (fileInfo.isSelected) "• " else "○ "
-                    text = "$prefix${fileInfo.name}"
+                    text = "$displayPath ($stateLabel)"
                     textSize = 13f
                     setTextColor(
                         ContextCompat.getColor(
                             this@DownloadDetailActivity,
-                            if (existsOnDisk) R.color.colorOnSurface else R.color.gray
+                            if (fileInfo.canOpen) R.color.colorOnSurface else R.color.gray
                         )
                     )
                 }
 
-                val actualSize = if (existsOnDisk) diskFile.length() else fileInfo.size
+                val sizeText = if (fileInfo.state == com.example.downloadmanager.model.TorrentFileState.PARTIAL && fileInfo.size > 0L) {
+                    "${formatFileSize(fileInfo.downloadedBytes)} / ${formatFileSize(fileInfo.size)}"
+                } else {
+                    formatFileSize(fileInfo.size.takeIf { it > 0L } ?: fileInfo.downloadedBytes)
+                }
                 val tvSize = TextView(this@DownloadDetailActivity).apply {
-                    text = formatFileSize(actualSize)
+                    text = sizeText
                     textSize = 12f
                     setTextColor(ContextCompat.getColor(this@DownloadDetailActivity, R.color.gray))
                     setPadding((8 * density).toInt(), 0, 0, 0)
@@ -223,7 +273,7 @@ class DownloadDetailActivity : AppCompatActivity() {
                 row.addView(tvName)
                 row.addView(tvSize)
 
-                if (existsOnDisk) {
+                if (fileInfo.canOpen && safeContainedFile != null && safeContainedFile.exists()) {
                     row.setOnClickListener {
                         openFile(downloadItem.copy(filename = "${downloadItem.filename}/${fileInfo.path}"))
                     }

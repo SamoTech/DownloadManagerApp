@@ -2,6 +2,7 @@ package com.example.downloadmanager.manager
 
 import android.app.Application
 import android.util.Log
+import androidx.preference.PreferenceManager
 import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
@@ -9,10 +10,18 @@ import com.example.downloadmanager.model.DownloadType
 import com.example.downloadmanager.model.VideoFormat
 import com.example.downloadmanager.model.VideoInfo
 import com.example.downloadmanager.model.VideoStreamInfo
+import com.example.downloadmanager.utils.HlsPlaylistParser
+import com.example.downloadmanager.utils.HttpRangeValidator
 import com.example.downloadmanager.utils.MediaAssetHelper
+import com.example.downloadmanager.utils.UrlClassifier
 import com.example.downloadmanager.utils.YouTubeExtractor
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
@@ -24,17 +33,20 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 
 class VideoDownloadManager(
-    private val context: Application,
+    private val context: Application?,
     private val repository: DownloadRepository
 ) {
 
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val activeJobs = ConcurrentHashMap<Long, Job>()
+
     private val okHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(20, TimeUnit.SECONDS)
@@ -49,7 +61,7 @@ class VideoDownloadManager(
     companion object {
         private const val TAG = "VideoDownloadManager"
         private const val BUFFER_SIZE = 32 * 1024
-        private const val YOUTUBE_RANGE_CHUNK_SIZE = 9L * 1024L * 1024L // 9 MB chunks for unthrottled googlevideo.com downloads
+        private const val YOUTUBE_RANGE_CHUNK_SIZE = 9L * 1024L * 1024L
 
         const val DESKTOP_USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -59,12 +71,11 @@ class VideoDownloadManager(
 
         private val streamInfoCache = ConcurrentHashMap<String, VideoStreamInfo>()
 
-        private val KNOWN_VIDEO_DOMAINS = mapOf(
+        private val KNOWN_VIDEO_DOMAINS = listOf(
             "youtube.com" to "YouTube",
+            "youtube-nocookie.com" to "YouTube",
             "youtu.be" to "YouTube",
             "tiktok.com" to "TikTok",
-            "vm.tiktok.com" to "TikTok",
-            "vt.tiktok.com" to "TikTok",
             "instagram.com" to "Instagram",
             "instagr.am" to "Instagram",
             "facebook.com" to "Facebook",
@@ -81,16 +92,19 @@ class VideoDownloadManager(
             "dai.ly" to "Dailymotion",
             "pinterest.com" to "Pinterest",
             "pin.it" to "Pinterest",
-            "twitch.tv" to "Twitch",
+            "twitch.tv" to "Twitch (Unsupported)",
             "archive.org" to "Internet Archive"
         )
 
         fun detectVideoPlatform(url: String): String? {
-            val lower = url.lowercase(Locale.US)
+            val httpUrl = normalizeHttpUrl(url)?.toHttpUrlOrNull() ?: return null
+            val host = httpUrl.host.lowercase(Locale.US)
             for ((domain, name) in KNOWN_VIDEO_DOMAINS) {
-                if (lower.contains(domain)) return name
+                if (UrlClassifier.matchesDomain(host, domain)) {
+                    return name
+                }
             }
-            val clean = lower.substringBefore("?").substringBefore("#")
+            val clean = httpUrl.encodedPath.lowercase(Locale.US)
             val ext = clean.substringAfterLast(".", "")
             if (ext in listOf("mp4", "mkv", "webm", "mov", "m3u8")) {
                 return "Direct Video (${ext.uppercase(Locale.US)})"
@@ -119,61 +133,73 @@ class VideoDownloadManager(
                 else -> return null
             }
             val parsed = candidate.toHttpUrlOrNull() ?: return null
-            if (!parsed.host.contains(".")) return null
+            if (!parsed.host.contains(".") && parsed.host != "localhost" && !parsed.host.matches(Regex("^\\d+\\.\\d+\\.\\d+\\.\\d+$"))) {
+                return null
+            }
             return parsed.toString()
         }
 
+        private fun parseHost(url: String): String? {
+            return normalizeHttpUrl(url)?.toHttpUrlOrNull()?.host?.lowercase(Locale.US)
+        }
+
         fun isYouTubeUrl(url: String): Boolean {
-            return YouTubeExtractor.extractVideoIdFromUrl(url) != null
+            val httpUrl = normalizeHttpUrl(url)?.toHttpUrlOrNull() ?: return false
+            if (!UrlClassifier.matchesAnyDomain(httpUrl.host, "youtube.com", "youtube-nocookie.com", "youtu.be")) {
+                return false
+            }
+            return YouTubeExtractor.extractVideoIdFromUrl(httpUrl.toString()) != null
         }
 
         fun isArchiveDetailsUrl(url: String): Boolean {
-            return Regex("""archive\.org/details/([^/?#]+)""", RegexOption.IGNORE_CASE).containsMatchIn(url)
+            val httpUrl = normalizeHttpUrl(url)?.toHttpUrlOrNull() ?: return false
+            return UrlClassifier.matchesDomain(httpUrl.host, "archive.org") &&
+                Regex("""^/details/([^/?#]+)""", RegexOption.IGNORE_CASE).containsMatchIn(httpUrl.encodedPath)
         }
 
         fun isTikTokUrl(url: String): Boolean {
-            val lower = url.lowercase(Locale.US)
-            return lower.contains("tiktok.com/") || lower.contains("vm.tiktok.com") || lower.contains("vt.tiktok.com")
+            val host = parseHost(url) ?: return false
+            return UrlClassifier.matchesDomain(host, "tiktok.com")
         }
 
         fun isInstagramUrl(url: String): Boolean {
-            val lower = url.lowercase(Locale.US)
-            return lower.contains("instagram.com/") || lower.contains("instagr.am/")
+            val host = parseHost(url) ?: return false
+            return UrlClassifier.matchesAnyDomain(host, "instagram.com", "instagr.am")
         }
 
         fun isTwitterUrl(url: String): Boolean {
-            val lower = url.lowercase(Locale.US)
-            return lower.contains("twitter.com/") || lower.contains("x.com/") || lower.contains("t.co/")
+            val host = parseHost(url) ?: return false
+            return UrlClassifier.matchesAnyDomain(host, "twitter.com", "x.com", "t.co")
         }
 
         fun isFacebookUrl(url: String): Boolean {
-            val lower = url.lowercase(Locale.US)
-            return lower.contains("facebook.com/") || lower.contains("fb.watch") || lower.contains("fb.com/")
+            val host = parseHost(url) ?: return false
+            return UrlClassifier.matchesAnyDomain(host, "facebook.com", "fb.watch", "fb.com")
         }
 
         fun isRedditUrl(url: String): Boolean {
-            val lower = url.lowercase(Locale.US)
-            return lower.contains("reddit.com/") || lower.contains("redd.it/") || lower.contains("v.redd.it/")
+            val host = parseHost(url) ?: return false
+            return UrlClassifier.matchesAnyDomain(host, "reddit.com", "redd.it", "v.redd.it")
         }
 
         fun isVimeoUrl(url: String): Boolean {
-            val lower = url.lowercase(Locale.US)
-            return lower.contains("vimeo.com/")
+            val host = parseHost(url) ?: return false
+            return UrlClassifier.matchesDomain(host, "vimeo.com")
         }
 
         fun isDailymotionUrl(url: String): Boolean {
-            val lower = url.lowercase(Locale.US)
-            return lower.contains("dailymotion.com/") || lower.contains("dai.ly/")
+            val host = parseHost(url) ?: return false
+            return UrlClassifier.matchesAnyDomain(host, "dailymotion.com", "dai.ly")
         }
 
         fun isPinterestUrl(url: String): Boolean {
-            val lower = url.lowercase(Locale.US)
-            return lower.contains("pinterest.") || lower.contains("pin.it/")
+            val host = parseHost(url) ?: return false
+            return UrlClassifier.matchesAnyDomain(host, "pinterest.com", "pin.it")
         }
 
         fun isTwitchUrl(url: String): Boolean {
-            val lower = url.lowercase(Locale.US)
-            return lower.contains("twitch.tv/")
+            val host = parseHost(url) ?: return false
+            return UrlClassifier.matchesDomain(host, "twitch.tv")
         }
 
         fun isSocialVideoUrl(url: String): Boolean {
@@ -185,22 +211,29 @@ class VideoDownloadManager(
                 isRedditUrl(url) ||
                 isVimeoUrl(url) ||
                 isDailymotionUrl(url) ||
-                isPinterestUrl(url) ||
-                isTwitchUrl(url)
+                isPinterestUrl(url)
         }
 
         fun isWatchPageUrl(url: String): Boolean {
-            val lower = url.lowercase(Locale.US)
-            val clean = lower.substringBefore("?").substringBefore("#")
+            val httpUrl = normalizeHttpUrl(url)?.toHttpUrlOrNull() ?: return false
+            val host = httpUrl.host.lowercase(Locale.US)
+            val clean = httpUrl.encodedPath.lowercase(Locale.US)
             if (clean.endsWith(".mp4") || clean.endsWith(".m4a") || clean.endsWith(".mp3") ||
                 clean.endsWith(".webm") || clean.endsWith(".mkv") || clean.endsWith(".m3u8")
             ) {
                 return false
             }
-            if (lower.contains("googlevideo.com") || lower.contains("video.twimg.com") ||
-                lower.contains("cdninstagram.com") || lower.contains("fbcdn.net") ||
-                lower.contains("tikwm.com") || lower.contains("tiktokcdn") ||
-                lower.contains("vimeocdn.com") || lower.contains("pinimg.com")
+            if (UrlClassifier.matchesAnyDomain(
+                    host,
+                    "googlevideo.com",
+                    "twimg.com",
+                    "cdninstagram.com",
+                    "fbcdn.net",
+                    "tikwm.com",
+                    "tiktokcdn.com",
+                    "vimeocdn.com",
+                    "pinimg.com"
+                )
             ) {
                 return false
             }
@@ -210,16 +243,38 @@ class VideoDownloadManager(
                 isInstagramUrl(url) ||
                 isTwitterUrl(url) ||
                 isFacebookUrl(url) ||
-                (isRedditUrl(url) && !lower.contains("v.redd.it/")) ||
-                (isVimeoUrl(url) && !lower.contains("vimeocdn.com")) ||
+                (isRedditUrl(url) && !UrlClassifier.matchesDomain(host, "v.redd.it")) ||
+                (isVimeoUrl(url) && !UrlClassifier.matchesDomain(host, "vimeocdn.com")) ||
                 isDailymotionUrl(url) ||
                 isPinterestUrl(url) ||
                 isTwitchUrl(url)
         }
     }
 
+    private fun isThirdPartyResolverEnabled(): Boolean {
+        val ctx = context ?: return true
+        return runCatching {
+            PreferenceManager.getDefaultSharedPreferences(ctx)
+                .getBoolean("allow_third_party_resolvers", true)
+        }.getOrDefault(true)
+    }
+
+    suspend fun stopAndAwait(downloadId: Long) {
+        val job = activeJobs.remove(downloadId)
+        if (job != null && job.isActive) {
+            job.cancelAndJoin()
+        }
+    }
+
+    fun isJobRunning(downloadId: Long): Boolean {
+        return activeJobs[downloadId]?.isActive == true
+    }
+
     suspend fun extractVideoInfo(url: String): VideoStreamInfo? {
         val validUrl = normalizeHttpUrl(url) ?: return null
+        if (isTwitchUrl(validUrl)) {
+            return null
+        }
         streamInfoCache[validUrl]?.let { return it }
         return try {
             val info = when {
@@ -272,12 +327,21 @@ class VideoDownloadManager(
         }
     }
 
-    /**
-     * Extracts TikTok video & audio streams via TikWM API (`tikwm.com/api/`) with page hydration fallback.
-     */
     private fun extractTikTokVideoInfo(url: String): VideoStreamInfo? {
+        if (!isThirdPartyResolverEnabled()) {
+            return null
+        }
         return try {
-            val encoded = URLEncoder.encode(url, "UTF-8")
+            val resolvedUrl = if (url.toHttpUrlOrNull()?.host?.let {
+                    UrlClassifier.matchesAnyDomain(it, "vm.tiktok.com", "vt.tiktok.com")
+                } == true
+            ) {
+                resolveRedirectUrl(url, "tiktok.com") ?: return null
+            } else {
+                url
+            }
+
+            val encoded = URLEncoder.encode(resolvedUrl, "UTF-8")
             val apiUrl = "https://www.tikwm.com/api/?url=$encoded&hd=1"
             val req = Request.Builder()
                 .url(apiUrl)
@@ -365,7 +429,7 @@ class VideoDownloadManager(
                                     video = VideoInfo(
                                         id = id,
                                         title = title,
-                                        url = url,
+                                        url = resolvedUrl,
                                         thumbnailUrl = cover,
                                         duration = durationSec * 1000L,
                                         author = author
@@ -394,103 +458,99 @@ class VideoDownloadManager(
         }
     }
 
-    /**
-     * Extracts X / Twitter video & GIF streams via vxtwitter API, fxtwitter API, and Twitter Syndication CDN.
-     */
     private fun extractTwitterVideoInfo(url: String): VideoStreamInfo? {
         return try {
-            val resolvedUrl = if (url.contains("t.co/", ignoreCase = true)) {
-                resolveRedirectUrl(url) ?: url
+            val resolvedUrl = if (url.toHttpUrlOrNull()?.host?.let { UrlClassifier.matchesDomain(it, "t.co") } == true) {
+                resolveRedirectUrl(url, "twitter.com", "x.com") ?: return null
             } else {
                 url
             }
             val tweetId = Regex("""(?:status|statuses)/(\d+)""", RegexOption.IGNORE_CASE)
                 .find(resolvedUrl)?.groupValues?.getOrNull(1) ?: return null
 
-            // 1. Try api.vxtwitter.com / api.fxtwitter.com
-            val apiEndpoints = listOf(
-                "https://api.vxtwitter.com/Twitter/status/$tweetId",
-                "https://api.fxtwitter.com/Twitter/status/$tweetId"
-            )
-            for (endpoint in apiEndpoints) {
-                try {
-                    val req = Request.Builder()
-                        .url(endpoint)
-                        .header("User-Agent", DESKTOP_USER_AGENT)
-                        .header("Accept", "application/json")
-                        .build()
-                    okHttpClient.newCall(req).execute().use { resp ->
-                        if (!resp.isSuccessful) return@use
-                        val body = resp.body?.string().orEmpty()
-                        if (body.isEmpty()) return@use
-                        val root = JSONObject(body)
-                        val formats = mutableListOf<VideoFormat>()
-                        val userName = root.optString("user_name").ifBlank {
-                            root.optJSONObject("tweet")?.optJSONObject("author")?.optString("name") ?: "X"
-                        }
-                        val tweetText = root.optString("text").ifBlank {
-                            root.optJSONObject("tweet")?.optString("text").orEmpty()
-                        }
-                        val title = tweetText.lineSequence().firstOrNull()?.take(70)?.ifBlank { null }
-                            ?: "X_Video_${userName}_$tweetId"
+            if (isThirdPartyResolverEnabled()) {
+                val apiEndpoints = listOf(
+                    "https://api.vxtwitter.com/Twitter/status/$tweetId",
+                    "https://api.fxtwitter.com/Twitter/status/$tweetId"
+                )
+                for (endpoint in apiEndpoints) {
+                    try {
+                        val req = Request.Builder()
+                            .url(endpoint)
+                            .header("User-Agent", DESKTOP_USER_AGENT)
+                            .header("Accept", "application/json")
+                            .build()
+                        okHttpClient.newCall(req).execute().use { resp ->
+                            if (!resp.isSuccessful) return@use
+                            val body = resp.body?.string().orEmpty()
+                            if (body.isEmpty()) return@use
+                            val root = JSONObject(body)
+                            val formats = mutableListOf<VideoFormat>()
+                            val userName = root.optString("user_name").ifBlank {
+                                root.optJSONObject("tweet")?.optJSONObject("author")?.optString("name") ?: "X"
+                            }
+                            val tweetText = root.optString("text").ifBlank {
+                                root.optJSONObject("tweet")?.optString("text").orEmpty()
+                            }
+                            val title = tweetText.lineSequence().firstOrNull()?.take(70)?.ifBlank { null }
+                                ?: "X_Video_${userName}_$tweetId"
 
-                        // vxtwitter media_extended
-                        val mediaExt = root.optJSONArray("media_extended")
-                        if (mediaExt != null) {
-                            for (i in 0 until mediaExt.length()) {
-                                val mObj = mediaExt.optJSONObject(i) ?: continue
-                                val mUrl = mObj.optString("url").takeIf { it.startsWith("http") } ?: continue
-                                val mType = mObj.optString("type", "video")
-                                if (mType == "video" || mType == "gif" || mUrl.contains(".mp4")) {
+                            val mediaExt = root.optJSONArray("media_extended")
+                            if (mediaExt != null) {
+                                for (i in 0 until mediaExt.length()) {
+                                    val mObj = mediaExt.optJSONObject(i) ?: continue
+                                    val mUrl = mObj.optString("url").takeIf { it.startsWith("http") } ?: continue
+                                    val mType = mObj.optString("type", "video")
+                                    if (mType == "video" || mType == "gif" || mUrl.contains(".mp4")) {
+                                        formats.add(
+                                            VideoFormat(
+                                                formatId = "muxed_x_$i",
+                                                url = mUrl,
+                                                quality = "HD MP4 (Video+Audio)",
+                                                container = "mp4",
+                                                fileSize = mObj.optLong("size", 0L).takeIf { it > 0L },
+                                                isAudioOnly = false
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+
+                            val fxVideos = root.optJSONObject("tweet")?.optJSONObject("media")?.optJSONArray("videos")
+                            if (fxVideos != null) {
+                                for (i in 0 until fxVideos.length()) {
+                                    val vObj = fxVideos.optJSONObject(i) ?: continue
+                                    val vUrl = vObj.optString("url").takeIf { it.startsWith("http") } ?: continue
                                     formats.add(
                                         VideoFormat(
-                                            formatId = "muxed_x_$i",
-                                            url = mUrl,
+                                            formatId = "muxed_fx_$i",
+                                            url = vUrl,
                                             quality = "HD MP4 (Video+Audio)",
                                             container = "mp4",
-                                            fileSize = mObj.optLong("size", 0L).takeIf { it > 0L },
                                             isAudioOnly = false
                                         )
                                     )
                                 }
                             }
-                        }
 
-                        // fxtwitter tweet.media.videos
-                        val fxVideos = root.optJSONObject("tweet")?.optJSONObject("media")?.optJSONArray("videos")
-                        if (fxVideos != null) {
-                            for (i in 0 until fxVideos.length()) {
-                                val vObj = fxVideos.optJSONObject(i) ?: continue
-                                val vUrl = vObj.optString("url").takeIf { it.startsWith("http") } ?: continue
-                                formats.add(
-                                    VideoFormat(
-                                        formatId = "muxed_fx_$i",
-                                        url = vUrl,
-                                        quality = "HD MP4 (Video+Audio)",
-                                        container = "mp4",
-                                        isAudioOnly = false
-                                    )
+                            if (formats.isNotEmpty()) {
+                                return VideoStreamInfo(
+                                    video = VideoInfo(
+                                        id = tweetId,
+                                        title = title,
+                                        url = resolvedUrl,
+                                        author = userName
+                                    ),
+                                    formats = formats
                                 )
                             }
                         }
-
-                        if (formats.isNotEmpty()) {
-                            return VideoStreamInfo(
-                                video = VideoInfo(
-                                    id = tweetId,
-                                    title = title,
-                                    url = resolvedUrl,
-                                    author = userName
-                                ),
-                                formats = formats
-                            )
-                        }
+                    } catch (_: Exception) {
                     }
-                } catch (_: Exception) {
                 }
             }
 
-            // 2. Try Twitter Syndication CDN (`cdn.syndication.twimg.com`)
+            // First-party Twitter Syndication CDN (`cdn.syndication.twimg.com`)
             val syndUrl = "https://cdn.syndication.twimg.com/tweet-result?id=$tweetId&token=0"
             val syndReq = Request.Builder()
                 .url(syndUrl)
@@ -553,9 +613,6 @@ class VideoDownloadManager(
         }
     }
 
-    /**
-     * Extracts Instagram Reel / Post / TV video streams via embed page, Discord/crawler meta preview, and JSON scraping.
-     */
     private fun extractInstagramVideoInfo(url: String): VideoStreamInfo? {
         return try {
             val shortcode = Regex("""instagram\.com/(?:[^/]+/)?(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)""", RegexOption.IGNORE_CASE)
@@ -565,7 +622,6 @@ class VideoDownloadManager(
             var title = "Instagram_Reel_$shortcode"
             var thumb: String? = null
 
-            // 1. Try Instagram captioned embed page (`/p/<shortcode>/embed/captioned/`)
             val embedUrl = "https://www.instagram.com/p/$shortcode/embed/captioned/"
             try {
                 val req = Request.Builder()
@@ -610,13 +666,14 @@ class VideoDownloadManager(
             } catch (_: Exception) {
             }
 
-            // 2. Try Discordbot social preview on ddinstagram / kkinstagram / instagram
             if (formats.isEmpty()) {
-                val previewUrls = listOf(
-                    "https://www.ddinstagram.com/p/$shortcode/",
-                    "https://www.kkinstagram.com/p/$shortcode/",
-                    "https://www.instagram.com/reel/$shortcode/"
-                )
+                val previewUrls = buildList {
+                    if (isThirdPartyResolverEnabled()) {
+                        add("https://www.ddinstagram.com/p/$shortcode/")
+                        add("https://www.kkinstagram.com/p/$shortcode/")
+                    }
+                    add("https://www.instagram.com/reel/$shortcode/")
+                }
                 for (pUrl in previewUrls) {
                     try {
                         val req = Request.Builder()
@@ -683,11 +740,13 @@ class VideoDownloadManager(
         }
     }
 
-    /**
-     * Extracts Facebook Watch / Reel / Video streams (`browser_native_hd_url`, `playable_url_quality_hd`, `hd_src`, `sd_src`, `og:video`).
-     */
     private fun extractFacebookVideoInfo(url: String): VideoStreamInfo? {
         return try {
+            val resolvedUrl = if (url.toHttpUrlOrNull()?.host?.let { UrlClassifier.matchesDomain(it, "fb.watch") } == true) {
+                resolveRedirectUrl(url, "facebook.com", "fb.com") ?: url
+            } else {
+                url
+            }
             val userAgents = listOf(
                 DESKTOP_USER_AGENT,
                 DISCORD_BOT_USER_AGENT,
@@ -700,7 +759,7 @@ class VideoDownloadManager(
             for (ua in userAgents) {
                 try {
                     val req = Request.Builder()
-                        .url(url)
+                        .url(resolvedUrl)
                         .header("User-Agent", ua)
                         .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                         .header("Accept-Language", "en-US,en;q=0.9")
@@ -768,9 +827,9 @@ class VideoDownloadManager(
             if (formats.isEmpty()) return null
             VideoStreamInfo(
                 video = VideoInfo(
-                    id = url,
+                    id = resolvedUrl,
                     title = title,
-                    url = url,
+                    url = resolvedUrl,
                     thumbnailUrl = thumb,
                     author = "Facebook"
                 ),
@@ -782,13 +841,11 @@ class VideoDownloadManager(
         }
     }
 
-    /**
-     * Extracts Reddit video (`v.redd.it` & `reddit.com/r/.../comments/...`) via Reddit `.json` API + audio track discovery.
-     */
     private fun extractRedditVideoInfo(url: String): VideoStreamInfo? {
         return try {
-            val resolvedUrl = if (url.contains("redd.it/", ignoreCase = true) && !url.contains("v.redd.it/", ignoreCase = true)) {
-                resolveRedirectUrl(url) ?: url
+            val host = url.toHttpUrlOrNull()?.host.orEmpty()
+            val resolvedUrl = if (UrlClassifier.matchesDomain(host, "redd.it") && !UrlClassifier.matchesDomain(host, "v.redd.it")) {
+                resolveRedirectUrl(url, "reddit.com", "v.redd.it") ?: return null
             } else {
                 url
             }
@@ -796,7 +853,6 @@ class VideoDownloadManager(
             val formats = mutableListOf<VideoFormat>()
             var title = "Reddit_Video_${System.currentTimeMillis()}"
 
-            // If direct v.redd.it/<id> URL
             val vReddItId = Regex("""v\.redd\.it/([a-zA-Z0-9]+)""", RegexOption.IGNORE_CASE)
                 .find(resolvedUrl)?.groupValues?.getOrNull(1)
             if (vReddItId != null) {
@@ -947,9 +1003,6 @@ class VideoDownloadManager(
         }
     }
 
-    /**
-     * Extracts Vimeo progressive MP4 and HLS `.m3u8` streams via `player.vimeo.com/video/<id>/config`.
-     */
     private fun extractVimeoVideoInfo(url: String): VideoStreamInfo? {
         return try {
             val vimeoId = Regex("""vimeo\.com/(?:video/|channels/[^/]+/)?(\d+)""", RegexOption.IGNORE_CASE)
@@ -976,7 +1029,6 @@ class VideoDownloadManager(
                 val filesObj = root.optJSONObject("request")?.optJSONObject("files") ?: return null
                 val formats = mutableListOf<VideoFormat>()
 
-                // 1. Progressive MP4 streams
                 val progArr = filesObj.optJSONArray("progressive")
                 if (progArr != null) {
                     for (i in 0 until progArr.length()) {
@@ -999,7 +1051,6 @@ class VideoDownloadManager(
                     }
                 }
 
-                // 2. HLS `.m3u8` streams
                 val hlsObj = filesObj.optJSONObject("hls")
                 val cdnsObj = hlsObj?.optJSONObject("cdns")
                 if (cdnsObj != null) {
@@ -1043,9 +1094,6 @@ class VideoDownloadManager(
         }
     }
 
-    /**
-     * Extracts Dailymotion streams via `https://www.dailymotion.com/player/metadata/video/<id>`.
-     */
     private fun extractDailymotionVideoInfo(url: String): VideoStreamInfo? {
         return try {
             val videoId = Regex("""(?:dailymotion\.com/(?:embed/)?video/|dai\.ly/)([a-zA-Z0-9]+)""", RegexOption.IGNORE_CASE)
@@ -1106,13 +1154,10 @@ class VideoDownloadManager(
         }
     }
 
-    /**
-     * Extracts Pinterest video pins (`v.pinimg.com/videos/...mp4`).
-     */
     private fun extractPinterestVideoInfo(url: String): VideoStreamInfo? {
         return try {
-            val resolvedUrl = if (url.contains("pin.it/", ignoreCase = true)) {
-                resolveRedirectUrl(url) ?: url
+            val resolvedUrl = if (url.toHttpUrlOrNull()?.host?.let { UrlClassifier.matchesDomain(it, "pin.it") } == true) {
+                resolveRedirectUrl(url, "pinterest.com") ?: return null
             } else {
                 url
             }
@@ -1151,14 +1196,22 @@ class VideoDownloadManager(
         }
     }
 
-    private fun resolveRedirectUrl(shortUrl: String): String? {
+    /**
+     * Follows a short-link redirect and verifies that the final destination host belongs to [expectedDomains].
+     */
+    internal fun resolveRedirectUrl(shortUrl: String, vararg expectedDomains: String): String? {
         return try {
             val req = Request.Builder()
                 .url(shortUrl)
                 .header("User-Agent", DESKTOP_USER_AGENT)
                 .build()
             okHttpClient.newCall(req).execute().use { resp ->
-                resp.request.url.toString()
+                val finalHttpUrl = resp.request.url
+                if (expectedDomains.isNotEmpty() && !UrlClassifier.matchesAnyDomain(finalHttpUrl.host, *expectedDomains)) {
+                    Log.w(TAG, "Rejected short-link redirect from $shortUrl to unexpected host ${finalHttpUrl.host}")
+                    return null
+                }
+                finalHttpUrl.toString()
             }
         } catch (_: Exception) {
             null
@@ -1186,7 +1239,7 @@ class VideoDownloadManager(
                 for (i in 0 until filesArr.length()) {
                     val fObj = filesArr.optJSONObject(i) ?: continue
                     val name = fObj.optString("name")
-                    val lower = name.lowercase()
+                    val lower = name.lowercase(Locale.US)
                     val size = fObj.optString("size", "0").toLongOrNull() ?: 0L
                     val encPath = name.split("/").joinToString("/") {
                         URLEncoder.encode(it, "UTF-8").replace("+", "%20")
@@ -1212,7 +1265,7 @@ class VideoDownloadManager(
                                 VideoFormat(
                                     formatId = "audio_ia_$i",
                                     url = directUrl,
-                                    quality = "${ext.uppercase()} Audio",
+                                    quality = "${ext.uppercase(Locale.US)} Audio",
                                     container = ext,
                                     fileSize = size.takeIf { it > 0L },
                                     isAudioOnly = true,
@@ -1239,9 +1292,6 @@ class VideoDownloadManager(
         }
     }
 
-    /**
-     * Resolves direct video/audio HTTP links or extracts embedded <video>/<source>/og:video/JSON-LD streams from HTML pages.
-     */
     private fun extractGenericOrWebVideoInfo(url: String): VideoStreamInfo? {
         val validUrl = normalizeHttpUrl(url) ?: return null
         return try {
@@ -1256,7 +1306,7 @@ class VideoDownloadManager(
                     return null
                 }
                 val finalUrl = response.request.url.toString()
-                val contentType = (response.header("Content-Type") ?: "").lowercase()
+                val contentType = (response.header("Content-Type") ?: "").lowercase(Locale.US)
                 val contentRange = response.header("Content-Range")
                 val totalLength = contentRange?.substringAfterLast("/")?.toLongOrNull()
                     ?: response.header("Content-Length")?.toLongOrNull()
@@ -1268,12 +1318,12 @@ class VideoDownloadManager(
                 val isHtml = contentType.startsWith("text/html") || contentType.startsWith("application/xhtml")
                 if (!isHtml) {
                     val isAudio = contentType.startsWith("audio/") ||
-                        urlName.lowercase().endsWith(".mp3") ||
-                        urlName.lowercase().endsWith(".m4a") ||
-                        urlName.lowercase().endsWith(".flac") ||
-                        urlName.lowercase().endsWith(".ogg") ||
-                        urlName.lowercase().endsWith(".wav")
-                    val ext = urlName.substringAfterLast(".", if (isAudio) "mp3" else "mp4").lowercase()
+                        urlName.lowercase(Locale.US).endsWith(".mp3") ||
+                        urlName.lowercase(Locale.US).endsWith(".m4a") ||
+                        urlName.lowercase(Locale.US).endsWith(".flac") ||
+                        urlName.lowercase(Locale.US).endsWith(".ogg") ||
+                        urlName.lowercase(Locale.US).endsWith(".wav")
+                    val ext = urlName.substringAfterLast(".", if (isAudio) "mp3" else "mp4").lowercase(Locale.US)
                     return VideoStreamInfo(
                         video = VideoInfo(
                             id = finalUrl,
@@ -1299,7 +1349,7 @@ class VideoDownloadManager(
                 val discoveredUrls = extractEmbeddedMediaUrlsFromHtml(html, finalUrl)
 
                 val formats = discoveredUrls.mapIndexed { idx, mediaUrl ->
-                    val lower = mediaUrl.lowercase().substringBefore("?")
+                    val lower = mediaUrl.lowercase(Locale.US).substringBefore("?")
                     val isAudio = lower.endsWith(".mp3") || lower.endsWith(".m4a") || lower.endsWith(".ogg")
                     val container = when {
                         lower.endsWith(".webm") -> "webm"
@@ -1438,10 +1488,6 @@ class VideoDownloadManager(
         return regex2.find(html)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() }
     }
 
-    /**
-     * Inserts the video/audio download item into Room IMMEDIATELY without blocking on network requests,
-     * so it appears in MainActivity right away.
-     */
     suspend fun startVideoDownload(
         downloadItem: DownloadItem,
         videoFormat: VideoFormat? = null,
@@ -1449,6 +1495,10 @@ class VideoDownloadManager(
     ): Long {
         val validUrl = normalizeHttpUrl(downloadItem.url)
             ?: throw IllegalArgumentException("Invalid URL: ${downloadItem.url}")
+
+        if (isTwitchUrl(validUrl)) {
+            throw IllegalArgumentException("Twitch streams and VODs are not supported")
+        }
 
         val wantAudioOnly = downloadItem.isAudioOnly || quality.equals("audio", ignoreCase = true)
         val cachedInfo = streamInfoCache[validUrl]
@@ -1478,7 +1528,7 @@ class VideoDownloadManager(
             val audioExt = if (selectedFormat?.container == "mp3") ".mp3" else ".m4a"
             "$baseFilename$audioExt"
         } else {
-            val ext = when (selectedFormat?.container?.lowercase()) {
+            val ext = when (selectedFormat?.container?.lowercase(Locale.US)) {
                 "webm" -> ".webm"
                 "mkv" -> ".mkv"
                 else -> ".mp4"
@@ -1495,10 +1545,11 @@ class VideoDownloadManager(
             downloadType = if (wantAudioOnly) DownloadType.MUSIC else DownloadType.VIDEO,
             videoUrl = validUrl,
             videoTitle = cachedInfo?.video?.title ?: baseFilename,
-            videoQuality = selectedFormat?.quality ?: if (wantAudioOnly) "M4A / AAC Audio" else quality.uppercase(),
+            videoQuality = selectedFormat?.quality ?: if (wantAudioOnly) "M4A / AAC Audio" else quality.uppercase(Locale.US),
             isAudioOnly = wantAudioOnly,
             mimeType = finalMime,
-            status = DownloadStatus.QUEUED
+            status = DownloadStatus.QUEUED,
+            sourceProvider = platformLabel ?: "Video Stream"
         )
 
         return if (itemToInsert.id == 0L) {
@@ -1511,7 +1562,7 @@ class VideoDownloadManager(
 
     fun selectBestFormat(formats: List<VideoFormat>, quality: String): VideoFormat? {
         if (formats.isEmpty()) return null
-        val q = quality.lowercase()
+        val q = quality.lowercase(Locale.US)
 
         if (q == "audio") {
             val audioFormats = formats.filter { it.isAudioOnly }
@@ -1551,56 +1602,84 @@ class VideoDownloadManager(
         onProgress: (Long, Long, Int, Long) -> Unit,
         onComplete: (DownloadItem) -> Unit,
         onError: (DownloadItem, String) -> Unit
+    ): Job {
+        val previous = activeJobs[downloadItem.id]
+        val job = scope.launch {
+            if (previous != null && previous.isActive) {
+                previous.cancelAndJoin()
+            }
+            executeVideoDownloadJob(downloadItem, onProgress, onComplete, onError)
+        }
+        activeJobs[downloadItem.id] = job
+        job.invokeOnCompletion {
+            activeJobs.remove(downloadItem.id, job)
+        }
+        return job
+    }
+
+    internal suspend fun executeVideoDownloadJob(
+        downloadItem: DownloadItem,
+        onProgress: (Long, Long, Int, Long) -> Unit,
+        onComplete: (DownloadItem) -> Unit,
+        onError: (DownloadItem, String) -> Unit
     ) {
-        scope.launch {
-            val sourceUrl = normalizeHttpUrl(downloadItem.videoUrl ?: downloadItem.url)
-            val currentStreamUrl = normalizeHttpUrl(downloadItem.url)
-            if (sourceUrl == null && currentStreamUrl == null) {
-                val msg = "Invalid URL: must start with http:// or https://"
-                val errorItem = downloadItem.copy(status = DownloadStatus.FAILED, errorMessage = msg)
-                repository.update(errorItem)
-                onError(errorItem, msg)
-                return@launch
+        val sourceUrl = normalizeHttpUrl(downloadItem.videoUrl ?: downloadItem.url)
+        val currentStreamUrl = normalizeHttpUrl(downloadItem.url)
+        if (sourceUrl == null && currentStreamUrl == null) {
+            val msg = "Invalid URL: must start with http:// or https://"
+            repository.updateStatus(downloadItem.id, DownloadStatus.FAILED, msg)
+            val errorItem = downloadItem.copy(status = DownloadStatus.FAILED, errorMessage = msg)
+            onError(errorItem, msg)
+            return
+        }
+
+        val lookupUrl = sourceUrl ?: currentStreamUrl!!
+        if (isTwitchUrl(lookupUrl)) {
+            val msg = "Twitch streams and VODs are not supported"
+            repository.updateStatus(downloadItem.id, DownloadStatus.FAILED, msg)
+            val errorItem = downloadItem.copy(status = DownloadStatus.FAILED, errorMessage = msg)
+            onError(errorItem, msg)
+            return
+        }
+
+        try {
+            repository.updateStatus(downloadItem.id, DownloadStatus.DOWNLOADING)
+
+            val dir = File(downloadItem.savePath)
+            if (!dir.exists()) dir.mkdirs()
+
+            val wantAudio = downloadItem.isAudioOnly || downloadItem.downloadType == DownloadType.MUSIC
+            val streamInfo = extractVideoInfo(lookupUrl)
+
+            var activeItem = repository.getDownloadById(downloadItem.id) ?: downloadItem
+            var targetFilename = activeItem.filename
+            val extractedTitle = streamInfo?.video?.title
+                ?.replace(Regex("[^a-zA-Z0-9 _\\-()]"), "_")
+                ?.trim()
+            if (!extractedTitle.isNullOrBlank() &&
+                (targetFilename.startsWith("YouTube_") ||
+                    targetFilename.startsWith("TikTok_") ||
+                    targetFilename.startsWith("Instagram_") ||
+                    targetFilename.startsWith("Facebook_") ||
+                    targetFilename.startsWith("X_") ||
+                    targetFilename.startsWith("Reddit_") ||
+                    targetFilename.startsWith("Video_") ||
+                    targetFilename.startsWith("watch") ||
+                    targetFilename.startsWith("download_"))
+            ) {
+                val ext = if (wantAudio) ".m4a" else ".mp4"
+                targetFilename = "${extractedTitle.take(80)}$ext"
+                activeItem = activeItem.copy(
+                    filename = targetFilename,
+                    videoTitle = streamInfo.video.title,
+                    status = DownloadStatus.DOWNLOADING
+                )
+                repository.update(activeItem)
             }
 
+            val stagingTarget = File(dir, ".tmp_stage_vid_${downloadItem.id}")
+
             try {
-                repository.updateStatus(downloadItem.id, DownloadStatus.DOWNLOADING)
-
-                val dir = File(downloadItem.savePath)
-                if (!dir.exists()) dir.mkdirs()
-
-                val wantAudio = downloadItem.isAudioOnly || downloadItem.downloadType == DownloadType.MUSIC
-                val lookupUrl = sourceUrl ?: currentStreamUrl!!
-
-                val streamInfo = extractVideoInfo(lookupUrl)
-
-                var activeItem = repository.getDownloadById(downloadItem.id) ?: downloadItem
-                var targetFilename = activeItem.filename
-                val extractedTitle = streamInfo?.video?.title
-                    ?.replace(Regex("[^a-zA-Z0-9 _\\-()]"), "_")
-                    ?.trim()
-                if (!extractedTitle.isNullOrBlank() &&
-                    (targetFilename.startsWith("YouTube_") ||
-                        targetFilename.startsWith("TikTok_") ||
-                        targetFilename.startsWith("Instagram_") ||
-                        targetFilename.startsWith("Facebook_") ||
-                        targetFilename.startsWith("X_") ||
-                        targetFilename.startsWith("Reddit_") ||
-                        targetFilename.startsWith("Video_") ||
-                        targetFilename.startsWith("watch") ||
-                        targetFilename.startsWith("download_"))
-                ) {
-                    val ext = if (wantAudio) ".m4a" else ".mp4"
-                    targetFilename = "${extractedTitle.take(80)}$ext"
-                    activeItem = activeItem.copy(
-                        filename = targetFilename,
-                        videoTitle = streamInfo.video.title
-                    )
-                    repository.update(activeItem)
-                }
-
-                val file = File(dir, targetFilename)
-
                 if (wantAudio) {
                     val audioFormat = streamInfo?.formats?.let { selectBestFormat(it, "audio") }
                     val audioStreamUrl = audioFormat?.url ?: currentStreamUrl ?: lookupUrl
@@ -1621,16 +1700,16 @@ class VideoDownloadManager(
 
                         val statusNow = repository.getDownloadById(downloadItem.id)?.status
                         if (statusNow == DownloadStatus.PAUSED || statusNow == DownloadStatus.CANCELLED) {
-                            return@launch
+                            return
                         }
 
-                        if (!downloadedOk || !tempRawAudio.exists() || tempRawAudio.length() <= 1024L) {
+                        if (!downloadedOk || !tempRawAudio.exists() || tempRawAudio.length() <= 0L) {
                             throw IOException("Audio stream download returned empty or incomplete data")
                         }
 
-                        val remuxed = MediaAssetHelper.remuxAudioToStandardM4a(tempRawAudio, file)
+                        val remuxed = MediaAssetHelper.remuxAudioToStandardM4a(tempRawAudio, stagingTarget)
                         if (!remuxed) {
-                            tempRawAudio.copyTo(file, overwrite = true)
+                            tempRawAudio.copyTo(stagingTarget, overwrite = true)
                         }
                     } finally {
                         tempRawAudio.delete()
@@ -1682,9 +1761,15 @@ class VideoDownloadManager(
                                     onProgress(doneBytes, grandTotal, pct, speed)
                                 }
                                 if (audOk) {
-                                    videoSuccess = MediaAssetHelper.muxMp4VideoAndM4aAudio(tempVideoFile, tempAudioFile, file)
+                                    videoSuccess = MediaAssetHelper.muxMp4VideoAndM4aAudio(
+                                        tempVideoFile,
+                                        tempAudioFile,
+                                        stagingTarget
+                                    )
                                 }
                             }
+                        } catch (ce: CancellationException) {
+                            throw ce
                         } catch (e: Exception) {
                             lastError = e
                             Log.w(TAG, "Adaptive video+audio muxing failed: ${e.message}")
@@ -1697,10 +1782,9 @@ class VideoDownloadManager(
                     if (!videoSuccess) {
                         val statusNow = repository.getDownloadById(downloadItem.id)?.status
                         if (statusNow == DownloadStatus.PAUSED || statusNow == DownloadStatus.CANCELLED) {
-                            return@launch
+                            return
                         }
 
-                        // Iterate through available muxed/direct formats until one succeeds
                         val candidateFormats = buildList {
                             streamInfo?.formats?.filter { !it.isAudioOnly }?.let { addAll(it) }
                             if (isEmpty() && !isWatchPageUrl(videoStreamUrl)) {
@@ -1721,18 +1805,22 @@ class VideoDownloadManager(
                         }
 
                         for (cand in candidateFormats) {
+                            kotlinx.coroutines.currentCoroutineContext().ensureActive()
                             if (isWatchPageUrl(cand.url)) continue
                             try {
+                                if (stagingTarget.exists()) stagingTarget.delete()
                                 videoSuccess = streamUrlToFile(
                                     downloadId = downloadItem.id,
                                     streamUrl = cand.url,
-                                    destFile = file,
+                                    destFile = stagingTarget,
                                     expectedSize = cand.fileSize ?: 0L,
                                     onProgress = onProgress
                                 )
-                                if (videoSuccess && file.exists() && file.length() > 1024L) {
+                                if (videoSuccess && stagingTarget.exists() && stagingTarget.length() > 0L) {
                                     break
                                 }
+                            } catch (ce: CancellationException) {
+                                throw ce
                             } catch (e: Exception) {
                                 lastError = e
                                 videoSuccess = false
@@ -1742,51 +1830,72 @@ class VideoDownloadManager(
 
                     val statusAfter = repository.getDownloadById(downloadItem.id)?.status
                     if (statusAfter == DownloadStatus.PAUSED || statusAfter == DownloadStatus.CANCELLED) {
-                        return@launch
+                        return
                     }
 
-                    if (!videoSuccess || !file.exists() || file.length() <= 1024L) {
-                        if (file.exists()) file.delete()
+                    if (!videoSuccess || !stagingTarget.exists() || stagingTarget.length() <= 0L) {
+                        stagingTarget.delete()
                         throw lastError ?: IOException("Failed to download video stream from $lookupUrl")
                     }
                 }
 
-                val finalSize = file.length()
-                val detectedMime = MediaAssetHelper.detectActualMimeType(file, fallbackIsVideo = !wantAudio)
-                    ?: MediaAssetHelper.getMimeTypeForFilename(targetFilename, isVideo = !wantAudio)
+                val finalizedFile = HttpRangeValidator.promoteStagedFileSafely(
+                    stagingFile = stagingTarget,
+                    saveDir = dir,
+                    desiredFilename = targetFilename
+                )
+
+                val finalSize = finalizedFile.length()
+                val detectedMime = MediaAssetHelper.detectActualMimeType(finalizedFile, fallbackIsVideo = !wantAudio)
+                    ?: MediaAssetHelper.getMimeTypeForFilename(finalizedFile.name, isVideo = !wantAudio)
 
                 val latestItem = repository.getDownloadById(downloadItem.id) ?: activeItem
+                if (latestItem.status == DownloadStatus.PAUSED || latestItem.status == DownloadStatus.CANCELLED) {
+                    return
+                }
+
+                val platformName = detectVideoPlatform(lookupUrl) ?: latestItem.sourceProvider ?: "Video Stream"
                 val completedItem = latestItem.copy(
-                    filename = targetFilename,
+                    filename = finalizedFile.name,
                     fileSize = finalSize,
                     downloadedSize = finalSize,
                     progress = 100,
                     downloadSpeed = 0L,
+                    eta = 0L,
                     mimeType = detectedMime,
                     status = DownloadStatus.COMPLETED,
-                    completedDate = java.util.Date(),
-                    errorMessage = null
+                    completedDate = Date(),
+                    errorMessage = null,
+                    sourceProvider = platformName,
+                    mediaSource = "$platformName Stream",
+                    integrityStatus = "LENGTH_VERIFIED"
                 )
                 repository.update(completedItem)
                 onComplete(completedItem)
-            } catch (e: Exception) {
-                Log.w(TAG, "Error downloading video: ${e.message}", e)
-                val latest = repository.getDownloadById(downloadItem.id) ?: downloadItem
-                if (latest.status != DownloadStatus.PAUSED && latest.status != DownloadStatus.CANCELLED) {
-                    val errorItem = latest.copy(
-                        status = DownloadStatus.FAILED,
-                        downloadSpeed = 0L,
-                        errorMessage = e.message ?: "Video download failed"
-                    )
-                    repository.update(errorItem)
-                    onError(errorItem, e.message ?: "Video download failed")
-                }
+            } finally {
+                if (stagingTarget.exists()) stagingTarget.delete()
+            }
+        } catch (_: CancellationException) {
+            // Paused or cancelled cleanly
+        } catch (e: Exception) {
+            Log.w(TAG, "Error downloading video: ${e.message}", e)
+            val latest = repository.getDownloadById(downloadItem.id) ?: downloadItem
+            if (latest.status != DownloadStatus.PAUSED && latest.status != DownloadStatus.CANCELLED) {
+                val msg = e.message ?: "Video download failed"
+                repository.updateStatus(downloadItem.id, DownloadStatus.FAILED, msg)
+                val errorItem = latest.copy(
+                    status = DownloadStatus.FAILED,
+                    downloadSpeed = 0L,
+                    errorMessage = msg
+                )
+                onError(errorItem, msg)
             }
         }
     }
 
     /**
      * Downloads a media stream (direct MP4/WebM, chunked GoogleVideo, or HLS `.m3u8` playlist) to [destFile].
+     * Verifies declared length framing so truncated transfers fail rather than completing silently.
      */
     suspend fun streamUrlToFile(
         downloadId: Long,
@@ -1796,7 +1905,9 @@ class VideoDownloadManager(
         onProgress: (Long, Long, Int, Long) -> Unit
     ): Boolean {
         val ua = YouTubeExtractor.getUserAgentForStreamUrl(streamUrl)
-        val isGoogleVideo = streamUrl.contains("googlevideo.com", ignoreCase = true)
+        val isGoogleVideo = streamUrl.toHttpUrlOrNull()?.host?.let {
+            UrlClassifier.matchesDomain(it, "googlevideo.com")
+        } == true
 
         if (streamUrl.substringBefore("?").endsWith(".m3u8", ignoreCase = true) ||
             streamUrl.contains(".m3u8?", ignoreCase = true)
@@ -1812,13 +1923,14 @@ class VideoDownloadManager(
             .url(streamUrl)
             .header("User-Agent", ua)
             .header("Accept", "*/*")
+            .header("Accept-Encoding", "identity")
             .build()
 
         okHttpClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 throw IOException("HTTP ${response.code}: ${response.message}")
             }
-            val contentType = (response.header("Content-Type") ?: "").lowercase()
+            val contentType = (response.header("Content-Type") ?: "").lowercase(Locale.US)
             if (contentType.contains("mpegurl")) {
                 return downloadHlsStreamToFile(downloadId, streamUrl, ua, destFile, onProgress)
             }
@@ -1826,7 +1938,14 @@ class VideoDownloadManager(
                 throw IOException("Server returned an HTML page instead of a media stream")
             }
 
-            val contentLength = (response.body?.contentLength()?.takeIf { it > 0L } ?: expectedSize).coerceAtLeast(0L)
+            val contentEncoding = response.header("Content-Encoding")?.lowercase(Locale.US).orEmpty()
+            val rawHeaderLen = response.header("Content-Length")?.toLongOrNull() ?: -1L
+            val declaredLength = if (contentEncoding.isEmpty() || contentEncoding == "identity") {
+                if (rawHeaderLen >= 0L) rawHeaderLen else expectedSize
+            } else {
+                -1L
+            }
+
             val inputStream = response.body?.byteStream() ?: throw IOException("Empty response stream")
 
             FileOutputStream(destFile).use { outputStream ->
@@ -1839,35 +1958,45 @@ class VideoDownloadManager(
                 while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                     val currentStatus = repository.getDownloadById(downloadId)?.status
                     if (currentStatus == DownloadStatus.PAUSED || currentStatus == DownloadStatus.CANCELLED) {
-                        return false
+                        throw CancellationException()
+                    }
+                    totalRead += bytesRead
+                    if (declaredLength > 0L && totalRead > declaredLength) {
+                        throw IOException("Stream exceeded declared Content-Length ($declaredLength bytes)")
                     }
                     outputStream.write(buffer, 0, bytesRead)
-                    totalRead += bytesRead
 
                     val now = System.currentTimeMillis()
                     if (now - lastUpdateTime >= 350) {
                         val timeDiff = (now - lastUpdateTime) / 1000.0
                         val speed = if (timeDiff > 0) ((totalRead - lastRead) / timeDiff).toLong() else 0L
-                        val progress = if (contentLength > 0) {
-                            ((totalRead * 100.0) / contentLength).toInt().coerceIn(0, 99)
+                        val progress = if (declaredLength > 0) {
+                            ((totalRead * 100.0) / declaredLength).toInt().coerceIn(0, 99)
                         } else {
-                            50
+                            0
                         }
-                        onProgress(totalRead, contentLength.coerceAtLeast(totalRead), progress, speed)
+                        onProgress(totalRead, declaredLength.coerceAtLeast(totalRead), progress, speed)
                         lastUpdateTime = now
                         lastRead = totalRead
                     }
                 }
                 outputStream.flush()
-                onProgress(totalRead, contentLength.coerceAtLeast(totalRead), 100, 0L)
+                runCatching { outputStream.fd.sync() }
+
+                if (declaredLength > 0L && totalRead != declaredLength) {
+                    destFile.delete()
+                    throw IOException("Truncated media stream: expected $declaredLength bytes, received $totalRead bytes")
+                }
+
+                onProgress(totalRead, declaredLength.coerceAtLeast(totalRead), 100, 0L)
             }
         }
-        return destFile.exists() && destFile.length() > 512L
+        return destFile.exists() && destFile.length() > 0L
     }
 
     /**
-     * Downloads an HLS `.m3u8` stream (supporting master variant selection, `#EXT-X-MAP:URI="..."` fMP4 init segment,
-     * and `.m4s`/`.ts`/`.aac`/`.mp4` media segments) into [destFile].
+     * Downloads an HLS `.m3u8` stream using [HlsPlaylistParser] (validating `#EXTM3U`, variant selection,
+     * `#EXT-X-MAP`, relative URLs, `#EXT-X-BYTERANGE`, `#EXT-X-KEY`, `#EXT-X-ENDLIST`, and segment ordering).
      */
     suspend fun downloadHlsStreamToFile(
         downloadId: Long,
@@ -1876,110 +2005,143 @@ class VideoDownloadManager(
         destFile: File,
         onProgress: (Long, Long, Int, Long) -> Unit
     ): Boolean {
-        val m3u8Text = fetchText(playlistUrl, userAgent) ?: return false
-        var activePlaylistUrl = playlistUrl
-        var activeM3u8 = m3u8Text
+        val m3u8Text = fetchTextStrict(playlistUrl, userAgent)
+        var parsed = HlsPlaylistParser.parse(m3u8Text, playlistUrl)
 
-        // If master playlist with #EXT-X-STREAM-INF, pick the highest-bandwidth variant
-        if (activeM3u8.contains("#EXT-X-STREAM-INF")) {
-            val lines = activeM3u8.lines().map { it.trim() }
-            var bestVariantUrl: String? = null
-            var bestBandwidth = -1L
-            var i = 0
-            while (i < lines.size) {
-                val line = lines[i]
-                if (line.startsWith("#EXT-X-STREAM-INF:")) {
-                    val bw = Regex("""BANDWIDTH=(\d+)""").find(line)?.groupValues?.getOrNull(1)?.toLongOrNull() ?: 0L
-                    var j = i + 1
-                    while (j < lines.size && (lines[j].isEmpty() || lines[j].startsWith("#"))) {
-                        j++
-                    }
-                    if (j < lines.size) {
-                        val resolved = resolveRelativeUrl(activePlaylistUrl, lines[j])
-                        if (resolved != null && bw >= bestBandwidth) {
-                            bestBandwidth = bw
-                            bestVariantUrl = resolved
-                        }
-                    }
-                }
-                i++
-            }
-            if (bestVariantUrl != null) {
-                activePlaylistUrl = bestVariantUrl
-                activeM3u8 = fetchText(activePlaylistUrl, userAgent) ?: return false
-            }
+        if (parsed is HlsPlaylistParser.ParsedPlaylist.Master) {
+            val bestVariant = HlsPlaylistParser.selectBestVariant(parsed.variants)
+            val mediaText = fetchTextStrict(bestVariant.url, userAgent)
+            parsed = HlsPlaylistParser.parse(mediaText, bestVariant.url)
         }
 
-        val segmentUrls = mutableListOf<String>()
-        val lines = activeM3u8.lines().map { it.trim() }
-        for (line in lines) {
-            if (line.startsWith("#EXT-X-MAP:")) {
-                val mapUri = Regex("""URI=["']([^"']+)["']""").find(line)?.groupValues?.getOrNull(1)
-                if (!mapUri.isNullOrBlank()) {
-                    resolveRelativeUrl(activePlaylistUrl, mapUri)?.let { segmentUrls.add(it) }
-                }
-            } else if (line.isNotEmpty() && !line.startsWith("#")) {
-                resolveRelativeUrl(activePlaylistUrl, line)?.let { segmentUrls.add(it) }
-            }
-        }
+        val mediaPlaylist = parsed as? HlsPlaylistParser.ParsedPlaylist.Media
+            ?: throw IOException("Resolved HLS playlist is not a media playlist")
 
-        if (segmentUrls.isEmpty()) return false
+        val segments = mediaPlaylist.segments
+        if (segments.isEmpty()) {
+            throw IOException("HLS media playlist contains no segments")
+        }
 
         FileOutputStream(destFile, false).use { out ->
             val buf = ByteArray(BUFFER_SIZE)
             var totalBytes = 0L
             var lastBytes = 0L
             var lastTime = System.currentTimeMillis()
+            var writtenInitMapKey: String? = null
 
-            for ((idx, segUrl) in segmentUrls.withIndex()) {
+            for ((idx, seg) in segments.withIndex()) {
                 val status = repository.getDownloadById(downloadId)?.status
                 if (status == DownloadStatus.PAUSED || status == DownloadStatus.CANCELLED) {
-                    return false
+                    throw CancellationException()
                 }
 
-                val req = Request.Builder()
-                    .url(segUrl)
-                    .header("User-Agent", userAgent)
-                    .build()
-                okHttpClient.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) throw IOException("HLS segment HTTP ${resp.code}")
-                    val bodyStream = resp.body?.byteStream() ?: return@use
-                    var read: Int
-                    while (bodyStream.read(buf).also { read = it } != -1) {
-                        out.write(buf, 0, read)
-                        totalBytes += read
+                // Write #EXT-X-MAP initialization segment if changed or first seen
+                val initMap = seg.initMap
+                if (initMap != null) {
+                    val mapKey = "${initMap.url}|${initMap.byteRange?.offset ?: -1}:${initMap.byteRange?.length ?: -1}"
+                    if (mapKey != writtenInitMapKey) {
+                        totalBytes += fetchHlsPartToStream(
+                            url = initMap.url,
+                            byteRange = initMap.byteRange,
+                            userAgent = userAgent,
+                            out = out,
+                            buf = buf
+                        )
+                        writtenInitMapKey = mapKey
                     }
                 }
 
+                totalBytes += fetchHlsPartToStream(
+                    url = seg.url,
+                    byteRange = seg.byteRange,
+                    userAgent = userAgent,
+                    out = out,
+                    buf = buf
+                )
+
                 val now = System.currentTimeMillis()
-                if (now - lastTime >= 300 || idx == segmentUrls.lastIndex) {
+                if (now - lastTime >= 300 || idx == segments.lastIndex) {
                     val elapsedSec = ((now - lastTime) / 1000.0).coerceAtLeast(0.05)
                     val speed = ((totalBytes - lastBytes) / elapsedSec).toLong()
-                    val pct = (((idx + 1) * 100) / segmentUrls.size).coerceIn(1, 99)
-                    val estTotal = if (idx > 0) (totalBytes * segmentUrls.size) / (idx + 1) else totalBytes * segmentUrls.size
+                    val pct = (((idx + 1) * 100) / segments.size).coerceIn(1, 99)
+                    val estTotal = if (idx > 0) (totalBytes * segments.size) / (idx + 1) else totalBytes * segments.size
                     onProgress(totalBytes, estTotal.coerceAtLeast(totalBytes), pct, speed)
                     lastTime = now
                     lastBytes = totalBytes
                 }
             }
             out.flush()
+            runCatching { out.fd.sync() }
             onProgress(totalBytes, totalBytes, 100, 0L)
         }
-        return destFile.exists() && destFile.length() > 1024L
+        return destFile.exists() && destFile.length() > 0L
     }
 
-    private fun fetchText(url: String, userAgent: String): String? {
-        return try {
-            val req = Request.Builder()
-                .url(url)
-                .header("User-Agent", userAgent)
-                .build()
-            okHttpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return null
-                resp.body?.string()
+    private fun fetchHlsPartToStream(
+        url: String,
+        byteRange: HlsPlaylistParser.ByteRange?,
+        userAgent: String,
+        out: FileOutputStream,
+        buf: ByteArray
+    ): Long {
+        val reqBuilder = Request.Builder()
+            .url(url)
+            .header("User-Agent", userAgent)
+            .header("Accept-Encoding", "identity")
+        if (byteRange != null) {
+            reqBuilder.header("Range", byteRange.toRangeHeader())
+        }
+
+        okHttpClient.newCall(reqBuilder.build()).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                throw IOException("HLS segment failed with HTTP ${resp.code}: $url")
             }
-        } catch (_: Exception) {
-            null
+            if (byteRange != null) {
+                if (resp.code != 206) {
+                    throw IOException("HLS #EXT-X-BYTERANGE segment returned HTTP ${resp.code} instead of 206 Partial Content")
+                }
+                HttpRangeValidator.validate206Range(
+                    contentRangeHeader = resp.header("Content-Range"),
+                    contentLengthHeader = resp.header("Content-Length")?.toLongOrNull() ?: -1L,
+                    expectedStart = byteRange.offset,
+                    expectedEndInclusive = byteRange.endInclusive
+                )
+            }
+
+            val expectedPartLen = byteRange?.length
+                ?: resp.header("Content-Length")?.toLongOrNull()
+                ?: -1L
+
+            val bodyStream = resp.body?.byteStream() ?: throw IOException("Empty HLS segment body: $url")
+            var partBytes = 0L
+            var read: Int
+            while (bodyStream.read(buf).also { read = it } != -1) {
+                partBytes += read
+                if (expectedPartLen > 0L && partBytes > expectedPartLen) {
+                    throw IOException("HLS segment exceeded expected byte length ($expectedPartLen)")
+                }
+                out.write(buf, 0, read)
+            }
+            if (expectedPartLen > 0L && partBytes != expectedPartLen) {
+                throw IOException("HLS segment truncated: expected $expectedPartLen bytes, got $partBytes bytes")
+            }
+            if (partBytes == 0L) {
+                throw IOException("HLS segment returned 0 bytes: $url")
+            }
+            return partBytes
+        }
+    }
+
+    private fun fetchTextStrict(url: String, userAgent: String): String {
+        val req = Request.Builder()
+            .url(url)
+            .header("User-Agent", userAgent)
+            .build()
+        okHttpClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                throw IOException("HLS playlist HTTP ${resp.code}: $url")
+            }
+            return resp.body?.string() ?: throw IOException("Empty HLS playlist: $url")
         }
     }
 
@@ -1999,26 +2161,42 @@ class VideoDownloadManager(
 
             while (offset < totalSize) {
                 val endByte = minOf(offset + YOUTUBE_RANGE_CHUNK_SIZE - 1L, totalSize - 1L)
+                val expectedChunkLen = endByte - offset + 1L
                 val req = Request.Builder()
                     .url(streamUrl)
                     .header("User-Agent", userAgent)
                     .header("Range", "bytes=$offset-$endByte")
                     .header("Accept", "*/*")
+                    .header("Accept-Encoding", "identity")
                     .build()
 
                 okHttpClient.newCall(req).execute().use { response ->
                     if (!response.isSuccessful) {
                         throw IOException("HTTP ${response.code}: ${response.message}")
                     }
+                    if (response.code == 206) {
+                        HttpRangeValidator.validate206Range(
+                            contentRangeHeader = response.header("Content-Range"),
+                            contentLengthHeader = response.header("Content-Length")?.toLongOrNull() ?: -1L,
+                            expectedStart = offset,
+                            expectedEndInclusive = endByte,
+                            expectedTotal = totalSize
+                        )
+                    } else if (response.code == 200 && offset > 0L) {
+                        throw IOException("Chunked stream ignored Range at offset $offset (returned HTTP 200)")
+                    }
+
                     val input = response.body?.byteStream() ?: throw IOException("Empty chunk stream")
+                    var chunkBytes = 0L
                     var read: Int
                     while (input.read(buffer).also { read = it } != -1) {
                         val currentStatus = repository.getDownloadById(downloadId)?.status
                         if (currentStatus == DownloadStatus.PAUSED || currentStatus == DownloadStatus.CANCELLED) {
-                            return false
+                            throw CancellationException()
                         }
                         outputStream.write(buffer, 0, read)
                         offset += read
+                        chunkBytes += read
 
                         val now = System.currentTimeMillis()
                         if (now - lastUpdateTime >= 350) {
@@ -2030,30 +2208,38 @@ class VideoDownloadManager(
                             lastRead = offset
                         }
                     }
+                    if (response.code == 206 && chunkBytes != expectedChunkLen) {
+                        throw IOException("Chunk truncated: expected $expectedChunkLen bytes, got $chunkBytes bytes")
+                    }
                 }
             }
             outputStream.flush()
+            runCatching { outputStream.fd.sync() }
             onProgress(totalSize, totalSize, 100, 0L)
         }
-        return destFile.exists() && destFile.length() > 512L
+        return destFile.exists() && destFile.length() == totalSize
     }
 
     fun pauseVideoDownload(downloadItem: DownloadItem) {
         scope.launch {
+            stopAndAwait(downloadItem.id)
             repository.updateStatus(downloadItem.id, DownloadStatus.PAUSED)
         }
     }
 
     fun resumeVideoDownload(downloadItem: DownloadItem) {
         scope.launch {
+            stopAndAwait(downloadItem.id)
             repository.updateStatus(downloadItem.id, DownloadStatus.QUEUED)
         }
     }
 
     fun cancelVideoDownload(downloadItem: DownloadItem) {
         scope.launch {
+            stopAndAwait(downloadItem.id)
+            File(downloadItem.savePath, ".tmp_stage_vid_${downloadItem.id}").delete()
             val file = File(downloadItem.savePath, downloadItem.filename)
-            if (file.exists()) {
+            if (file.exists() && downloadItem.status != DownloadStatus.COMPLETED) {
                 file.delete()
             }
             repository.updateStatus(downloadItem.id, DownloadStatus.CANCELLED)
@@ -2062,9 +2248,12 @@ class VideoDownloadManager(
 
     fun retryDownload(downloadItem: DownloadItem) {
         scope.launch {
+            stopAndAwait(downloadItem.id)
             val resetItem = downloadItem.copy(
                 downloadedSize = 0,
                 progress = 0,
+                downloadSpeed = 0L,
+                eta = 0L,
                 status = DownloadStatus.QUEUED,
                 errorMessage = null
             )

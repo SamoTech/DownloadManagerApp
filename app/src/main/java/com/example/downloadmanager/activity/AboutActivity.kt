@@ -29,9 +29,11 @@ class AboutActivity : AppCompatActivity() {
             AlertDialog.Builder(this)
                 .setTitle(R.string.privacy_policy)
                 .setMessage(
-                    "Luca Download Manager processes all URLs, music streams, videos, and files locally on your device.\n\n" +
-                    "• No personal data, browsing history, or download history is shared with external servers.\n" +
-                    "• Downloaded files are stored directly in your selected device storage folder."
+                    "Luca Download Manager downloads files directly to your selected device storage.\n\n" +
+                    "• Direct HTTP/HTTPS, HLS, and BitTorrent connections are made directly from your device to the target hosts, trackers, and peers.\n" +
+                    "• When 'Allow Third-Party Social Video Resolvers' is enabled in Settings, social media video URLs (TikTok, X/Twitter, Instagram) may be queried against public resolver services (tikwm.com, vxtwitter.com, fxtwitter.com, ddinstagram.com) if direct page extraction is restricted.\n" +
+                    "• When 'Allow Alternate-Source Lookup (YouTube)' is explicitly enabled by you, track metadata (title and artist) may be searched on YouTube to locate a matching stream.\n" +
+                    "• You can disable third-party resolvers and alternate-source lookups at any time in Settings."
                 )
                 .setPositiveButton(R.string.ok, null)
                 .show()
@@ -41,9 +43,9 @@ class AboutActivity : AppCompatActivity() {
             AlertDialog.Builder(this)
                 .setTitle(R.string.open_source_licenses)
                 .setMessage(
-                    "• AndroidX Jetpack (Core, AppCompat, Room, Lifecycle, WorkManager, Preference) — Apache License 2.0\n" +
+                    "• AndroidX Jetpack (Core, AppCompat, Room, Lifecycle, WorkManager, Preference, Media3 ExoPlayer) — Apache License 2.0\n" +
                     "• Material Components for Android — Apache License 2.0\n" +
-                    "• Square OkHttp & Retrofit — Apache License 2.0\n" +
+                    "• Square OkHttp — Apache License 2.0\n" +
                     "• Kotlin Coroutines — Apache License 2.0"
                 )
                 .setPositiveButton(R.string.ok, null)

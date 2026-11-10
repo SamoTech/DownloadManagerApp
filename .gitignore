@@ -1,0 +1,25 @@
+# Gradle & build outputs
+.gradle/
+.kotlin/
+.build-outputs/
+build/
+app/build/
+
+# Local configuration & IDE
+local.properties
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Keystores & release artifacts (keep debug.keystore.base64 template if tracked)
+*.jks
+*.keystore
+!debug.keystore.base64
+*.apk
+*.aab
+*.ap_
+*.aab.idsig
+
+# Local environment secrets
+.env

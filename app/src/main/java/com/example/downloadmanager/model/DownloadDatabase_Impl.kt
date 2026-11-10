@@ -19,14 +19,54 @@ public class DownloadDatabase_Impl : DownloadDatabase() {
 
     protected override fun createOpenDelegate(): RoomOpenDelegate {
         val _openDelegate: RoomOpenDelegate = object : RoomOpenDelegate(
-            1,
-            "ed5aa2e5633189d6b6463c5ec9ebfdb4",
-            "bdd681104022f8501dff084e635e85b1"
+            2,
+            "a48f9c2b103189d6b6463c5ec9ebfdb8",
+            "c91278104022f8501dff084e635e85b2"
         ) {
             public override fun createAllTables(connection: SQLiteConnection) {
-                connection.execSQL("CREATE TABLE IF NOT EXISTS `downloads` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `url` TEXT NOT NULL, `filename` TEXT NOT NULL, `savePath` TEXT NOT NULL, `fileSize` INTEGER NOT NULL, `downloadedSize` INTEGER NOT NULL, `downloadSpeed` INTEGER NOT NULL, `eta` INTEGER NOT NULL, `progress` INTEGER NOT NULL, `status` TEXT NOT NULL, `downloadType` TEXT NOT NULL, `mimeType` TEXT NOT NULL, `addedDate` INTEGER NOT NULL, `completedDate` INTEGER, `errorMessage` TEXT, `isResumable` INTEGER NOT NULL, `magnetUri` TEXT, `torrentName` TEXT, `torrentHash` TEXT, `torrentFileCount` INTEGER NOT NULL, `selectedFiles` TEXT, `peers` INTEGER NOT NULL, `seeds` INTEGER NOT NULL, `uploadSpeed` INTEGER NOT NULL, `uploadedSize` INTEGER NOT NULL, `videoUrl` TEXT, `videoTitle` TEXT, `videoQuality` TEXT, `isAudioOnly` INTEGER NOT NULL)")
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `downloads` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`url` TEXT NOT NULL, " +
+                        "`filename` TEXT NOT NULL, " +
+                        "`savePath` TEXT NOT NULL, " +
+                        "`fileSize` INTEGER NOT NULL, " +
+                        "`downloadedSize` INTEGER NOT NULL, " +
+                        "`downloadSpeed` INTEGER NOT NULL, " +
+                        "`eta` INTEGER NOT NULL, " +
+                        "`progress` INTEGER NOT NULL, " +
+                        "`status` TEXT NOT NULL, " +
+                        "`downloadType` TEXT NOT NULL, " +
+                        "`mimeType` TEXT NOT NULL, " +
+                        "`addedDate` INTEGER NOT NULL, " +
+                        "`completedDate` INTEGER, " +
+                        "`errorMessage` TEXT, " +
+                        "`isResumable` INTEGER NOT NULL, " +
+                        "`magnetUri` TEXT, " +
+                        "`torrentName` TEXT, " +
+                        "`torrentHash` TEXT, " +
+                        "`torrentFileCount` INTEGER NOT NULL, " +
+                        "`selectedFiles` TEXT, " +
+                        "`peers` INTEGER NOT NULL, " +
+                        "`seeds` INTEGER NOT NULL, " +
+                        "`uploadSpeed` INTEGER NOT NULL, " +
+                        "`uploadedSize` INTEGER NOT NULL, " +
+                        "`videoUrl` TEXT, " +
+                        "`videoTitle` TEXT, " +
+                        "`videoQuality` TEXT, " +
+                        "`isAudioOnly` INTEGER NOT NULL, " +
+                        "`etag` TEXT, " +
+                        "`lastModified` TEXT, " +
+                        "`retryCount` INTEGER NOT NULL DEFAULT 0, " +
+                        "`sourceProvider` TEXT, " +
+                        "`mediaSource` TEXT, " +
+                        "`isPreview` INTEGER NOT NULL DEFAULT 0, " +
+                        "`integrityStatus` TEXT, " +
+                        "`expectedSha256` TEXT" +
+                        ")"
+                )
                 connection.execSQL("CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)")
-                connection.execSQL("INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'ed5aa2e5633189d6b6463c5ec9ebfdb4')")
+                connection.execSQL("INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'a48f9c2b103189d6b6463c5ec9ebfdb8')")
             }
 
             public override fun dropAllTables(connection: SQLiteConnection) {
@@ -78,6 +118,14 @@ public class DownloadDatabase_Impl : DownloadDatabase() {
                 _columnsDownloads["videoTitle"] = TableInfo.Column("videoTitle", "TEXT", false, 0, null, TableInfo.CREATED_FROM_ENTITY)
                 _columnsDownloads["videoQuality"] = TableInfo.Column("videoQuality", "TEXT", false, 0, null, TableInfo.CREATED_FROM_ENTITY)
                 _columnsDownloads["isAudioOnly"] = TableInfo.Column("isAudioOnly", "INTEGER", true, 0, null, TableInfo.CREATED_FROM_ENTITY)
+                _columnsDownloads["etag"] = TableInfo.Column("etag", "TEXT", false, 0, null, TableInfo.CREATED_FROM_ENTITY)
+                _columnsDownloads["lastModified"] = TableInfo.Column("lastModified", "TEXT", false, 0, null, TableInfo.CREATED_FROM_ENTITY)
+                _columnsDownloads["retryCount"] = TableInfo.Column("retryCount", "INTEGER", true, 0, "0", TableInfo.CREATED_FROM_ENTITY)
+                _columnsDownloads["sourceProvider"] = TableInfo.Column("sourceProvider", "TEXT", false, 0, null, TableInfo.CREATED_FROM_ENTITY)
+                _columnsDownloads["mediaSource"] = TableInfo.Column("mediaSource", "TEXT", false, 0, null, TableInfo.CREATED_FROM_ENTITY)
+                _columnsDownloads["isPreview"] = TableInfo.Column("isPreview", "INTEGER", true, 0, "0", TableInfo.CREATED_FROM_ENTITY)
+                _columnsDownloads["integrityStatus"] = TableInfo.Column("integrityStatus", "TEXT", false, 0, null, TableInfo.CREATED_FROM_ENTITY)
+                _columnsDownloads["expectedSha256"] = TableInfo.Column("expectedSha256", "TEXT", false, 0, null, TableInfo.CREATED_FROM_ENTITY)
                 val _foreignKeysDownloads: MutableSet<TableInfo.ForeignKey> = mutableSetOf()
                 val _indicesDownloads: MutableSet<TableInfo.Index> = mutableSetOf()
                 val _infoDownloads = TableInfo("downloads", _columnsDownloads, _foreignKeysDownloads, _indicesDownloads)

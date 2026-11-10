@@ -90,10 +90,16 @@ class DownloadAdapter(
             if (downloadItem.downloadType == DownloadType.TORRENT ||
                 downloadItem.downloadType == DownloadType.MAGNET) {
                 torrentInfo.visibility = View.VISIBLE
-                val displayPeers = downloadItem.peers.coerceAtLeast(if (downloadItem.status == DownloadStatus.COMPLETED) 8 else 4)
-                val displaySeeds = downloadItem.seeds.coerceAtLeast(if (downloadItem.status == DownloadStatus.COMPLETED) 12 else 6)
-                tvPeers.text = itemView.context.getString(R.string.peers, displayPeers)
-                tvSeeds.text = itemView.context.getString(R.string.seeds, displaySeeds)
+                tvPeers.text = if (downloadItem.peers >= 0) {
+                    itemView.context.getString(R.string.peers, downloadItem.peers)
+                } else {
+                    itemView.context.getString(R.string.peers_unavailable)
+                }
+                tvSeeds.text = if (downloadItem.seeds >= 0) {
+                    itemView.context.getString(R.string.seeds, downloadItem.seeds)
+                } else {
+                    itemView.context.getString(R.string.seeds_unavailable)
+                }
                 if (downloadItem.uploadSpeed > 0) {
                     tvUploadSpeed.text = itemView.context.getString(
                         R.string.upload_speed,
@@ -137,7 +143,8 @@ class DownloadAdapter(
             return when (downloadItem.downloadType) {
                 DownloadType.MUSIC -> {
                     val quality = downloadItem.videoQuality
-                    if (!quality.isNullOrBlank()) "MUSIC • ${quality.substringBefore(" •")}" else "MUSIC"
+                    val previewTag = if (downloadItem.isPreview) " • PREVIEW" else ""
+                    if (!quality.isNullOrBlank()) "MUSIC • ${quality.substringBefore(" •")}$previewTag" else "MUSIC$previewTag"
                 }
                 DownloadType.VIDEO -> {
                     val quality = downloadItem.videoQuality

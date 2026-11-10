@@ -4,7 +4,6 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
-import android.os.Environment
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.LayoutInflater
@@ -14,6 +13,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import androidx.preference.PreferenceManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.example.downloadmanager.R
@@ -30,6 +30,7 @@ import com.example.downloadmanager.model.DownloadType
 import com.example.downloadmanager.model.TorrentFileInfo
 import com.example.downloadmanager.model.VideoFormat
 import com.example.downloadmanager.service.DownloadService
+import com.example.downloadmanager.utils.UrlClassifier
 import com.google.android.material.checkbox.MaterialCheckBox
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Job
@@ -37,6 +38,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 
 class AddDownloadActivity : AppCompatActivity() {
 
@@ -52,6 +54,7 @@ class AddDownloadActivity : AppCompatActivity() {
     private var selectedVideoFormat: VideoFormat? = null
     private var metadataExtractJob: Job? = null
     private var isUpdatingChipsProgrammatically = false
+    private val probeRequestToken = AtomicLong(0L)
 
     companion object {
         /**
@@ -99,6 +102,9 @@ class AddDownloadActivity : AppCompatActivity() {
         val defaultPath = downloadManager.getDefaultDownloadPath()
         binding.etSavePath.setText(defaultPath)
         binding.etTorrentSavePath.setText(defaultPath)
+
+        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
+        binding.cbAllowAlternateSource.isChecked = prefs.getBoolean("allow_alternate_music_source", false)
 
         setupChipSelector()
         setupListeners()
@@ -167,7 +173,12 @@ class AddDownloadActivity : AppCompatActivity() {
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) {
                 val raw = s?.toString()?.trim().orEmpty()
-                if (raw.isEmpty()) return
+                if (raw.isEmpty()) {
+                    probeRequestToken.incrementAndGet()
+                    metadataExtractJob?.cancel()
+                    return
+                }
+                binding.etUrl.error = null
                 autoDetectTypeFromUrl(raw)
                 triggerMetadataExtractionDebounced(raw)
             }
@@ -186,7 +197,6 @@ class AddDownloadActivity : AppCompatActivity() {
             showSavePathSelectorDialog(isTorrent = true)
         }
 
-        // Sample Music Quick Chips (Real CC-BY MP3s from WebTorrent / Archive)
         val sampleTracks = MusicDownloadManager.getSampleMusicTracks()
         binding.chipSampleSoundCloud.setOnClickListener {
             applySampleMusicTrack(sampleTracks[0])
@@ -201,7 +211,6 @@ class AddDownloadActivity : AppCompatActivity() {
             applySampleMusicTrack(sampleTracks[3])
         }
 
-        // Sample Magnet Quick Chips
         binding.chipSampleMagnet1.setOnClickListener {
             applySampleMagnet(TorrentDownloadManager.SAMPLE_MAGNET_WIRED_CD)
         }
@@ -218,7 +227,8 @@ class AddDownloadActivity : AppCompatActivity() {
         binding.btnFetchTorrentFiles.setOnClickListener {
             val raw = binding.etUrl.text?.toString()?.trim().orEmpty()
             if (raw.isNotEmpty()) {
-                extractMagnetInfo(raw)
+                val token = probeRequestToken.incrementAndGet()
+                extractMagnetInfo(raw, token)
             } else {
                 Toast.makeText(this, R.string.error_invalid_url, Toast.LENGTH_SHORT).show()
             }
@@ -228,7 +238,17 @@ class AddDownloadActivity : AppCompatActivity() {
             torrentFilesAdapter?.selectAll(isChecked)
         }
 
-        // Keep cbExtractAudio and rbAudioOnly synchronized
+        binding.cbAllowAlternateSource.setOnCheckedChangeListener { _, isChecked ->
+            PreferenceManager.getDefaultSharedPreferences(this)
+                .edit()
+                .putBoolean("allow_alternate_music_source", isChecked)
+                .apply()
+            val currentUrl = binding.etUrl.text?.toString()?.trim().orEmpty()
+            if (currentUrl.isNotEmpty() && downloadType == DownloadType.MUSIC) {
+                triggerMetadataExtractionDebounced(currentUrl)
+            }
+        }
+
         binding.cbExtractAudio.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked && !binding.rbAudioOnly.isChecked) {
                 binding.rbAudioOnly.isChecked = true
@@ -256,7 +276,8 @@ class AddDownloadActivity : AppCompatActivity() {
     private fun applySampleMagnet(magnetUri: String) {
         switchDownloadType(DownloadType.MAGNET)
         binding.etUrl.setText(magnetUri)
-        extractMagnetInfo(magnetUri)
+        val token = probeRequestToken.incrementAndGet()
+        extractMagnetInfo(magnetUri, token)
     }
 
     private fun handleIncomingIntent() {
@@ -293,45 +314,67 @@ class AddDownloadActivity : AppCompatActivity() {
 
     private fun autoDetectTypeFromUrl(rawUrl: String) {
         val valid = normalizeAndValidateUrl(rawUrl) ?: rawUrl.trim()
-        val lower = valid.lowercase(Locale.US)
-        val cleanPath = lower.substringBefore('?').substringBefore('#')
+        val classification = UrlClassifier.classify(valid)
 
-        when {
-            lower.startsWith("magnet:") -> {
+        when (classification.kind) {
+            UrlClassifier.SourceKind.MAGNET -> {
                 if (downloadType != DownloadType.MAGNET && downloadType != DownloadType.TORRENT) {
                     switchDownloadType(DownloadType.MAGNET)
                 } else {
                     downloadType = DownloadType.MAGNET
                 }
             }
-            cleanPath.endsWith(".torrent") -> {
+            UrlClassifier.SourceKind.TORRENT_FILE -> {
                 if (downloadType != DownloadType.TORRENT && downloadType != DownloadType.MAGNET) {
                     switchDownloadType(DownloadType.TORRENT)
                 } else {
                     downloadType = DownloadType.TORRENT
                 }
             }
-            MusicDownloadManager.isMusicUrl(valid) -> {
+            UrlClassifier.SourceKind.MUSIC_PLATFORM, UrlClassifier.SourceKind.DIRECT_AUDIO -> {
                 if (downloadType == DownloadType.DIRECT) {
                     switchDownloadType(DownloadType.MUSIC)
                 }
             }
-            VideoDownloadManager.isSocialVideoUrl(valid) ||
-                VideoDownloadManager.isWatchPageUrl(valid) ||
-                cleanPath.endsWith(".mp4") || cleanPath.endsWith(".mkv") ||
-                cleanPath.endsWith(".webm") || cleanPath.endsWith(".m3u8") -> {
+            UrlClassifier.SourceKind.VIDEO_PLATFORM,
+            UrlClassifier.SourceKind.DIRECT_VIDEO,
+            UrlClassifier.SourceKind.HLS_PLAYLIST -> {
                 if (downloadType == DownloadType.DIRECT) {
                     switchDownloadType(DownloadType.VIDEO)
                 }
             }
+            UrlClassifier.SourceKind.UNSUPPORTED -> {
+                val msg = classification.unsupportedReason ?: "Unsupported platform: ${classification.platformName}"
+                binding.etUrl.error = msg
+                binding.tvDetectedVideoPlatform.text = msg
+                binding.tvDetectedMusicPlatform.text = msg
+            }
+            UrlClassifier.SourceKind.DIRECT_FILE -> Unit
         }
+    }
+
+    private fun isProbeStillCurrent(token: Long, targetUrl: String): Boolean {
+        if (token != probeRequestToken.get()) return false
+        val currentInput = binding.etUrl.text?.toString()?.trim().orEmpty()
+        val normalizedCurrent = normalizeAndValidateUrl(currentInput) ?: currentInput
+        val normalizedTarget = normalizeAndValidateUrl(targetUrl) ?: targetUrl.trim()
+        return normalizedCurrent.equals(normalizedTarget, ignoreCase = true)
     }
 
     private fun triggerMetadataExtractionDebounced(rawUrl: String) {
         metadataExtractJob?.cancel()
         val valid = normalizeAndValidateUrl(rawUrl) ?: return
+        val token = probeRequestToken.incrementAndGet()
 
-        // Populate immediate filename fallback so the user never has to wait before tapping Start Download
+        val classification = UrlClassifier.classify(valid)
+        if (classification.kind == UrlClassifier.SourceKind.UNSUPPORTED) {
+            val msg = classification.unsupportedReason ?: "Unsupported platform: ${classification.platformName}"
+            binding.etUrl.error = msg
+            binding.tvDetectedVideoPlatform.text = msg
+            binding.tvDetectedMusicPlatform.text = msg
+            return
+        }
+
         if (binding.etFilename.text.isNullOrBlank()) {
             val quickName = downloadManager.getFilenameFromUrl(valid)
             if (!quickName.startsWith("download_")) {
@@ -341,12 +384,13 @@ class AddDownloadActivity : AppCompatActivity() {
 
         metadataExtractJob = lifecycleScope.launch {
             delay(200)
+            if (!isProbeStillCurrent(token, valid)) return@launch
             when (downloadType) {
-                DownloadType.MAGNET, DownloadType.TORRENT -> extractMagnetInfo(valid)
-                DownloadType.VIDEO -> extractVideoInfo(valid)
-                DownloadType.MUSIC -> extractMusicInfo(valid)
+                DownloadType.MAGNET, DownloadType.TORRENT -> extractMagnetInfo(valid, token)
+                DownloadType.VIDEO -> extractVideoInfo(valid, token)
+                DownloadType.MUSIC -> extractMusicInfo(valid, token)
                 DownloadType.DIRECT -> {
-                    if (binding.etFilename.text.isNullOrBlank()) {
+                    if (isProbeStillCurrent(token, valid) && binding.etFilename.text.isNullOrBlank()) {
                         binding.etFilename.setText(downloadManager.getFilenameFromUrl(valid))
                     }
                 }
@@ -354,29 +398,47 @@ class AddDownloadActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Extracts magnet/torrent file list and swarm seeds/peers without disabling btnStartDownload.
-     */
-    private fun extractMagnetInfo(url: String) {
+    private fun extractMagnetInfo(url: String, token: Long) {
         lifecycleScope.launch {
+            if (!isProbeStillCurrent(token, url)) return@launch
             binding.progressBarTorrentFetch.visibility = View.VISIBLE
             binding.tvTorrentMetaSummary.text = getString(R.string.getting_torrent_info)
 
-            // Parse basic magnet display name immediately
             torrentDownloadManager.parseMagnetLink(url)?.let { magnetInfo ->
-                if (binding.etFilename.text.isNullOrBlank()) {
+                if (isProbeStillCurrent(token, url) && binding.etFilename.text.isNullOrBlank()) {
                     binding.etFilename.setText(magnetInfo.displayName)
                 }
             }
 
-            val metadata = torrentDownloadManager.getTorrentMetadata(url)
+            val metadata = try {
+                torrentDownloadManager.getTorrentMetadata(url)
+            } catch (se: SecurityException) {
+                if (isProbeStillCurrent(token, url)) {
+                    binding.progressBarTorrentFetch.visibility = View.GONE
+                    binding.tvTorrentMetaSummary.text = "Rejected unsafe torrent metadata: ${se.message}"
+                    binding.etUrl.error = se.message
+                }
+                return@launch
+            }
+
+            if (!isProbeStillCurrent(token, url)) return@launch
             binding.progressBarTorrentFetch.visibility = View.GONE
 
             if (metadata != null && metadata.files.isNotEmpty()) {
                 binding.etFilename.setText(metadata.name)
                 val sizeLabel = formatBytes(metadata.totalSize)
+                val seedsLabel = if (metadata.seeds >= 0) {
+                    getString(R.string.seeds, metadata.seeds)
+                } else {
+                    getString(R.string.seeds_unavailable)
+                }
+                val peersLabel = if (metadata.peers >= 0) {
+                    getString(R.string.peers, metadata.peers)
+                } else {
+                    getString(R.string.peers_unavailable)
+                }
                 binding.tvTorrentMetaSummary.text =
-                    "${metadata.name} • ${metadata.files.size} files ($sizeLabel) • Seeds: ${metadata.seeds} • Peers: ${metadata.peers}"
+                    "${metadata.name} • ${metadata.files.size} files ($sizeLabel) • $seedsLabel • $peersLabel"
 
                 val adapter = TorrentFileSelectionAdapter(metadata.files)
                 torrentFilesAdapter = adapter
@@ -384,19 +446,29 @@ class AddDownloadActivity : AppCompatActivity() {
                 binding.rvTorrentFiles.adapter = adapter
                 binding.rvTorrentFiles.visibility = View.VISIBLE
             } else {
-                binding.tvTorrentMetaSummary.text = "Ready to download magnet swarm • Seeds: 4 • Peers: 6"
+                binding.tvTorrentMetaSummary.text =
+                    "Magnet link ready • ${getString(R.string.seeds_unavailable)} • ${getString(R.string.peers_unavailable)}"
             }
         }
     }
 
-    private fun extractVideoInfo(url: String) {
+    private fun extractVideoInfo(url: String, token: Long) {
         lifecycleScope.launch {
+            if (!isProbeStillCurrent(token, url)) return@launch
+            val classification = UrlClassifier.classify(url)
+            if (classification.kind == UrlClassifier.SourceKind.UNSUPPORTED) {
+                val msg = classification.unsupportedReason ?: "Unsupported platform: ${classification.platformName}"
+                binding.tvDetectedVideoPlatform.text = msg
+                binding.etUrl.error = msg
+                return@launch
+            }
             val platform = VideoDownloadManager.detectVideoPlatform(url) ?: "Video Stream"
             binding.tvDetectedVideoPlatform.text = "Detected: $platform (probing streams...)"
 
             val streamInfo = videoDownloadManager.extractVideoInfo(url)
+            if (!isProbeStillCurrent(token, url)) return@launch
             if (streamInfo == null) {
-                binding.tvDetectedVideoPlatform.text = "Detected: $platform"
+                binding.tvDetectedVideoPlatform.text = "Detected: $platform (will probe on start)"
                 return@launch
             }
             binding.tvDetectedVideoPlatform.text =
@@ -418,14 +490,42 @@ class AddDownloadActivity : AppCompatActivity() {
         }
     }
 
-    private fun extractMusicInfo(url: String) {
+    private fun extractMusicInfo(url: String, token: Long) {
         lifecycleScope.launch {
+            if (!isProbeStillCurrent(token, url)) return@launch
+            val classification = UrlClassifier.classify(url)
+            if (classification.kind == UrlClassifier.SourceKind.UNSUPPORTED) {
+                val msg = classification.unsupportedReason ?: "Unsupported platform: ${classification.platformName}"
+                binding.tvDetectedMusicPlatform.text = msg
+                binding.etUrl.error = msg
+                return@launch
+            }
             val platform = MusicDownloadManager.detectMusicPlatform(url)
             if (platform != null) {
-                binding.tvDetectedMusicPlatform.text = "Detected: $platform"
+                binding.tvDetectedMusicPlatform.text = "Detected: $platform (probing audio...)"
             }
-            val trackInfo = musicDownloadManager.extractMusicInfo(url) ?: return@launch
-            binding.tvDetectedMusicPlatform.text = "Detected: ${trackInfo.platform} • ${trackInfo.title}"
+            val allowAlt = binding.cbAllowAlternateSource.isChecked
+            val trackInfo = musicDownloadManager.extractMusicInfo(
+                rawUrl = url,
+                preferredFormatCode = getSelectedMusicFormatCode(),
+                allowAlternateSource = allowAlt
+            )
+            if (!isProbeStillCurrent(token, url)) return@launch
+            if (trackInfo == null) {
+                if (platform == "Spotify" && !allowAlt) {
+                    binding.tvDetectedMusicPlatform.text =
+                        "Spotify: No public 30s preview on this track. Enable 'Allow Alternate-Source Lookup (YouTube)' below to search for a full-track match."
+                }
+                return@launch
+            }
+
+            val provenanceNote = when {
+                trackInfo.isPreview -> " [30s Preview Clip]"
+                trackInfo.sourceProvider != trackInfo.mediaSource -> " [via ${trackInfo.mediaSource}]"
+                else -> ""
+            }
+            binding.tvDetectedMusicPlatform.text =
+                "Detected: ${trackInfo.platform}$provenanceNote • ${trackInfo.title}"
 
             val currentName = binding.etFilename.text?.toString()?.trim().orEmpty()
             if (currentName.isEmpty() || currentName == "watch" || currentName.startsWith("download_")) {
@@ -503,7 +603,15 @@ class AddDownloadActivity : AppCompatActivity() {
             return
         }
 
-        // Cancel any in-flight preview extraction so it doesn't compete with the download
+        val classification = UrlClassifier.classify(validUrl)
+        if (classification.kind == UrlClassifier.SourceKind.UNSUPPORTED) {
+            val reason = classification.unsupportedReason ?: "Unsupported platform: ${classification.platformName}"
+            binding.etUrl.error = reason
+            Toast.makeText(this, reason, Toast.LENGTH_LONG).show()
+            return
+        }
+
+        probeRequestToken.incrementAndGet()
         metadataExtractJob?.cancel()
 
         val savePath = if (downloadType == DownloadType.TORRENT || downloadType == DownloadType.MAGNET) {
@@ -549,7 +657,8 @@ class AddDownloadActivity : AppCompatActivity() {
                     DownloadType.MUSIC -> musicDownloadManager.startMusicDownload(
                         downloadItem = baseItem,
                         formatCode = getSelectedMusicFormatCode(),
-                        artistName = binding.etArtist.text?.toString()?.trim()
+                        artistName = binding.etArtist.text?.toString()?.trim(),
+                        allowAlternateSource = binding.cbAllowAlternateSource.isChecked
                     )
                     DownloadType.TORRENT, DownloadType.MAGNET -> torrentDownloadManager.startTorrentDownload(
                         downloadItem = baseItem,
@@ -558,7 +667,6 @@ class AddDownloadActivity : AppCompatActivity() {
                     DownloadType.DIRECT -> downloadManager.startDownload(baseItem)
                 }
 
-                // Trigger DownloadService to execute the newly inserted item immediately
                 val serviceIntent = Intent(this@AddDownloadActivity, DownloadService::class.java).apply {
                     action = DownloadService.ACTION_START_DOWNLOAD
                     putExtra(DownloadService.EXTRA_DOWNLOAD_ID, downloadId)
@@ -610,7 +718,7 @@ class AddDownloadActivity : AppCompatActivity() {
 
         override fun onBindViewHolder(holder: ViewHolder, position: Int) {
             val item = items[position]
-            holder.tvFileName.text = item.name
+            holder.tvFileName.text = item.path.ifBlank { item.name }
             holder.tvFileSize.text = formatFileSize(item.size)
             holder.cbFileSelect.setOnCheckedChangeListener(null)
             holder.cbFileSelect.isChecked = item.isSelected

@@ -25,21 +25,31 @@ data class DownloadItem(
     val completedDate: Date? = null,
     val errorMessage: String? = null,
     val isResumable: Boolean = false,
-    
+
     val magnetUri: String? = null,
     val torrentName: String? = null,
     val torrentHash: String? = null,
     val torrentFileCount: Int = 0,
     val selectedFiles: List<Int>? = null,
-    val peers: Int = 0,
-    val seeds: Int = 0,
+    val peers: Int = -1,
+    val seeds: Int = -1,
     val uploadSpeed: Long = 0,
     val uploadedSize: Long = 0,
-    
+
     val videoUrl: String? = null,
     val videoTitle: String? = null,
     val videoQuality: String? = null,
-    val isAudioOnly: Boolean = false
+    val isAudioOnly: Boolean = false,
+
+    // Phase 2-4 integrity, resume validators, retry tracking, and media provenance
+    val etag: String? = null,
+    val lastModified: String? = null,
+    val retryCount: Int = 0,
+    val sourceProvider: String? = null,
+    val mediaSource: String? = null,
+    val isPreview: Boolean = false,
+    val integrityStatus: String? = null,
+    val expectedSha256: String? = null
 )
 
 enum class DownloadStatus {

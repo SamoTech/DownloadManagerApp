@@ -21,7 +21,7 @@ public class DownloadDao_Impl(
     private val __insertAdapterOfDownloadItem: EntityInsertAdapter<DownloadItem> =
         object : EntityInsertAdapter<DownloadItem>() {
             protected override fun createQuery(): String =
-                "INSERT OR REPLACE INTO `downloads` (`id`,`url`,`filename`,`savePath`,`fileSize`,`downloadedSize`,`downloadSpeed`,`eta`,`progress`,`status`,`downloadType`,`mimeType`,`addedDate`,`completedDate`,`errorMessage`,`isResumable`,`magnetUri`,`torrentName`,`torrentHash`,`torrentFileCount`,`selectedFiles`,`peers`,`seeds`,`uploadSpeed`,`uploadedSize`,`videoUrl`,`videoTitle`,`videoQuality`,`isAudioOnly`) VALUES (nullif(?, 0),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+                "INSERT OR REPLACE INTO `downloads` (`id`,`url`,`filename`,`savePath`,`fileSize`,`downloadedSize`,`downloadSpeed`,`eta`,`progress`,`status`,`downloadType`,`mimeType`,`addedDate`,`completedDate`,`errorMessage`,`isResumable`,`magnetUri`,`torrentName`,`torrentHash`,`torrentFileCount`,`selectedFiles`,`peers`,`seeds`,`uploadSpeed`,`uploadedSize`,`videoUrl`,`videoTitle`,`videoQuality`,`isAudioOnly`,`etag`,`lastModified`,`retryCount`,`sourceProvider`,`mediaSource`,`isPreview`,`integrityStatus`,`expectedSha256`) VALUES (nullif(?, 0),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 
             protected override fun bind(statement: SQLiteStatement, entity: DownloadItem) {
                 bindDownloadColumns(statement, entity)
@@ -31,11 +31,11 @@ public class DownloadDao_Impl(
     private val __updateAdapterOfDownloadItem: EntityDeleteOrUpdateAdapter<DownloadItem> =
         object : EntityDeleteOrUpdateAdapter<DownloadItem>() {
             protected override fun createQuery(): String =
-                "UPDATE OR ABORT `downloads` SET `id` = ?,`url` = ?,`filename` = ?,`savePath` = ?,`fileSize` = ?,`downloadedSize` = ?,`downloadSpeed` = ?,`eta` = ?,`progress` = ?,`status` = ?,`downloadType` = ?,`mimeType` = ?,`addedDate` = ?,`completedDate` = ?,`errorMessage` = ?,`isResumable` = ?,`magnetUri` = ?,`torrentName` = ?,`torrentHash` = ?,`torrentFileCount` = ?,`selectedFiles` = ?,`peers` = ?,`seeds` = ?,`uploadSpeed` = ?,`uploadedSize` = ?,`videoUrl` = ?,`videoTitle` = ?,`videoQuality` = ?,`isAudioOnly` = ? WHERE `id` = ?"
+                "UPDATE OR ABORT `downloads` SET `id` = ?,`url` = ?,`filename` = ?,`savePath` = ?,`fileSize` = ?,`downloadedSize` = ?,`downloadSpeed` = ?,`eta` = ?,`progress` = ?,`status` = ?,`downloadType` = ?,`mimeType` = ?,`addedDate` = ?,`completedDate` = ?,`errorMessage` = ?,`isResumable` = ?,`magnetUri` = ?,`torrentName` = ?,`torrentHash` = ?,`torrentFileCount` = ?,`selectedFiles` = ?,`peers` = ?,`seeds` = ?,`uploadSpeed` = ?,`uploadedSize` = ?,`videoUrl` = ?,`videoTitle` = ?,`videoQuality` = ?,`isAudioOnly` = ?,`etag` = ?,`lastModified` = ?,`retryCount` = ?,`sourceProvider` = ?,`mediaSource` = ?,`isPreview` = ?,`integrityStatus` = ?,`expectedSha256` = ? WHERE `id` = ?"
 
             protected override fun bind(statement: SQLiteStatement, entity: DownloadItem) {
                 bindDownloadColumns(statement, entity)
-                statement.bindLong(30, entity.id)
+                statement.bindLong(38, entity.id)
             }
         }
 
@@ -79,6 +79,20 @@ public class DownloadDao_Impl(
         val vQual = entity.videoQuality
         if (vQual == null) statement.bindNull(28) else statement.bindText(28, vQual)
         statement.bindLong(29, if (entity.isAudioOnly) 1L else 0L)
+        val etagVal = entity.etag
+        if (etagVal == null) statement.bindNull(30) else statement.bindText(30, etagVal)
+        val lastModVal = entity.lastModified
+        if (lastModVal == null) statement.bindNull(31) else statement.bindText(31, lastModVal)
+        statement.bindLong(32, entity.retryCount.toLong())
+        val srcProv = entity.sourceProvider
+        if (srcProv == null) statement.bindNull(33) else statement.bindText(33, srcProv)
+        val medSrc = entity.mediaSource
+        if (medSrc == null) statement.bindNull(34) else statement.bindText(34, medSrc)
+        statement.bindLong(35, if (entity.isPreview) 1L else 0L)
+        val intStatus = entity.integrityStatus
+        if (intStatus == null) statement.bindNull(36) else statement.bindText(36, intStatus)
+        val expSha = entity.expectedSha256
+        if (expSha == null) statement.bindNull(37) else statement.bindText(37, expSha)
     }
 
     private fun readDownloadItem(_stmt: SQLiteStatement): DownloadItem {
@@ -111,6 +125,14 @@ public class DownloadDao_Impl(
         val cVideoTitle = getColumnIndexOrThrow(_stmt, "videoTitle")
         val cVideoQuality = getColumnIndexOrThrow(_stmt, "videoQuality")
         val cIsAudioOnly = getColumnIndexOrThrow(_stmt, "isAudioOnly")
+        val cEtag = getColumnIndexOrThrow(_stmt, "etag")
+        val cLastModified = getColumnIndexOrThrow(_stmt, "lastModified")
+        val cRetryCount = getColumnIndexOrThrow(_stmt, "retryCount")
+        val cSourceProvider = getColumnIndexOrThrow(_stmt, "sourceProvider")
+        val cMediaSource = getColumnIndexOrThrow(_stmt, "mediaSource")
+        val cIsPreview = getColumnIndexOrThrow(_stmt, "isPreview")
+        val cIntegrityStatus = getColumnIndexOrThrow(_stmt, "integrityStatus")
+        val cExpectedSha256 = getColumnIndexOrThrow(_stmt, "expectedSha256")
 
         val addedRaw: Long? = if (_stmt.isNull(cAddedDate)) null else _stmt.getLong(cAddedDate)
         val addedDate: Date = __downloadStatusConverter.fromTimestamp(addedRaw)
@@ -148,7 +170,15 @@ public class DownloadDao_Impl(
             videoUrl = if (_stmt.isNull(cVideoUrl)) null else _stmt.getText(cVideoUrl),
             videoTitle = if (_stmt.isNull(cVideoTitle)) null else _stmt.getText(cVideoTitle),
             videoQuality = if (_stmt.isNull(cVideoQuality)) null else _stmt.getText(cVideoQuality),
-            isAudioOnly = _stmt.getLong(cIsAudioOnly).toInt() != 0
+            isAudioOnly = _stmt.getLong(cIsAudioOnly).toInt() != 0,
+            etag = if (_stmt.isNull(cEtag)) null else _stmt.getText(cEtag),
+            lastModified = if (_stmt.isNull(cLastModified)) null else _stmt.getText(cLastModified),
+            retryCount = _stmt.getLong(cRetryCount).toInt(),
+            sourceProvider = if (_stmt.isNull(cSourceProvider)) null else _stmt.getText(cSourceProvider),
+            mediaSource = if (_stmt.isNull(cMediaSource)) null else _stmt.getText(cMediaSource),
+            isPreview = _stmt.getLong(cIsPreview).toInt() != 0,
+            integrityStatus = if (_stmt.isNull(cIntegrityStatus)) null else _stmt.getText(cIntegrityStatus),
+            expectedSha256 = if (_stmt.isNull(cExpectedSha256)) null else _stmt.getText(cExpectedSha256)
         )
     }
 
@@ -348,6 +378,114 @@ public class DownloadDao_Impl(
             val _stmt = _connection.prepare(_sql)
             try {
                 _stmt.step()
+            } finally {
+                _stmt.close()
+            }
+        }
+    }
+
+    public override suspend fun updateProgressIfActive(
+        id: Long,
+        progress: Int,
+        downloadedSize: Long,
+        downloadSpeed: Long,
+        eta: Long
+    ): Int {
+        val _sql = "UPDATE downloads SET progress = ?, downloadedSize = ?, downloadSpeed = ?, eta = ? WHERE id = ? AND status = 'DOWNLOADING'"
+        return performSuspending(__db, false, true) { _connection ->
+            val _stmt = _connection.prepare(_sql)
+            try {
+                _stmt.bindLong(1, progress.toLong())
+                _stmt.bindLong(2, downloadedSize)
+                _stmt.bindLong(3, downloadSpeed)
+                _stmt.bindLong(4, eta)
+                _stmt.bindLong(5, id)
+                _stmt.step()
+                1
+            } finally {
+                _stmt.close()
+            }
+        }
+    }
+
+    public override suspend fun updateTorrentProgressIfActive(
+        id: Long,
+        progress: Int,
+        downloadedSize: Long,
+        totalSize: Long,
+        downloadSpeed: Long,
+        eta: Long,
+        peers: Int,
+        seeds: Int,
+        uploadSpeed: Long
+    ): Int {
+        val _sql = "UPDATE downloads SET progress = ?, downloadedSize = ?, fileSize = CASE WHEN ? > 0 THEN ? ELSE fileSize END, downloadSpeed = ?, eta = ?, peers = ?, seeds = ?, uploadSpeed = ? WHERE id = ? AND status = 'DOWNLOADING'"
+        return performSuspending(__db, false, true) { _connection ->
+            val _stmt = _connection.prepare(_sql)
+            try {
+                _stmt.bindLong(1, progress.toLong())
+                _stmt.bindLong(2, downloadedSize)
+                _stmt.bindLong(3, totalSize)
+                _stmt.bindLong(4, totalSize)
+                _stmt.bindLong(5, downloadSpeed)
+                _stmt.bindLong(6, eta)
+                _stmt.bindLong(7, peers.toLong())
+                _stmt.bindLong(8, seeds.toLong())
+                _stmt.bindLong(9, uploadSpeed)
+                _stmt.bindLong(10, id)
+                _stmt.step()
+                1
+            } finally {
+                _stmt.close()
+            }
+        }
+    }
+
+    public override suspend fun updateStatusNarrow(
+        id: Long,
+        status: DownloadStatus,
+        errorMessage: String?,
+        completedTimestamp: Long?
+    ): Int {
+        val _sql = "UPDATE downloads SET status = ?, errorMessage = ?, completedDate = ?, downloadSpeed = CASE WHEN ? != 'DOWNLOADING' THEN 0 ELSE downloadSpeed END, uploadSpeed = CASE WHEN ? != 'DOWNLOADING' THEN 0 ELSE uploadSpeed END, eta = CASE WHEN ? != 'DOWNLOADING' THEN 0 ELSE eta END WHERE id = ?"
+        return performSuspending(__db, false, true) { _connection ->
+            val _stmt = _connection.prepare(_sql)
+            try {
+                val statusStr = __downloadStatusConverter.fromStatus(status)
+                _stmt.bindText(1, statusStr)
+                if (errorMessage == null) _stmt.bindNull(2) else _stmt.bindText(2, errorMessage)
+                if (completedTimestamp == null) _stmt.bindNull(3) else _stmt.bindLong(3, completedTimestamp)
+                _stmt.bindText(4, statusStr)
+                _stmt.bindText(5, statusStr)
+                _stmt.bindText(6, statusStr)
+                _stmt.bindLong(7, id)
+                _stmt.step()
+                1
+            } finally {
+                _stmt.close()
+            }
+        }
+    }
+
+    public override suspend fun updateResumeValidators(
+        id: Long,
+        etag: String?,
+        lastModified: String?,
+        isResumable: Boolean,
+        fileSize: Long
+    ): Int {
+        val _sql = "UPDATE downloads SET etag = ?, lastModified = ?, isResumable = ?, fileSize = CASE WHEN ? > 0 THEN ? ELSE fileSize END WHERE id = ?"
+        return performSuspending(__db, false, true) { _connection ->
+            val _stmt = _connection.prepare(_sql)
+            try {
+                if (etag == null) _stmt.bindNull(1) else _stmt.bindText(1, etag)
+                if (lastModified == null) _stmt.bindNull(2) else _stmt.bindText(2, lastModified)
+                _stmt.bindLong(3, if (isResumable) 1L else 0L)
+                _stmt.bindLong(4, fileSize)
+                _stmt.bindLong(5, fileSize)
+                _stmt.bindLong(6, id)
+                _stmt.step()
+                1
             } finally {
                 _stmt.close()
             }

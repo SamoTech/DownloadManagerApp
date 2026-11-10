@@ -18,7 +18,7 @@ import java.util.regex.Pattern
  * Real YouTube & YouTube Music stream extractor using InnerTube ANDROID_VR / iOS clients.
  * Extracts both progressive muxed MP4 streams (video + audio) and adaptive HD video / M4A & Opus audio streams.
  */
-class YouTubeExtractor(@Suppress("unused") private val context: Context) {
+class YouTubeExtractor(@Suppress("unused") private val context: Context? = null) {
 
     private val okHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()

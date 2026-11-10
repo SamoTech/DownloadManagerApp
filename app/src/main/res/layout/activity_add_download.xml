@@ -340,6 +340,13 @@
                     android:layout_height="wrap_content"
                     android:checked="true"
                     android:text="@string/embed_metadata" />
+
+                <com.google.android.material.checkbox.MaterialCheckBox
+                    android:id="@+id/cbAllowAlternateSource"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:checked="false"
+                    android:text="@string/allow_alternate_music_source" />
             </LinearLayout>
 
             <!-- Torrent specific options -->

@@ -1,210 +1,62 @@
-# Universal Download Manager - Android App
+# Luca Download Manager (`com.samotech.Lucadownloadmanager`)
 
 [![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/SamoTech/DownloadManagerApp/blob/main/LICENSE)
-[![Android](https://img.shields.io/badge/Android-7.0%2B-green.svg)](https://developer.android.com/)
-[![Kotlin](https://img.shields.io/badge/Kotlin-1.8%2B-orange.svg)](https://kotlinlang.org/)
+[![Android](https://img.shields.io/badge/Android-7.0%2B%20(API%2024--36)-green.svg)](https://developer.android.com/)
+[![JDK](https://img.shields.io/badge/JDK-21-orange.svg)](https://openjdk.org/)
 
-A **comprehensive Android download manager** that supports downloading **ALL file types from ANY website**, including **torrents and videos** from popular platforms.
-
----
-
-## 🚀 Features
-
-### 📥 Core Download Functionality
-- ✅ **Direct Downloads** - Download files from any URL (HTTP/HTTPS)
-- ✅ **Resume Support** - Continue interrupted downloads
-- ✅ **Progress Tracking** - Real-time speed, ETA, and percentage
-- ✅ **Queue Management** - Multiple simultaneous downloads (up to 4)
-- ✅ **Background Processing** - Downloads continue when app is closed
-
-### 🎭 Torrent Support
-- ✅ **Magnet Links** - Full magnet URI support
-- ✅ **Torrent Files** - Download from .torrent files
-- ✅ **Peer Management** - Track peers, seeds, and speeds
-- ✅ **File Selection** - Choose specific files from multi-file torrents
-
-### 🎥 Video Download Support
-- ✅ **YouTube** - All qualities (144p to 4K)
-- ✅ **Vimeo** - Full video support
-- ✅ **Facebook** - Videos from posts and pages
-- ✅ **Instagram** - Videos, reels, and IGTV
-- ✅ **Twitter/X** - Videos from tweets
-- ✅ **TikTok** - TikTok video downloads
-- ✅ **Quality Selection** - Choose video quality and format
-- ✅ **Audio Extraction** - Extract MP3 from videos
-
-### 🎨 Modern UI
-- ✅ **Material Design 3** - Beautiful, responsive interface
-- ✅ **Dark Mode** - Automatic theme switching
-- ✅ **Tab Navigation** - Easy switching between download types
-- ✅ **Notifications** - Download status updates
-- ✅ **Search & Filter** - Find downloads quickly
-
-### 📁 File Management
-- ✅ **Open/Share/Delete** - Full file management
-- ✅ **Storage Options** - Internal, SD card, or custom locations
-- ✅ **File Details** - View comprehensive file information
-
-### ⚙️ Settings
-- ✅ **Download Limits** - Control concurrent downloads
-- ✅ **Network Settings** - WiFi-only, mobile data options
-- ✅ **Torrent Settings** - Upload limits, connection settings
-- ✅ **Video Settings** - Default quality and format
-- ✅ **Appearance** - Theme and language options
+An Android download manager for direct HTTP/HTTPS files, BitTorrent/Magnet transfers, public audio streams, and public video/HLS streams, focused on transfer integrity, path containment, and truthful source reporting.
 
 ---
 
-## 📸 Screenshots
+## Core Capabilities
 
-*(Add your screenshots here)*
+### 1. Direct HTTP/HTTPS Segmented & Resumable Transfers
+- **RFC 9110 Range Validation**: Multi-segment parallel transfers require `HTTP 206 Partial Content` with a matching `Content-Range` header (`start-end/total`) and exact byte count per segment.
+- **Automatic Single-Stream Fallback**: If a server ignores `Range` and returns `HTTP 200 OK`, parallel segments are aborted and the download falls back cleanly to a single stream.
+- **Validator-Backed Resume**: Persists `ETag` and `Last-Modified` validators in Room (`v2`), uses `If-Range` on resume, and handles `416 Range Not Satisfiable` safely.
+- **Per-Job Staging & Collision-Safe Finalization**: Writes to `.filename.part.<id>` and promotes to the final filename only after byte-length and optional SHA-256 verification.
 
----
+### 2. BitTorrent & Magnet Engine (BEP-3 / BEP-9 / BEP-15 / BEP-19)
+- **Strict Path Containment**: All torrent metadata paths are validated via `TorrentPathSafety` against parent traversal (`..`), absolute paths, backslashes, NUL/control characters, symlinks, and duplicate normalized paths.
+- **Piece SHA-1 & Length Verification**: Multi-file and single-file transfers are staged per job and verified against declared file lengths and piece SHA-1 hashes across file boundaries before promotion.
+- **Truthful Swarm Metrics**: Displays measured tracker/peer counts (`0` when measured zero, `Unavailable` when unmeasured) without synthetic floors.
+- **Per-File Lifecycle States**: Tracks `UNSELECTED`, `QUEUED`, `PARTIAL`, `VERIFIED`, `UNVERIFIED_COMPLETE`, and `FAILED` states per file.
 
-## 🛠️ Technical Stack
+### 3. Audio & Video Stream Downloading
+- **Strict Host Classification**: Uses `UrlClassifier` on parsed URL hosts to prevent lookalike domain or query-string spoofing.
+- **Public Audio Support**: Direct audio files (`MP3`, `FLAC`, `M4A`, `OGG`, `WAV`, `OPUS`), SoundCloud, YouTube/YouTube Music, Bandcamp, Audiomack, Mixcloud, Jamendo, and Internet Archive.
+- **Honest Format & Provenance Reporting**: Never labels an `M4A` or `MP3` stream as `FLAC`. Spotify links download the public 30-second preview (explicitly labeled `30s Preview`) unless the user explicitly enables **Allow Alternate-Source Lookup (YouTube)**, which verifies title, artist, and duration before matching.
+- **Public Video & HLS Support**: Supports YouTube, TikTok, Instagram, X/Twitter, Facebook, Reddit, Vimeo, Dailymotion, Archive.org, and non-encrypted VOD HLS (`.m3u8`) playlists (including master variant selection, `#EXT-X-MAP`, and `#EXT-X-BYTERANGE`).
+- **Unsupported Sources**: Live HLS streams, encrypted HLS (`#EXT-X-KEY` with `METHOD != NONE`), Twitch, and DRM-protected subscription services (Apple Music, Deezer, Tidal, Netflix, Disney+, Prime Video) are explicitly reported as unsupported.
 
-| Component | Technology |
-|-----------|------------|
-| **Language** | Kotlin 1.8+ |
-| **Architecture** | MVVM + Repository Pattern |
-| **Database** | Room (SQLite ORM) |
-| **Networking** | OkHttp + Retrofit |
-| **Torrent** | libtorrent4j + jlibtorrent |
-| **UI** | Material Components 3 |
-| **Concurrency** | Kotlin Coroutines |
-| **Background** | Foreground Service + WorkManager |
-
----
-
-## 📋 Requirements
-
-- **Minimum SDK:** 24 (Android 7.0 Nougat)
-- **Target SDK:** 34 (Android 14)
-- **Java:** 8+
-- **Android Studio:** Latest version
+### 4. Background Queue, Network Policy & Android 15+ Compliance
+- **Queue & Concurrency Control**: Enforces `max_concurrent_downloads` and `use_mobile_data` (Wi-Fi-only policy pauses/defers active transfers when switching to metered networks).
+- **Serialized Worker Cancellation**: Awaits coroutine termination (`stopAndAwait`) before state transitions and guards progress updates with `WHERE id = :id AND status = 'DOWNLOADING'`.
+- **Android 15 (`targetSdk 36`) Lifecycle**: Uses `WorkManager` (`DownloadRecoveryWorker`) on `BOOT_COMPLETED` instead of launching a `dataSync` foreground service from boot, and handles `Service.onTimeout`.
 
 ---
 
-## 📥 Installation
+## Privacy & Third-Party Resolver Disclosure
 
-### Build APK
+- Direct HTTP/HTTPS, HLS, and BitTorrent transfers connect directly from the device to the target hosts, trackers, and peers.
+- When **Allow Third-Party Social Video Resolvers** is enabled in Settings (default: on), social video URLs (TikTok, X/Twitter, Instagram) may be queried against public resolver endpoints (`tikwm.com`, `vxtwitter.com`, `fxtwitter.com`, `ddinstagram.com`) when direct page extraction is restricted. This can be disabled in Settings.
+- When **Allow Alternate-Source Lookup (YouTube)** is enabled by the user (default: off), track metadata (title and artist) may be searched on YouTube to find a verified full-length match.
+
+---
+
+## Build Prerequisites & Verification
+
+- **JDK**: Java 21
+- **Android SDK**: `compileSdk = 36`, `targetSdk = 36`, `minSdk = 24`
+- **Gradle Wrapper**: Gradle `9.3.1` with pinned SHA-256 distribution checksum in `gradle/wrapper/gradle-wrapper.properties`
 
 ```bash
-# Clone the repository
-git clone https://github.com/SamoTech/DownloadManagerApp.git
-cd DownloadManagerApp
-
-# Build debug APK
+# Build Debug APK
 ./gradlew assembleDebug
 
-# APK will be in: app/build/outputs/apk/debug/app-debug.apk
+# Run Unit & Regression Test Suite
+./gradlew :app:testDebugUnitTest
+
+# Run Android Lint
+./gradlew :app:lintDebug
 ```
-
-### Using Build Scripts
-
-```bash
-# Linux/macOS
-./build_apk.sh
-
-# Windows
-build_apk.bat
-```
-
----
-
-## 🚀 Usage
-
-### Start a Download
-1. Open the app
-2. Tap **+** button
-3. Select download type (Direct, Torrent, or Video)
-4. Enter URL
-5. Configure options (filename, location, quality)
-6. Tap **Start Download**
-
-### Manage Downloads
-- **Pause/Resume** - Tap the pause/play button
-- **Cancel** - Stop and remove download
-- **Retry** - Restart failed downloads
-- **Delete** - Remove from list and storage
-- **Open** - Open downloaded file
-- **Share** - Share with other apps
-
----
-
-## 📂 Project Structure
-
-```
-DownloadManagerApp/
-├── app/
-│   ├── build.gradle
-│   └── src/main/
-│       ├── AndroidManifest.xml
-│       ├── java/com/example/downloadmanager/
-│       │   ├── activity/          # UI Activities
-│       │   ├── adapter/           # RecyclerView Adapters
-│       │   ├── manager/           # Download Managers
-│       │   ├── model/             # Data Models & Database
-│       │   ├── service/           # Background Services
-│       │   └── utils/             # Utility Classes
-│       └── res/                   # Resources (layouts, drawables, etc.)
-├── build.gradle
-├── settings.gradle
-├── gradle.properties
-├── gradlew & gradlew.bat
-├── PROJECT_SUMMARY.md
-├── QUICK_START.md
-├── BUILD_APK.md
-└── APK_BUILD_GUIDE.md
-```
-
----
-
-## 📜 Documentation
-
-- [Project Summary](PROJECT_SUMMARY.md) - Complete feature list and technical details
-- [Quick Start Guide](QUICK_START.md) - User guide for the app
-- [Build APK Guide](BUILD_APK.md) - Detailed build instructions
-- [APK Build Guide](APK_BUILD_GUIDE.md) - Quick reference
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Please:
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
----
-
-## 📜 License
-
-This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
-
----
-
-## 🆘 Support
-
-For support and feedback:
-- Open an issue on [GitHub Issues](https://github.com/SamoTech/DownloadManagerApp/issues)
-- Check the [documentation](PROJECT_SUMMARY.md)
-
----
-
-## ⚠️ Important Notes
-
-- **Torrent downloads** require libtorrent4j library
-- **YouTube extraction** may need periodic updates
-- **Video downloads** depend on platform APIs
-- **Legal responsibility** - Users must ensure they have rights to download content
-- **Storage permissions** - Required for saving files
-- **Battery optimization** - Exclude app for best performance
-
----
-
-**⭐ Star this repository if you find it useful!**
-
-[![GitHub stars](https://img.shields.io/github/stars/SamoTech/DownloadManagerApp?style=social)](https://github.com/SamoTech/DownloadManagerApp/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/SamoTech/DownloadManagerApp?style=social)](https://github.com/SamoTech/DownloadManagerApp/network)

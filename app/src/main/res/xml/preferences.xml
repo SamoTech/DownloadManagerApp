@@ -58,6 +58,12 @@
             android:key="embed_music_metadata"
             android:title="@string/embed_metadata"
             android:defaultValue="true" />
+
+        <SwitchPreferenceCompat
+            android:key="allow_alternate_music_source"
+            android:title="@string/allow_alternate_music_source"
+            android:summary="@string/allow_alternate_music_source_summary"
+            android:defaultValue="false" />
     </PreferenceCategory>
 
     <PreferenceCategory
@@ -76,6 +82,12 @@
             android:key="extract_audio_default"
             android:title="@string/extract_audio"
             android:defaultValue="false" />
+
+        <SwitchPreferenceCompat
+            android:key="allow_third_party_resolvers"
+            android:title="@string/allow_third_party_resolvers"
+            android:summary="@string/allow_third_party_resolvers_summary"
+            android:defaultValue="true" />
     </PreferenceCategory>
 
     <PreferenceCategory

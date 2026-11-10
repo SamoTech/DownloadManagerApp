@@ -71,7 +71,7 @@
     <string name="unknown_speed">--</string>
     <string name="unknown_eta">--:--</string>
     
-    <string name="app_description">Luca Download Manager supports high-speed downloading of all file types, music from all major audio platforms (SoundCloud, YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org, Podcasts, and direct MP3/FLAC), videos, and torrents.</string>
+    <string name="app_description">Luca Download Manager supports multi-segment HTTP/HTTPS downloads, public audio streams (SoundCloud, YouTube/YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify 30s previews or opt-in alternate match, Jamendo, Archive.org, Podcasts, and direct MP3/FLAC/M4A/OGG), public social and HLS videos, and BitTorrent/Magnet transfers.</string>
     <string name="version">Version %s</string>
     <string name="developer">Developer</string>
     <string name="privacy_policy">Privacy Policy</string>
@@ -107,18 +107,22 @@
     <string name="low">Low (360p Data Saver)</string>
     <string name="audio_only">Audio Only</string>
     <string name="extract_audio">Extract Audio Track</string>
+    <string name="allow_third_party_resolvers">Allow Third-Party Social Video Resolvers</string>
+    <string name="allow_third_party_resolvers_summary">Query public resolver APIs (tikwm, vxtwitter, fxtwitter, ddinstagram) when direct social page extraction is restricted</string>
 
     <string name="music_settings">Music &amp; Audio Settings</string>
     <string name="music_download">Music Download</string>
     <string name="music_format">Audio Format &amp; Bitrate</string>
-    <string name="music_mp3_320">MP3 320 kbps (Studio Quality)</string>
+    <string name="music_mp3_320">MP3 320 kbps (Direct / Target)</string>
     <string name="music_mp3_192">MP3 192 kbps (High Quality)</string>
-    <string name="music_flac">FLAC Lossless (Hi-Res Audio)</string>
+    <string name="music_flac">FLAC Lossless (When Source Is FLAC)</string>
     <string name="music_m4a_256">M4A / AAC 256 kbps</string>
     <string name="music_ogg_192">OGG Vorbis 192 kbps</string>
     <string name="embed_metadata">Embed ID3 Tags &amp; Cover Art</string>
-    <string name="supported_music_sites">Supported: SoundCloud, YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Apple Music, Deezer, Tidal, Archive.org, Podcasts &amp; Direct Audio</string>
-    <string name="sample_music_tracks">Quick Sample Free Music Tracks</string>
+    <string name="allow_alternate_music_source">Allow Alternate-Source Lookup (YouTube)</string>
+    <string name="allow_alternate_music_source_summary">Opt in to search YouTube for a verified title/artist/duration match when a track page (e.g. Spotify) only exposes a 30s preview or metadata</string>
+    <string name="supported_music_sites">Supported: SoundCloud, YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify (30s preview or opt-in match), Jamendo, Archive.org, Podcasts &amp; Direct Audio</string>
+    <string name="sample_music_tracks">Example Public Audio Links</string>
     
     <string name="confirm_delete">Are you sure you want to delete this download?</string>
     <string name="confirm_delete_file">Also delete the downloaded file?</string>
@@ -150,6 +154,8 @@
     
     <string name="peers">Peers: %d</string>
     <string name="seeds">Seeds: %d</string>
+    <string name="peers_unavailable">Peers: Unavailable</string>
+    <string name="seeds_unavailable">Seeds: Unavailable</string>
     <string name="upload_speed">Upload: %s/s</string>
     <string name="download_progress">%d%%</string>
     <string name="status">Status: %s</string>
