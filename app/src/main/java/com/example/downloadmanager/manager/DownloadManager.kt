@@ -696,7 +696,8 @@ class DownloadManager(
         val partSize = totalSize / numParts
         val totalDownloaded = AtomicLong(0L)
 
-        val workerScope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
+        val workerJob = SupervisorJob(coroutineContext[Job])
+        val workerScope = CoroutineScope(coroutineContext + workerJob)
         val progressJob = launch {
             var lastTime = System.currentTimeMillis()
             var lastBytes = 0L
@@ -796,7 +797,7 @@ class DownloadManager(
             try {
                 workers.awaitAll()
             } catch (e: Throwable) {
-                workerScope.coroutineContext.cancelChildren()
+                workerJob.cancelChildren()
                 throw e
             }
             if (totalDownloaded.get() != totalSize) {
@@ -820,6 +821,7 @@ class DownloadManager(
             throw t
         } finally {
             progressJob.cancel()
+            workerJob.cancel()
         }
     }
 

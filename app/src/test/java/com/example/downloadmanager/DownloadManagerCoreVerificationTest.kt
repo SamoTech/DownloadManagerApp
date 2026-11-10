@@ -396,6 +396,7 @@ class DownloadManagerCoreVerificationTest {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val peerServer = ServerSocket(0, 10, java.net.InetAddress.getByName("127.0.0.1"))
         try {
+            server.executor = Executors.newCachedThreadPool()
             val port = server.address.port
             val fileBytes = "Verified torrent payload across piece boundary 0123456789ABCDEF".toByteArray(StandardCharsets.UTF_8)
             val pieceLen = 32L
@@ -423,6 +424,7 @@ class DownloadManagerCoreVerificationTest {
                     peerServer.soTimeout = 4000
                     val sock = peerServer.accept()
                     sock.use { s ->
+                        s.soTimeout = 4000
                         val input = DataInputStream(s.getInputStream())
                         val output = DataOutputStream(s.getOutputStream())
                         val hs = ByteArray(68)
@@ -435,9 +437,31 @@ class DownloadManagerCoreVerificationTest {
                         System.arraycopy(peerId, 0, respHs, 48, 20)
                         output.write(respHs)
                         output.flush()
+                        // Read INTERESTED (len=1, id=2)
+                        val intLen = input.readInt()
+                        if (intLen > 0) input.skipBytes(intLen)
+                        // Send UNCHOKE (len=1, id=1)
                         output.writeInt(1)
                         output.writeByte(1)
                         output.flush()
+                        // Respond to 2 piece block requests (id=6) with PIECE (id=7)
+                        for (reqCount in 0 until 2) {
+                            val reqLen = input.readInt()
+                            if (reqLen != 13) break
+                            val reqId = input.readUnsignedByte()
+                            if (reqId != 6) break
+                            val pieceIdx = input.readInt()
+                            val begin = input.readInt()
+                            val length = input.readInt()
+                            val globalOffset = pieceIdx * 32 + begin
+                            val slice = fileBytes.copyOfRange(globalOffset, globalOffset + length)
+                            output.writeInt(9 + slice.size)
+                            output.writeByte(7)
+                            output.writeInt(pieceIdx)
+                            output.writeInt(begin)
+                            output.write(slice)
+                            output.flush()
+                        }
                     }
                 } catch (_: Exception) {}
             }.apply { isDaemon = true; start() }
@@ -515,7 +539,29 @@ class DownloadManagerCoreVerificationTest {
             assertEquals(1, fileStates.size)
             assertEquals(TorrentFileState.VERIFIED, fileStates[0].state)
             assertTrue(fileStates[0].canOpen)
-            peerThread.join(500)
+
+            // 3. Also test BEP-3 peer transfer seam directly against our local TCP peer
+            val peerFolder = File(tempRoot, "peer_run").apply { mkdirs() }
+            val extMeta = manager.parseBencodedTorrentBytes(
+                bytes = torrentBytes,
+                fallbackHash = infoHashBytes.joinToString("") { "%02x".format(it) },
+                extraTrackers = emptyList(),
+                extraWebSeeds = emptyList()
+            )
+            val peerOk = manager.downloadViaPeers(
+                item = finalRow.copy(status = DownloadStatus.DOWNLOADING),
+                extMeta = extMeta,
+                filesToDownload = extMeta.metadata.files,
+                selectedIndices = setOf(0),
+                torrentFolder = peerFolder,
+                onProgress = { _, _, _, _, _, _, _ -> },
+                explicitPeers = listOf(InetSocketAddress("127.0.0.1", peerServer.localPort))
+            )
+            assertTrue(peerOk)
+            TorrentPathSafety.promoteStagedFiles(peerFolder, extMeta.validatedEntries, setOf(0))
+            assertArrayEquals(fileBytes, File(peerFolder, "verified_doc.txt").readBytes())
+
+            peerThread.join(1000)
         } finally {
             runCatching { server.stop(0) }
             runCatching { peerServer.close() }
