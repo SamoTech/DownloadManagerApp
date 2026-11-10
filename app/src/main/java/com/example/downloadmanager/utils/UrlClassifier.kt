@@ -112,19 +112,66 @@ object UrlClassifier {
             )
         }
 
-        if (trimmed.startsWith("magnet:?", ignoreCase = true) &&
-            trimmed.lowercase(Locale.US).contains("xt=urn:btih:")
-        ) {
+        if (trimmed.startsWith("magnet:", ignoreCase = true)) {
+            val query = trimmed.substringAfter("?", "")
+            var hasValidBtih = false
+            var hasBtmh = false
+            for (param in query.split("&")) {
+                val eq = param.indexOf('=')
+                if (eq <= 0) continue
+                val key = param.substring(0, eq).trim().lowercase(Locale.US)
+                if (key == "xt" || key.startsWith("xt.")) {
+                    val decoded = FilenameResolver.decodeMagnetUrlParam(param.substring(eq + 1))
+                    if (decoded.startsWith("urn:btih:", ignoreCase = true)) {
+                        val rawHash = decoded.substringAfter("urn:btih:", "").trim()
+                        val validHex = rawHash.length == 40 && rawHash.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
+                        val validBase32 = rawHash.length == 32 && rawHash.uppercase(Locale.US).all { it in 'A'..'Z' || it in '2'..'7' }
+                        if (validHex || validBase32) {
+                            hasValidBtih = true
+                        }
+                    } else if (decoded.startsWith("urn:btmh:", ignoreCase = true)) {
+                        hasBtmh = true
+                    }
+                }
+            }
+            if (hasValidBtih) {
+                return UrlClassification(
+                    category = PlatformCategory.MAGNET,
+                    downloadType = DownloadType.MAGNET,
+                    providerName = "BitTorrent Magnet",
+                    canonicalHost = "magnet",
+                    isSupported = true
+                )
+            }
+            val reason = if (hasBtmh) {
+                "BitTorrent v2-only magnet links (urn:btmh without urn:btih) are not supported"
+            } else {
+                "Magnet link is missing a valid 40-hex or 32-Base32 BitTorrent v1 info-hash (xt=urn:btih:)"
+            }
             return UrlClassification(
                 category = PlatformCategory.MAGNET,
                 downloadType = DownloadType.MAGNET,
                 providerName = "BitTorrent Magnet",
                 canonicalHost = "magnet",
+                isSupported = false,
+                unsupportedReason = reason
+            )
+        }
+
+        if (trimmed.startsWith("content://", ignoreCase = true) ||
+            trimmed.startsWith("file://", ignoreCase = true) ||
+            (trimmed.startsWith("/") && trimmed.lowercase(Locale.US).endsWith(".torrent"))
+        ) {
+            return UrlClassification(
+                category = PlatformCategory.TORRENT_FILE,
+                downloadType = DownloadType.TORRENT,
+                providerName = "BitTorrent",
+                canonicalHost = "local",
                 isSupported = true
             )
         }
 
-        val httpUrl = trimmed.toHttpUrlOrNull()
+        val httpUrl = trimmed.toHttpUrlOrNull() ?: trimmed.replace(" ", "%20").toHttpUrlOrNull()
         if (httpUrl == null || (httpUrl.scheme != "http" && httpUrl.scheme != "https")) {
             return UrlClassification(
                 category = PlatformCategory.INVALID,
@@ -132,7 +179,7 @@ object UrlClassifier {
                 providerName = "Invalid URL",
                 canonicalHost = "",
                 isSupported = false,
-                unsupportedReason = "Only http://, https://, and magnet:?xt=urn:btih: links are supported"
+                unsupportedReason = "Only http://, https://, magnet:?xt=urn:btih:, and .torrent files are supported"
             )
         }
 

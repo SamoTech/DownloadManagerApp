@@ -13,6 +13,7 @@ import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
 import com.example.downloadmanager.model.DownloadType
 import com.example.downloadmanager.model.TorrentFileState
+import com.example.downloadmanager.utils.FilenameResolver
 import com.example.downloadmanager.utils.HlsPlaylistParser
 import com.example.downloadmanager.utils.HttpRangeValidator
 import com.example.downloadmanager.utils.MediaAssetHelper
@@ -1011,7 +1012,480 @@ class DownloadManagerCoreVerificationTest {
     }
 
     // =========================================================================
-    // Helper to build a deterministic bencoded single-file .torrent fixture
+    // Phase 5: Arabic Filename Fixtures & End-to-End Unicode Preservation Tests
+    // =========================================================================
+
+    @Test
+    fun phase5_arabicFilenames_httpAndCustomAndMediaManagers_preserveAllRequiredFixtures() = runBlocking {
+        val tempRoot = createTempDirectory("phase5_arabic_http").toFile()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        try {
+            server.executor = Executors.newCachedThreadPool()
+            val port = server.address.port
+
+            val pdfPayload = "%PDF-1.7 Arabic Book Fixture Content".toByteArray(StandardCharsets.UTF_8)
+            val jpgPayload = ByteArray(32) { idx ->
+                when (idx) {
+                    0 -> 0xFF.toByte()
+                    1 -> 0xD8.toByte()
+                    2 -> 0xFF.toByte()
+                    3 -> 0xE0.toByte()
+                    else -> (idx + 1).toByte()
+                }
+            }
+
+            // 1. Server endpoint returning RFC 5987 filename*=UTF-8'ar'... for "كتاب عربي.pdf"
+            server.createContext("/download") { ex ->
+                ex.responseHeaders.set(
+                    "Content-Disposition",
+                    "attachment; filename*=UTF-8'ar'%D9%83%D8%AA%D8%A7%D8%A8%20%D8%B9%D8%B1%D8%A8%D9%8A.pdf"
+                )
+                ex.sendResponseHeaders(200, pdfPayload.size.toLong())
+                ex.responseBody.use { it.write(pdfPayload) }
+            }
+
+            // 2. Server endpoint with Arabic URL path for "صورة ١٢٣.jpg"
+            server.createContext("/files/") { ex ->
+                ex.sendResponseHeaders(200, jpgPayload.size.toLong())
+                ex.responseBody.use { it.write(jpgPayload) }
+            }
+            server.start()
+
+            val dao = InMemoryDownloadDao()
+            val repo = DownloadRepository(dao)
+            val dm = DownloadManager(null, repo)
+
+            // Case A: URL has generic slug "/download", item starts with auto-derived "download",
+            // server responds with Content-Disposition -> MUST upgrade to "كتاب عربي.pdf"
+            val urlA = "http://127.0.0.1:$port/download"
+            val idA = dm.startDownload(
+                DownloadItem(
+                    url = urlA,
+                    filename = "download",
+                    savePath = tempRoot.absolutePath
+                )
+            )
+            dm.executeDownloadJob(
+                downloadItem = repo.getDownloadById(idA)!!,
+                onProgress = { _, _, _, _ -> },
+                onComplete = {},
+                onError = { _, err -> fail("Arabic Content-Disposition download failed: $err") }
+            )
+            val itemA = repo.getDownloadById(idA)!!
+            assertEquals("كتاب عربي.pdf", itemA.filename)
+            val fileA = File(tempRoot, "كتاب عربي.pdf")
+            assertTrue(fileA.exists())
+            assertArrayEquals(pdfPayload, fileA.readBytes())
+            assertEquals(
+                fileA.canonicalPath,
+                MediaAssetHelper.resolveTargetFileForOpenOrShare(itemA)?.canonicalPath
+            )
+            assertEquals("application/pdf", MediaAssetHelper.getMimeTypeForAnyFile(fileA))
+
+            // Case B: Duplicate download of "كتاب عربي.pdf" -> MUST allocate "كتاب عربي_1.pdf"
+            val idDup = dm.startDownload(
+                DownloadItem(
+                    url = urlA,
+                    filename = "download",
+                    savePath = tempRoot.absolutePath
+                )
+            )
+            dm.executeDownloadJob(
+                downloadItem = repo.getDownloadById(idDup)!!,
+                onProgress = { _, _, _, _ -> },
+                onComplete = {},
+                onError = { _, err -> fail("Duplicate Arabic download failed: $err") }
+            )
+            val itemDup = repo.getDownloadById(idDup)!!
+            assertEquals("كتاب عربي_1.pdf", itemDup.filename)
+            assertTrue(File(tempRoot, "كتاب عربي_1.pdf").exists())
+
+            // Case C: User custom filename "صورة ١٢٣.jpg" overrides server Content-Disposition
+            val idCustom = dm.startDownload(
+                DownloadItem(
+                    url = urlA,
+                    filename = "صورة ١٢٣.jpg",
+                    savePath = tempRoot.absolutePath
+                )
+            )
+            dm.executeDownloadJob(
+                downloadItem = repo.getDownloadById(idCustom)!!,
+                onProgress = { _, _, _, _ -> },
+                onComplete = {},
+                onError = { _, err -> fail("User custom Arabic filename failed: $err") }
+            )
+            val itemCustom = repo.getDownloadById(idCustom)!!
+            assertEquals("صورة ١٢٣.jpg", itemCustom.filename)
+            val fileCustom = File(tempRoot, "صورة ١٢٣.jpg")
+            assertTrue(fileCustom.exists())
+            assertEquals("image/jpeg", MediaAssetHelper.getMimeTypeForAnyFile(fileCustom))
+
+            // Case D: Mixed-direction and literal '+' fixtures across FilenameResolver, Magnet dn, and URL normalization
+            assertEquals(
+                "تقرير Q4 2026.mp4",
+                FilenameResolver.sanitizeSingleFilename("تقرير Q4 2026.mp4", "video.mp4")
+            )
+            assertEquals(
+                "موسيقى + اختبار.mp3",
+                FilenameResolver.sanitizeSingleFilename("موسيقى + اختبار.mp3", "audio.mp3")
+            )
+            assertEquals(
+                "موسيقى + اختبار.mp3",
+                FilenameResolver.decodeMagnetDisplayName("موسيقى + اختبار.mp3")
+            )
+            assertEquals(
+                "موسيقى + اختبار.mp3",
+                FilenameResolver.decodeMagnetDisplayName("%D9%85%D9%88%D8%B3%D9%8A%D9%82%D9%89%20+%20%D8%A7%D8%AE%D8%AA%D8%A8%D8%A7%D8%B1.mp3")
+            )
+            assertEquals(
+                "موسيقى + اختبار.mp3",
+                FilenameResolver.decodeMagnetDisplayName("%D9%85%D9%88%D8%B3%D9%8A%D9%82%D9%89+%2B+%D8%A7%D8%AE%D8%AA%D8%A8%D8%A7%D8%B1.mp3")
+            )
+
+            // Bidi override characters must be stripped at storage boundaries
+            assertEquals(
+                "كتاب عربي.pdf",
+                FilenameResolver.sanitizeSingleFilename("\u202Eكتاب عربي\u200F\u2066.pdf\u2069", "fallback.pdf")
+            )
+
+            // AddDownloadActivity.normalizeAndValidateUrl must preserve raw Arabic magnet dn and spaces
+            val rawArabicMagnet = "magnet:?dn=موسيقى + اختبار.mp3&xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+            assertEquals(
+                rawArabicMagnet,
+                AddDownloadActivity.normalizeAndValidateUrl(rawArabicMagnet)
+            )
+            assertEquals(
+                UrlClassifier.SourceKind.MAGNET,
+                UrlClassifier.classify(rawArabicMagnet).kind
+            )
+
+            // NFC vs NFD collision detection in TorrentPathSafety
+            val nfcName = java.text.Normalizer.normalize("مُستندات/الفصل الأول.txt", java.text.Normalizer.Form.NFC)
+            val nfdName = java.text.Normalizer.normalize("مُستندات/الفصل الأول.txt", java.text.Normalizer.Form.NFD)
+            try {
+                TorrentPathSafety.validateTorrentEntries(
+                    listOf(
+                        TorrentPathSafety.RawTorrentEntry(0, nfcName.split('/'), 100L),
+                        TorrentPathSafety.RawTorrentEntry(1, nfdName.split('/'), 100L)
+                    )
+                )
+                fail("Expected NFC/NFD collision rejection")
+            } catch (_: SecurityException) {
+                // Expected
+            }
+        } finally {
+            runCatching { server.stop(0) }
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun phase5_arabicMultiFileTorrent_nestedPathAndWebSeedAndOpenShareResolution() = runBlocking {
+        val tempRoot = createTempDirectory("phase5_arabic_torrent").toFile()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        try {
+            server.executor = Executors.newCachedThreadPool()
+            val port = server.address.port
+
+            val rootName = "مكتبة"
+            val nestedFileBytes = "الفصل الأول: محتوى تجريبي باللغة العربية".toByteArray(StandardCharsets.UTF_8)
+            val pdfBytes = "%PDF-1.7 كتاب عربي".toByteArray(StandardCharsets.UTF_8)
+            val combined = nestedFileBytes + pdfBytes
+            val pieceLen = 32L
+
+            val sha1 = MessageDigest.getInstance("SHA-1")
+            val piecesOut = ByteArrayOutputStream()
+            var offset = 0
+            while (offset < combined.size) {
+                val end = minOf(offset + pieceLen.toInt(), combined.size)
+                sha1.reset()
+                piecesOut.write(sha1.digest(combined.copyOfRange(offset, end)))
+                offset = end
+            }
+
+            val webSeedBase = "http://127.0.0.1:$port/webseed/"
+            val torrentBytes = buildBencodedMultiFileTorrent(
+                rootName = rootName,
+                files = listOf(
+                    Pair(listOf("مُستندات", "الفصل الأول.txt"), nestedFileBytes.size.toLong()),
+                    Pair(listOf("كتاب عربي.pdf"), pdfBytes.size.toLong())
+                ),
+                pieceLength = pieceLen,
+                pieces = piecesOut.toByteArray(),
+                webSeedUrl = webSeedBase
+            )
+
+            val expectedEncodedNestedPath =
+                "/webseed/" +
+                    FilenameResolver.encodeUriPathSegment(rootName) + "/" +
+                    FilenameResolver.encodeUriRelativePath(listOf("مُستندات", "الفصل الأول.txt"))
+            val expectedEncodedPdfPath =
+                "/webseed/" +
+                    FilenameResolver.encodeUriPathSegment(rootName) + "/" +
+                    FilenameResolver.encodeUriRelativePath(listOf("كتاب عربي.pdf"))
+
+            server.createContext("/arabic_multi.torrent") { ex ->
+                ex.sendResponseHeaders(200, torrentBytes.size.toLong())
+                ex.responseBody.use { it.write(torrentBytes) }
+            }
+            server.createContext("/webseed/") { ex ->
+                val rawPath = ex.requestURI.rawPath
+                when (rawPath) {
+                    expectedEncodedNestedPath -> {
+                        ex.sendResponseHeaders(200, nestedFileBytes.size.toLong())
+                        ex.responseBody.use { it.write(nestedFileBytes) }
+                    }
+                    expectedEncodedPdfPath -> {
+                        ex.sendResponseHeaders(200, pdfBytes.size.toLong())
+                        ex.responseBody.use { it.write(pdfBytes) }
+                    }
+                    else -> {
+                        ex.sendResponseHeaders(404, -1)
+                        ex.close()
+                    }
+                }
+            }
+            server.start()
+
+            val dao = InMemoryDownloadDao()
+            val repo = DownloadRepository(dao)
+            val manager = TorrentDownloadManager(null, repo)
+
+            val id = repo.insert(
+                DownloadItem(
+                    url = "http://127.0.0.1:$port/arabic_multi.torrent",
+                    filename = rootName,
+                    savePath = tempRoot.absolutePath,
+                    downloadType = DownloadType.TORRENT,
+                    status = DownloadStatus.QUEUED
+                )
+            )
+            val item = repo.getDownloadById(id)!!
+            manager.executeTorrentJob(
+                downloadItem = item,
+                onProgress = { _, _, _, _, _, _, _ -> },
+                onComplete = {},
+                onError = { _, err -> fail("Arabic multi-file torrent failed: $err") }
+            )
+
+            val finalRow = repo.getDownloadById(id)!!
+            assertEquals(DownloadStatus.COMPLETED, finalRow.status)
+            assertEquals("VERIFIED", finalRow.integrityStatus)
+
+            val expectedLocalNested = File(tempRoot, "$rootName/مُستندات/الفصل الأول.txt")
+            val expectedLocalPdf = File(tempRoot, "$rootName/كتاب عربي.pdf")
+            assertTrue(expectedLocalNested.exists())
+            assertTrue(expectedLocalPdf.exists())
+            assertArrayEquals(nestedFileBytes, expectedLocalNested.readBytes())
+            assertArrayEquals(pdfBytes, expectedLocalPdf.readBytes())
+
+            // Open/Share resolution on completed multi-file non-media torrent must resolve a real file
+            val resolvedForOpen = MediaAssetHelper.resolveTargetFileForOpenOrShare(finalRow)
+            assertNotNull(resolvedForOpen)
+            assertTrue(resolvedForOpen!!.exists())
+        } finally {
+            runCatching { server.stop(0) }
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    // =========================================================================
+    // Phase 6: Torrent & Magnet Real-Use Regression Tests
+    // =========================================================================
+
+    @Test
+    fun phase6_torrentRegressions_magnetValidation_unresolvedSwarm_selectedBoundaryPiece_andWebSeedToPeerFallback() = runBlocking {
+        val tempRoot = createTempDirectory("phase6_torrent_regressions").toFile()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val peerServer = ServerSocket(0, 10, java.net.InetAddress.getByName("127.0.0.1"))
+        try {
+            server.executor = Executors.newCachedThreadPool()
+            val port = server.address.port
+
+            val dao = InMemoryDownloadDao()
+            val repo = DownloadRepository(dao)
+            val manager = TorrentDownloadManager(null, repo)
+
+            // 1. Validate Base32 magnet info-hash and reject v2-only urn:btmh or invalid xt
+            val base32Magnet = "magnet:?dn=%D8%AA%D9%82%D8%B1%D9%8A%D8%B1+Q4+2026.mp4&xt=urn:btih:AEBAGBAFAYDQQCIKBMGA2DQPCAIREEYU"
+            val parsedBase32 = manager.parseMagnetDetailed(base32Magnet)
+            assertEquals(40, parsedBase32.infoHash.length)
+            assertEquals("تقرير Q4 2026.mp4", parsedBase32.displayName)
+
+            try {
+                manager.parseMagnetDetailed("magnet:?xt=urn:btmh:1220abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789")
+                fail("Expected IllegalArgumentException for v2-only btmh magnet")
+            } catch (e: IllegalArgumentException) {
+                assertTrue(e.message!!.contains("v2", ignoreCase = true))
+            }
+
+            // 2. Unresolved magnet (unreachable tracker, no WebSeed, no xs=.torrent) must FAIL truthfully
+            // and must NOT complete as a 0-byte download or poison metadataCache
+            val deadMagnet =
+                "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=%D9%83%D8%AA%D8%A7%D8%A8%20%D8%B9%D8%B1%D8%A8%D9%8A.pdf&tr=http%3A%2F%2F127.0.0.1%3A1%2Fannounce"
+            val deadId = repo.insert(
+                DownloadItem(
+                    url = deadMagnet,
+                    magnetUri = deadMagnet,
+                    filename = "كتاب عربي.pdf",
+                    savePath = File(tempRoot, "dead_magnet").apply { mkdirs() }.absolutePath,
+                    downloadType = DownloadType.TORRENT,
+                    status = DownloadStatus.QUEUED
+                )
+            )
+            var deadError: String? = null
+            manager.executeTorrentJob(
+                downloadItem = repo.getDownloadById(deadId)!!,
+                onProgress = { _, _, _, _, _, _, _ -> },
+                onComplete = { fail("Unresolved magnet must never report COMPLETED") },
+                onError = { _, err -> deadError = err }
+            )
+            assertNotNull(deadError)
+            val deadRow = repo.getDownloadById(deadId)!!
+            assertEquals(DownloadStatus.FAILED, deadRow.status)
+            assertTrue(
+                "Expected truthful tracker/metadata error but got: $deadError",
+                deadError!!.contains("tracker", ignoreCase = true) ||
+                    deadError!!.contains("metadata", ignoreCase = true) ||
+                    deadError!!.contains("DHT", ignoreCase = true)
+            )
+
+            // 3. Selected-file download where Piece 0 spans unselected File 0 (20 bytes) and selected File 1 (28 bytes)
+            // AND WebSeed returns 503 so executeTorrentJob falls back to BEP-3 peer transfer!
+            val file0Unselected = "UNSELECTED_HEADER_20".toByteArray(StandardCharsets.UTF_8) // 20 bytes
+            val file1Selected = "SELECTED_ARABIC_PAYLOAD_28B!".toByteArray(StandardCharsets.UTF_8) // 28 bytes
+            val combined = file0Unselected + file1Selected // 48 bytes total
+            val pieceLen = 32L // Piece 0: bytes 0..31 (20B of file 0 + 12B of file 1); Piece 1: bytes 32..47 (16B of file 1)
+
+            val sha1 = MessageDigest.getInstance("SHA-1")
+            val p0 = sha1.digest(combined.copyOfRange(0, 32))
+            sha1.reset()
+            val p1 = sha1.digest(combined.copyOfRange(32, 48))
+            val piecesConcat = p0 + p1
+
+            val torrentBytes = buildBencodedMultiFileTorrent(
+                rootName = "boundary_pack",
+                files = listOf(
+                    Pair(listOf("intro.bin"), file0Unselected.size.toLong()),
+                    Pair(listOf("تقرير Q4 2026.mp4"), file1Selected.size.toLong())
+                ),
+                pieceLength = pieceLen,
+                pieces = piecesConcat,
+                webSeedUrl = "http://127.0.0.1:$port/broken_webseed/",
+                announceUrl = "http://127.0.0.1:$port/announce"
+            )
+            val infoHashBytes = computeMultiFileTorrentInfoHash(torrentBytes)
+
+            // Start BEP-3 TCP peer that serves piece 0 and piece 1
+            val peerThread = Thread {
+                try {
+                    peerServer.soTimeout = 5000
+                    val sock = peerServer.accept()
+                    sock.use { s ->
+                        s.soTimeout = 5000
+                        val input = DataInputStream(s.getInputStream())
+                        val output = DataOutputStream(s.getOutputStream())
+                        val hs = ByteArray(68)
+                        input.readFully(hs)
+                        val peerId = "-LU5000-123456789012".toByteArray(StandardCharsets.ISO_8859_1)
+                        val respHs = ByteArray(68)
+                        respHs[0] = 19
+                        System.arraycopy("BitTorrent protocol".toByteArray(StandardCharsets.ISO_8859_1), 0, respHs, 1, 19)
+                        System.arraycopy(infoHashBytes, 0, respHs, 28, 20)
+                        System.arraycopy(peerId, 0, respHs, 48, 20)
+                        output.write(respHs)
+                        output.flush()
+                        val intLen = input.readInt()
+                        if (intLen > 0) input.skipBytes(intLen)
+                        output.writeInt(1)
+                        output.writeByte(1)
+                        output.flush()
+                        for (reqCount in 0 until 2) {
+                            val reqLen = input.readInt()
+                            if (reqLen != 13) break
+                            val reqId = input.readUnsignedByte()
+                            if (reqId != 6) break
+                            val pieceIdx = input.readInt()
+                            val begin = input.readInt()
+                            val length = input.readInt()
+                            val globalOffset = pieceIdx * 32 + begin
+                            val slice = combined.copyOfRange(globalOffset, globalOffset + length)
+                            output.writeInt(9 + slice.size)
+                            output.writeByte(7)
+                            output.writeInt(pieceIdx)
+                            output.writeInt(begin)
+                            output.write(slice)
+                            output.flush()
+                        }
+                    }
+                } catch (_: Exception) {}
+            }.apply { isDaemon = true; start() }
+
+            // HTTP tracker returns compact 6-byte peer address for 127.0.0.1:peerPort
+            server.createContext("/announce") { ex ->
+                val pPort = peerServer.localPort
+                val compactPeer = byteArrayOf(
+                    127, 0, 0, 1,
+                    ((pPort ushr 8) and 0xFF).toByte(),
+                    (pPort and 0xFF).toByte()
+                )
+                val out = ByteArrayOutputStream()
+                out.write("d8:completei1e10:incompletei0e8:intervali60e5:peers6:".toByteArray(StandardCharsets.ISO_8859_1))
+                out.write(compactPeer)
+                out.write("e".toByteArray(StandardCharsets.ISO_8859_1))
+                val resp = out.toByteArray()
+                ex.sendResponseHeaders(200, resp.size.toLong())
+                ex.responseBody.use { it.write(resp) }
+            }
+            server.createContext("/boundary.torrent") { ex ->
+                ex.sendResponseHeaders(200, torrentBytes.size.toLong())
+                ex.responseBody.use { it.write(torrentBytes) }
+            }
+            // Broken WebSeed returns 503 so executeTorrentJob must fall back to BEP-3 peer transfer
+            server.createContext("/broken_webseed/") { ex ->
+                ex.sendResponseHeaders(503, -1)
+                ex.close()
+            }
+            server.start()
+
+            val selSaveDir = File(tempRoot, "selected_boundary").apply { mkdirs() }
+            val selId = repo.insert(
+                DownloadItem(
+                    url = "http://127.0.0.1:$port/boundary.torrent",
+                    filename = "boundary_pack",
+                    savePath = selSaveDir.absolutePath,
+                    downloadType = DownloadType.TORRENT,
+                    status = DownloadStatus.QUEUED,
+                    selectedFiles = listOf(1) // Select ONLY File 1 ("تقرير Q4 2026.mp4")
+                )
+            )
+            manager.executeTorrentJob(
+                downloadItem = repo.getDownloadById(selId)!!,
+                onProgress = { _, _, _, _, _, _, _ -> },
+                onComplete = {},
+                onError = { _, err -> fail("Selected-file boundary transfer with WebSeed->Peer fallback failed: $err") }
+            )
+
+            val selRow = repo.getDownloadById(selId)!!
+            assertEquals(DownloadStatus.COMPLETED, selRow.status)
+            assertEquals("VERIFIED", selRow.integrityStatus)
+
+            val promotedSelectedFile = File(selSaveDir, "boundary_pack/تقرير Q4 2026.mp4")
+            val unselectedNeighborFile = File(selSaveDir, "boundary_pack/intro.bin")
+            assertTrue("Selected file must be promoted", promotedSelectedFile.exists())
+            assertArrayEquals(file1Selected, promotedSelectedFile.readBytes())
+            assertFalse("Unselected neighbor file must NOT be promoted", unselectedNeighborFile.exists())
+
+            peerThread.join(1000)
+        } finally {
+            runCatching { server.stop(0) }
+            runCatching { peerServer.close() }
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    // =========================================================================
+    // Helpers to build deterministic bencoded single-file & multi-file .torrent fixtures
     // =========================================================================
     private fun buildBencodedSingleFileTorrent(
         name: String,
@@ -1049,7 +1523,65 @@ class DownloadManagerCoreVerificationTest {
         return out.toByteArray()
     }
 
+    private fun buildBencodedMultiFileTorrent(
+        rootName: String,
+        files: List<Pair<List<String>, Long>>,
+        pieceLength: Long,
+        pieces: ByteArray,
+        webSeedUrl: String,
+        announceUrl: String? = null
+    ): ByteArray {
+        val out = ByteArrayOutputStream()
+        fun writeAscii(s: String) = out.write(s.toByteArray(StandardCharsets.ISO_8859_1))
+        fun writeBencodeBytes(b: ByteArray) {
+            writeAscii("${b.size}:")
+            out.write(b)
+        }
+        fun writeBencodeString(s: String) = writeBencodeBytes(s.toByteArray(StandardCharsets.UTF_8))
+        fun writeBencodeLong(v: Long) = writeAscii("i${v}e")
+
+        writeAscii("d")
+        if (announceUrl != null) {
+            writeBencodeString("announce")
+            writeBencodeString(announceUrl)
+        }
+        writeBencodeString("info")
+        writeAscii("d")
+        writeBencodeString("files")
+        writeAscii("l")
+        for ((pathParts, len) in files) {
+            writeAscii("d")
+            writeBencodeString("length")
+            writeBencodeLong(len)
+            writeBencodeString("path")
+            writeAscii("l")
+            for (part in pathParts) {
+                writeBencodeString(part)
+            }
+            writeAscii("e")
+            writeAscii("e")
+        }
+        writeAscii("e")
+        writeBencodeString("name")
+        writeBencodeString(rootName)
+        writeBencodeString("piece length")
+        writeBencodeLong(pieceLength)
+        writeBencodeString("pieces")
+        writeBencodeBytes(pieces)
+        writeAscii("e")
+        writeBencodeString("url-list")
+        writeAscii("l")
+        writeBencodeString(webSeedUrl)
+        writeAscii("e")
+        writeAscii("e")
+        return out.toByteArray()
+    }
+
     private fun computeTorrentInfoHash(torrentBytes: ByteArray): ByteArray {
+        return computeMultiFileTorrentInfoHash(torrentBytes)
+    }
+
+    private fun computeMultiFileTorrentInfoHash(torrentBytes: ByteArray): ByteArray {
         val marker = "4:infod".toByteArray(StandardCharsets.ISO_8859_1)
         var infoStart = -1
         for (i in 0..(torrentBytes.size - marker.size)) {

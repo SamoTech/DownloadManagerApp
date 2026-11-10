@@ -250,6 +250,8 @@ class DownloadDetailActivity : AppCompatActivity() {
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                     text = "$displayPath ($stateLabel)"
                     textSize = 13f
+                    textDirection = View.TEXT_DIRECTION_FIRST_STRONG
+                    textAlignment = View.TEXT_ALIGNMENT_VIEW_START
                     setTextColor(
                         ContextCompat.getColor(
                             this@DownloadDetailActivity,
@@ -403,19 +405,22 @@ class DownloadDetailActivity : AppCompatActivity() {
     }
     
     private fun openFile(downloadItem: DownloadItem) {
-        val resolvedFile = MediaAssetHelper.resolvePlayableFile(downloadItem)
+        val resolvedFile = MediaAssetHelper.resolveTargetFileForOpenOrShare(downloadItem)
         val candidateName = resolvedFile?.name ?: downloadItem.filename
+        val effectiveMime = resolvedFile?.let {
+            MediaAssetHelper.getMimeTypeForAnyFile(it, downloadItem.mimeType)
+        } ?: downloadItem.mimeType
         val isVideo = MediaAssetHelper.isVideoFileOrType(
             candidateName,
             downloadItem.downloadType,
             downloadItem.isAudioOnly,
-            downloadItem.mimeType
+            effectiveMime
         )
         val isAudio = !isVideo && MediaAssetHelper.isAudioFileOrType(
             candidateName,
             downloadItem.downloadType,
             downloadItem.isAudioOnly,
-            downloadItem.mimeType
+            effectiveMime
         )
 
         if (isVideo || isAudio) {
@@ -429,8 +434,11 @@ class DownloadDetailActivity : AppCompatActivity() {
             val file = resolvedFile ?: File(downloadItem.savePath, downloadItem.filename)
             if (file.exists() && file.isFile) {
                 val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
+                val mime = MediaAssetHelper.getMimeTypeForAnyFile(file, downloadItem.mimeType)
                 val intent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(uri, downloadItem.mimeType.ifBlank { "*/*" })
+                    setDataAndType(uri, mime.ifBlank { "*/*" })
+                    clipData = ClipData.newRawUri(file.name, uri)
+                    putExtra(Intent.EXTRA_TITLE, file.name)
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
                 startActivity(intent)
@@ -444,33 +452,19 @@ class DownloadDetailActivity : AppCompatActivity() {
     
     private fun shareFile(downloadItem: DownloadItem) {
         try {
-            val file = MediaAssetHelper.resolvePlayableFile(downloadItem)
+            val file = MediaAssetHelper.resolveTargetFileForOpenOrShare(downloadItem)
                 ?: File(downloadItem.savePath, downloadItem.filename)
-            val isVideo = MediaAssetHelper.isVideoFileOrType(
-                file.name,
-                downloadItem.downloadType,
-                downloadItem.isAudioOnly,
-                downloadItem.mimeType
-            )
-            val isAudio = !isVideo && MediaAssetHelper.isAudioFileOrType(
-                file.name,
-                downloadItem.downloadType,
-                downloadItem.isAudioOnly,
-                downloadItem.mimeType
-            )
             if (file.exists() && file.isFile) {
                 val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
-                val mime = if (isVideo || isAudio) {
-                    MediaAssetHelper.getMimeTypeForFilename(file.name, isVideo)
-                } else {
-                    downloadItem.mimeType.ifBlank { "*/*" }
-                }
+                val mime = MediaAssetHelper.getMimeTypeForAnyFile(file, downloadItem.mimeType)
                 val intent = Intent(Intent.ACTION_SEND).apply {
-                    type = mime
+                    type = mime.ifBlank { "*/*" }
                     putExtra(Intent.EXTRA_STREAM, uri)
+                    putExtra(Intent.EXTRA_TITLE, file.name)
+                    clipData = ClipData.newRawUri(file.name, uri)
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
-                startActivity(Intent.createChooser(intent, getString(R.string.share)))
+                startActivity(Intent.createChooser(intent, file.name))
             } else {
                 Toast.makeText(this, R.string.error_file_not_found, Toast.LENGTH_SHORT).show()
             }

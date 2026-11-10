@@ -193,8 +193,118 @@ object MediaAssetHelper {
             "m4a", "aac" -> "audio/mp4"
             "ogg", "opus", "weba" -> "audio/ogg"
             "wav" -> "audio/wav"
+            "pdf" -> "application/pdf"
+            "jpg", "jpeg" -> "image/jpeg"
+            "png" -> "image/png"
+            "webp" -> "image/webp"
+            "gif" -> "image/gif"
+            "txt", "log", "md" -> "text/plain"
+            "zip" -> "application/zip"
+            "apk" -> "application/vnd.android.package-archive"
             else -> if (isVideo) "video/mp4" else "audio/mpeg"
         }
+    }
+
+    /**
+     * Resolves an accurate MIME type for any file on disk (media or non-media such as PDF, JPG, TXT).
+     */
+    fun getMimeTypeForAnyFile(file: File, fallbackMime: String? = null): String {
+        detectActualMimeType(file)?.let { return it }
+        val ext = file.extension.lowercase()
+        return when (ext) {
+            "pdf" -> "application/pdf"
+            "jpg", "jpeg" -> "image/jpeg"
+            "png" -> "image/png"
+            "webp" -> "image/webp"
+            "gif" -> "image/gif"
+            "txt", "log", "md", "csv", "json", "xml" -> "text/plain"
+            "html", "htm" -> "text/html"
+            "zip" -> "application/zip"
+            "rar" -> "application/vnd.rar"
+            "7z" -> "application/x-7z-compressed"
+            "apk" -> "application/vnd.android.package-archive"
+            "mp4", "m4v", "mov", "3gp" -> "video/mp4"
+            "webm" -> "video/webm"
+            "mkv" -> "video/x-matroska"
+            "avi" -> "video/x-msvideo"
+            "mp3" -> "audio/mpeg"
+            "flac" -> "audio/flac"
+            "m4a", "aac" -> "audio/mp4"
+            "ogg", "opus", "weba" -> "audio/ogg"
+            "wav" -> "audio/wav"
+            else -> fallbackMime?.takeIf {
+                it.isNotBlank() && it != "application/x-bittorrent" && it != "application/octet-stream"
+            } ?: "application/octet-stream"
+        }
+    }
+
+    /**
+     * Resolves the primary target file on disk when opening or sharing a completed [DownloadItem].
+     * Works for both direct files (`savePath/filename`) and torrent job folders (`savePath/filename/<contained_file>`),
+     * including non-media files (`.pdf`, `.jpg`, `.txt`, etc.) and Unicode/Arabic names.
+     */
+    fun resolveTargetFileForOpenOrShare(item: DownloadItem): File? {
+        val baseDir = File(item.savePath)
+        val directFile = File(baseDir, item.filename)
+        if (directFile.exists() && directFile.isFile) {
+            return directFile
+        }
+
+        // If directFile is a torrent job folder, resolve the best contained file inside it
+        if (directFile.exists() && directFile.isDirectory) {
+            findBestFileInJobDirectory(directFile, item.filename, item.torrentName)?.let { return it }
+        }
+
+        val torrentDirName = item.torrentName?.takeIf { it.isNotBlank() }
+        if (torrentDirName != null) {
+            val torrentDir = File(baseDir, torrentDirName)
+            if (torrentDir.exists() && torrentDir.isDirectory) {
+                findBestFileInJobDirectory(torrentDir, item.filename, item.torrentName)?.let { return it }
+            } else if (torrentDir.exists() && torrentDir.isFile) {
+                return torrentDir
+            }
+        }
+
+        return resolvePlayableFile(item)
+    }
+
+    private fun findBestFileInJobDirectory(
+        dir: File,
+        preferredName1: String?,
+        preferredName2: String?
+    ): File? {
+        if (!dir.exists() || !dir.isDirectory) return null
+        val rootCanonical = runCatching { dir.canonicalFile }.getOrNull() ?: return null
+        val rootPrefix = rootCanonical.path + File.separator
+
+        val candidates = dir.walkTopDown()
+            .onEnter { sub ->
+                sub.name != ".staging" &&
+                    runCatching { TorrentPathSafety.ensureNotSymlink(sub); true }.getOrDefault(false) &&
+                    (sub.canonicalFile.path == rootCanonical.path || sub.canonicalFile.path.startsWith(rootPrefix))
+            }
+            .filter { f ->
+                f.isFile &&
+                    !f.name.startsWith(".") &&
+                    runCatching {
+                        TorrentPathSafety.ensureNotSymlink(f)
+                        f.canonicalFile.path.startsWith(rootPrefix)
+                    }.getOrDefault(false)
+            }
+            .toList()
+
+        if (candidates.isEmpty()) return null
+        if (candidates.size == 1) return candidates[0]
+
+        preferredName1?.takeIf { it.isNotBlank() }?.let { pref ->
+            candidates.firstOrNull { it.name == pref }?.let { return it }
+        }
+        preferredName2?.takeIf { it.isNotBlank() }?.let { pref ->
+            candidates.firstOrNull { it.name == pref }?.let { return it }
+        }
+
+        findBestMediaFileInDirectory(dir)?.let { return it }
+        return candidates.maxByOrNull { it.length() }
     }
 
     /**
@@ -242,8 +352,9 @@ object MediaAssetHelper {
     private fun findBestMediaFileInDirectory(dir: File): File? {
         if (!dir.exists() || !dir.isDirectory) return null
         return dir.walkTopDown()
+            .onEnter { it.name != ".staging" }
             .filter { f ->
-                f.isFile && f.length() > 1024L &&
+                f.isFile && !f.name.startsWith(".") && f.length() > 0L &&
                     (f.extension.lowercase() in VIDEO_EXTENSIONS || f.extension.lowercase() in AUDIO_EXTENSIONS)
             }
             .sortedByDescending { it.length() }

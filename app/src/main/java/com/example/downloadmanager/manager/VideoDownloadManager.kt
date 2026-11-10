@@ -10,6 +10,7 @@ import com.example.downloadmanager.model.DownloadType
 import com.example.downloadmanager.model.VideoFormat
 import com.example.downloadmanager.model.VideoInfo
 import com.example.downloadmanager.model.VideoStreamInfo
+import com.example.downloadmanager.utils.FilenameResolver
 import com.example.downloadmanager.utils.HlsPlaylistParser
 import com.example.downloadmanager.utils.HttpRangeValidator
 import com.example.downloadmanager.utils.MediaAssetHelper
@@ -116,11 +117,27 @@ class VideoDownloadManager(
             val trimmed = rawUrl.trim()
             if (trimmed.isEmpty()) return null
 
-            val extracted = if (trimmed.contains(" ") || trimmed.contains("\n")) {
-                Regex("""https?://[^\s"'<>]+""", RegexOption.IGNORE_CASE)
-                    .find(trimmed)?.value ?: return null
-            } else {
-                trimmed
+            val startsWithHttp = trimmed.startsWith("http://", ignoreCase = true) ||
+                trimmed.startsWith("https://", ignoreCase = true)
+
+            val extracted = when {
+                startsWithHttp && !trimmed.contains('\n') && !trimmed.contains('\r') -> {
+                    val afterScheme = trimmed.substringAfter("://")
+                    if (!afterScheme.contains("http://", ignoreCase = true) &&
+                        !afterScheme.contains("https://", ignoreCase = true) &&
+                        afterScheme.substringBefore('/').none { it.isWhitespace() }
+                    ) {
+                        trimmed.replace(" ", "%20")
+                    } else {
+                        Regex("""https?://[^\s"'<>]+""", RegexOption.IGNORE_CASE)
+                            .find(trimmed)?.value ?: return null
+                    }
+                }
+                trimmed.contains(" ") || trimmed.contains("\n") -> {
+                    Regex("""https?://[^\s"'<>]+""", RegexOption.IGNORE_CASE)
+                        .find(trimmed)?.value ?: return null
+                }
+                else -> trimmed
             }
 
             if (extracted.contains("@") && !extracted.contains("://")) {
@@ -1516,13 +1533,14 @@ class VideoDownloadManager(
         val fallbackTitle = cachedInfo?.video?.title
             ?: YouTubeExtractor.extractVideoIdFromUrl(validUrl)?.let { "YouTube_$it" }
             ?: platformLabel?.let { "${it.replace(" / ", "_")}_${System.currentTimeMillis()}" }
-            ?: validUrl.substringAfterLast("/").substringBefore("?").ifBlank { "Video_${System.currentTimeMillis()}" }
+            ?: FilenameResolver.extractFilenameFromUrl(validUrl)?.ifBlank { null }
+            ?: "Video_${System.currentTimeMillis()}"
 
-        val sanitizedTitle = (if (isGenericName) fallbackTitle else rawName.substringBeforeLast("."))
-            .replace(Regex("[^a-zA-Z0-9 _\\-().]"), "_")
-            .trim()
-            .ifBlank { "Video_${System.currentTimeMillis()}" }
-
+        val rawCandidate = if (isGenericName) fallbackTitle else rawName.substringBeforeLast(".")
+        val sanitizedTitle = FilenameResolver.sanitizeSingleFilename(
+            rawCandidate,
+            fallback = "Video_${System.currentTimeMillis()}"
+        )
         val baseFilename = sanitizedTitle.substringBeforeLast(".")
         val finalFilename = if (wantAudioOnly) {
             val audioExt = if (selectedFormat?.container == "mp3") ".mp3" else ".m4a"
@@ -1654,7 +1672,7 @@ class VideoDownloadManager(
             var activeItem = repository.getDownloadById(downloadItem.id) ?: downloadItem
             var targetFilename = activeItem.filename
             val extractedTitle = streamInfo?.video?.title
-                ?.replace(Regex("[^a-zA-Z0-9 _\\-()]"), "_")
+                ?.let { FilenameResolver.sanitizeSingleFilename(it, fallback = "") }
                 ?.trim()
             if (!extractedTitle.isNullOrBlank() &&
                 (targetFilename.startsWith("YouTube_") ||

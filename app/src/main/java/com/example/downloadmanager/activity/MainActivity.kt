@@ -338,19 +338,22 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun openFile(downloadItem: DownloadItem) {
-        val resolvedFile = MediaAssetHelper.resolvePlayableFile(downloadItem)
+        val resolvedFile = MediaAssetHelper.resolveTargetFileForOpenOrShare(downloadItem)
         val candidateName = resolvedFile?.name ?: downloadItem.filename
+        val effectiveMime = resolvedFile?.let {
+            MediaAssetHelper.getMimeTypeForAnyFile(it, downloadItem.mimeType)
+        } ?: downloadItem.mimeType
         val isVideo = MediaAssetHelper.isVideoFileOrType(
             candidateName,
             downloadItem.downloadType,
             downloadItem.isAudioOnly,
-            downloadItem.mimeType
+            effectiveMime
         )
         val isAudio = !isVideo && MediaAssetHelper.isAudioFileOrType(
             candidateName,
             downloadItem.downloadType,
             downloadItem.isAudioOnly,
-            downloadItem.mimeType
+            effectiveMime
         )
 
         if (isVideo || isAudio) {
@@ -364,8 +367,11 @@ class MainActivity : AppCompatActivity() {
             val file = resolvedFile ?: File(downloadItem.savePath, downloadItem.filename)
             if (file.exists() && file.isFile) {
                 val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
+                val mime = MediaAssetHelper.getMimeTypeForAnyFile(file, downloadItem.mimeType)
                 val intent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(uri, downloadItem.mimeType.ifBlank { "*/*" })
+                    setDataAndType(uri, mime.ifBlank { "*/*" })
+                    clipData = ClipData.newRawUri(file.name, uri)
+                    putExtra(Intent.EXTRA_TITLE, file.name)
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
                 startActivity(intent)
@@ -379,33 +385,19 @@ class MainActivity : AppCompatActivity() {
     
     private fun shareFile(downloadItem: DownloadItem) {
         try {
-            val file = MediaAssetHelper.resolvePlayableFile(downloadItem)
+            val file = MediaAssetHelper.resolveTargetFileForOpenOrShare(downloadItem)
                 ?: File(downloadItem.savePath, downloadItem.filename)
-            val isVideo = MediaAssetHelper.isVideoFileOrType(
-                file.name,
-                downloadItem.downloadType,
-                downloadItem.isAudioOnly,
-                downloadItem.mimeType
-            )
-            val isAudio = !isVideo && MediaAssetHelper.isAudioFileOrType(
-                file.name,
-                downloadItem.downloadType,
-                downloadItem.isAudioOnly,
-                downloadItem.mimeType
-            )
             if (file.exists() && file.isFile) {
                 val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
-                val mime = if (isVideo || isAudio) {
-                    MediaAssetHelper.getMimeTypeForFilename(file.name, isVideo)
-                } else {
-                    downloadItem.mimeType.ifBlank { "*/*" }
-                }
+                val mime = MediaAssetHelper.getMimeTypeForAnyFile(file, downloadItem.mimeType)
                 val intent = Intent(Intent.ACTION_SEND).apply {
-                    type = mime
+                    type = mime.ifBlank { "*/*" }
                     putExtra(Intent.EXTRA_STREAM, uri)
+                    putExtra(Intent.EXTRA_TITLE, file.name)
+                    clipData = ClipData.newRawUri(file.name, uri)
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
-                startActivity(Intent.createChooser(intent, getString(R.string.share)))
+                startActivity(Intent.createChooser(intent, file.name))
             } else {
                 Toast.makeText(this, R.string.error_file_not_found, Toast.LENGTH_SHORT).show()
             }
@@ -509,8 +501,13 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun handleUrl(url: String) {
-        if (url.startsWith("http") || url.startsWith("https") || url.startsWith("magnet:")) {
-            val classification = com.example.downloadmanager.utils.UrlClassifier.classify(url)
+        val cleaned = AddDownloadActivity.normalizeAndValidateUrl(url) ?: url.trim()
+        if (cleaned.startsWith("http", ignoreCase = true) ||
+            cleaned.startsWith("magnet:", ignoreCase = true) ||
+            cleaned.startsWith("content://", ignoreCase = true) ||
+            cleaned.startsWith("file://", ignoreCase = true)
+        ) {
+            val classification = com.example.downloadmanager.utils.UrlClassifier.classify(cleaned)
             if (classification.kind == com.example.downloadmanager.utils.UrlClassifier.SourceKind.UNSUPPORTED) {
                 Toast.makeText(
                     this,
@@ -521,9 +518,9 @@ class MainActivity : AppCompatActivity() {
             }
             android.app.AlertDialog.Builder(this)
                 .setTitle(R.string.add_download)
-                .setMessage(getString(R.string.download_url_confirmation, url))
+                .setMessage(getString(R.string.download_url_confirmation, cleaned))
                 .setPositiveButton(R.string.yes) { dialog, _ ->
-                    startDownload(url)
+                    startDownload(cleaned)
                     dialog.dismiss()
                 }
                 .setNegativeButton(R.string.no) { dialog, _ ->

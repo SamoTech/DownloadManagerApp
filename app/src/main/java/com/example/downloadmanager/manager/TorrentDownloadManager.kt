@@ -1,6 +1,7 @@
 package com.example.downloadmanager.manager
 
 import android.app.Application
+import android.net.Uri
 import android.util.Log
 import androidx.preference.PreferenceManager
 import com.example.downloadmanager.model.DownloadItem
@@ -11,6 +12,7 @@ import com.example.downloadmanager.model.MagnetInfo
 import com.example.downloadmanager.model.TorrentFileInfo
 import com.example.downloadmanager.model.TorrentFileState
 import com.example.downloadmanager.model.TorrentMetadata
+import com.example.downloadmanager.utils.FilenameResolver
 import com.example.downloadmanager.utils.MediaAssetHelper
 import com.example.downloadmanager.utils.TorrentPathSafety
 import kotlinx.coroutines.CancellationException
@@ -91,7 +93,9 @@ class TorrentDownloadManager(
         val webSeeds: List<String>,
         val pieceHashes: List<ByteArray> = emptyList(),
         val rawPieceHashesBytes: ByteArray = ByteArray(0),
-        val directFileUrlMap: Map<String, String> = emptyMap()
+        val directFileUrlMap: Map<String, String> = emptyMap(),
+        val originalRootName: String = metadata.name,
+        val hasResolvedMetadata: Boolean = true
     )
 
     companion object {
@@ -170,41 +174,19 @@ class TorrentDownloadManager(
 
     fun parseMagnetLink(magnetUri: String): MagnetInfo? {
         if (!magnetUri.trim().startsWith("magnet:", ignoreCase = true)) return null
-        var infoHash = ""
-        var displayName = ""
-        val trackers = mutableListOf<String>()
-
-        val query = magnetUri.substringAfter("?", "")
-        for (part in query.split("&")) {
-            val eq = part.indexOf('=')
-            if (eq <= 0) continue
-            val key = part.substring(0, eq).lowercase(Locale.US)
-            val rawVal = part.substring(eq + 1)
-            val decoded = runCatching { URLDecoder.decode(rawVal, "UTF-8") }.getOrDefault(rawVal)
-            when {
-                key == "xt" && decoded.startsWith("urn:btih:", ignoreCase = true) -> {
-                    infoHash = normalizeInfoHash(decoded.substringAfter("urn:btih:", ""))
-                }
-                key == "dn" -> displayName = decoded
-                key == "tr" -> trackers.add(decoded)
-            }
-        }
-        if (infoHash.isBlank()) {
-            infoHash = sha1Hex(magnetUri.toByteArray(StandardCharsets.UTF_8))
-        }
-        if (displayName.isBlank()) {
-            displayName = "Torrent_${infoHash.take(8).uppercase(Locale.US)}"
-        }
+        val detailed = runCatching { parseMagnetDetailed(magnetUri) }.getOrNull() ?: return null
+        val displayName = detailed.displayName?.takeIf { it.isNotBlank() }
+            ?: "Torrent_${detailed.infoHash.take(8).uppercase(Locale.US)}"
         return MagnetInfo(
             displayName = displayName,
-            infoHash = infoHash,
-            trackers = (trackers + defaultTrackers).distinct()
+            infoHash = detailed.infoHash,
+            trackers = detailed.trackers
         )
     }
 
     /**
      * Resolves magnet or .torrent metadata from real .torrent sources, BEP-9 peers, or magnet parameters.
-     * Note: Propagates SecurityException if a .torrent contains escaping or duplicate paths.
+     * Note: Propagates SecurityException or IllegalArgumentException if a .torrent/magnet is invalid or unsafe.
      */
     suspend fun getTorrentMetadata(magnetOrTorrentUrl: String): TorrentMetadata? = withContext(Dispatchers.IO) {
         try {
@@ -212,6 +194,9 @@ class TorrentDownloadManager(
         } catch (se: SecurityException) {
             Log.e(TAG, "Rejected unsafe torrent metadata: ${se.message}")
             throw se
+        } catch (iae: IllegalArgumentException) {
+            Log.w(TAG, "Invalid magnet/torrent input: ${iae.message}")
+            throw iae
         } catch (e: Exception) {
             Log.w(TAG, "Error resolving torrent metadata: ${e.message}")
             null
@@ -254,9 +239,25 @@ class TorrentDownloadManager(
             } else {
                 meta.files
             }
+            val effectiveFiles = if (baseFiles.size == 1 && existingFolder != null) {
+                val single = baseFiles[0]
+                val expectedFile = runCatching { TorrentPathSafety.resolveContainedFile(existingFolder, single.path) }.getOrNull()
+                if (expectedFile == null || !expectedFile.exists()) {
+                    val customCandidate = runCatching { TorrentPathSafety.resolveContainedFile(existingFolder, item.filename) }.getOrNull()
+                    if (customCandidate != null && customCandidate.exists() && customCandidate.isFile) {
+                        listOf(single.copy(name = customCandidate.name, path = customCandidate.name))
+                    } else {
+                        baseFiles
+                    }
+                } else {
+                    baseFiles
+                }
+            } else {
+                baseFiles
+            }
             return@withContext TorrentPathSafety.computeFileInfoStates(
                 jobRoot = existingFolder,
-                files = baseFiles,
+                files = effectiveFiles,
                 verificationResult = null,
                 isJobCompletedVerified = isJobVerifiedComplete
             )
@@ -311,7 +312,7 @@ class TorrentDownloadManager(
 
     internal suspend fun resolveExtendedTorrentMetadata(magnetOrTorrentUrl: String): ExtendedTorrentMeta? = coroutineScope {
         val trimmed = magnetOrTorrentUrl.trim()
-        metadataCache[trimmed]?.let { return@coroutineScope it }
+        metadataCache[trimmed]?.takeIf { it.hasResolvedMetadata }?.let { return@coroutineScope it }
 
         if (trimmed.startsWith("magnet:", ignoreCase = true)) {
             val magnetParams = parseMagnetDetailed(trimmed)
@@ -351,15 +352,16 @@ class TorrentDownloadManager(
             }.distinct()
 
             var securityExceptionThrown: SecurityException? = null
-            val downloadedBytes = withTimeoutOrNull(5000L) {
+            val downloadedPair = withTimeoutOrNull(5000L) {
                 val jobs = candidateTorrentUrls.map { url ->
                     async(Dispatchers.IO) {
-                        runCatching { fetchBytesFast(url) }
+                        runCatching { readLocalOrRemoteTorrentBytes(url) }
                             .getOrNull()
                             ?.takeIf { isValidBencodedTorrent(it) }
+                            ?.let { url to it }
                     }
                 }
-                var valid: ByteArray? = null
+                var valid: Pair<String, ByteArray>? = null
                 for (job in jobs) {
                     val res = job.await()
                     if (res != null) {
@@ -385,13 +387,16 @@ class TorrentDownloadManager(
             }
             val nowMs = System.currentTimeMillis()
 
-            if (downloadedBytes != null) {
+            if (downloadedPair != null) {
+                val (sourceUrl, downloadedBytes) = downloadedPair
+                val enforceExactInfoHash = (knownSource == null || sourceUrl != knownSource.first)
                 val parsedMeta = try {
                     parseBencodedTorrentBytes(
                         bytes = downloadedBytes,
                         fallbackHash = magnetParams.infoHash,
                         extraTrackers = magnetParams.trackers,
-                        extraWebSeeds = mergedWebSeeds
+                        extraWebSeeds = mergedWebSeeds,
+                        expectedInfoHash = if (enforceExactInfoHash) hashLower else null
                     )
                 } catch (se: SecurityException) {
                     securityExceptionThrown = se
@@ -444,6 +449,7 @@ class TorrentDownloadManager(
                 }
             }
 
+            // Do NOT cache unresolved magnet fallback in metadataCache so execution re-probes trackers/peers
             val fallbackMeta = buildFallbackMagnetMeta(
                 params = magnetParams,
                 webSeeds = mergedWebSeeds,
@@ -451,19 +457,10 @@ class TorrentDownloadManager(
                 peers = measuredPeers,
                 swarmMeasured = swarm.respondedTrackers > 0
             )
-            metadataCache[trimmed] = fallbackMeta
             return@coroutineScope fallbackMeta
         } else {
             val torrentBytes = withTimeoutOrNull(5500L) {
-                runCatching {
-                    if (trimmed.startsWith("http://", ignoreCase = true) ||
-                        trimmed.startsWith("https://", ignoreCase = true)
-                    ) {
-                        fetchBytesFast(trimmed)
-                    } else {
-                        File(trimmed).readBytes()
-                    }
-                }.getOrNull()
+                runCatching { readLocalOrRemoteTorrentBytes(trimmed) }.getOrNull()
             }
 
             if (torrentBytes != null && isValidBencodedTorrent(torrentBytes)) {
@@ -500,6 +497,31 @@ class TorrentDownloadManager(
             }
 
             return@coroutineScope null
+        }
+    }
+
+    private fun readLocalOrRemoteTorrentBytes(uriOrPath: String): ByteArray? {
+        val trimmed = uriOrPath.trim()
+        return when {
+            trimmed.startsWith("http://", ignoreCase = true) ||
+                trimmed.startsWith("https://", ignoreCase = true) -> {
+                fetchBytesFast(trimmed)
+            }
+            trimmed.startsWith("content://", ignoreCase = true) -> {
+                val ctx = context ?: return null
+                ctx.contentResolver.openInputStream(Uri.parse(trimmed))?.use { it.readBytes() }
+            }
+            trimmed.startsWith("file://", ignoreCase = true) -> {
+                val ctx = context
+                if (ctx != null) {
+                    runCatching {
+                        ctx.contentResolver.openInputStream(Uri.parse(trimmed))?.use { it.readBytes() }
+                    }.getOrNull() ?: File(URI(trimmed)).readBytes()
+                } else {
+                    File(URI(trimmed)).readBytes()
+                }
+            }
+            else -> File(trimmed).readBytes()
         }
     }
 
@@ -547,7 +569,9 @@ class TorrentDownloadManager(
             ),
             validatedEntries = validatedEntries,
             trackers = params.trackers,
-            webSeeds = webSeeds
+            webSeeds = webSeeds,
+            originalRootName = rawName,
+            hasResolvedMetadata = false
         )
     }
 
@@ -572,7 +596,8 @@ class TorrentDownloadManager(
                     ?: resp.header("Content-Length")?.toLongOrNull()
                     ?: params.exactLength.coerceAtLeast(0L)
                 val rawName = params.displayName?.takeIf { it.isNotBlank() }
-                    ?: directSeed.substringAfterLast("/").substringBefore("?").ifBlank { "Torrent_${params.infoHash.take(8)}" }
+                    ?: FilenameResolver.extractFilenameFromUrl(directSeed)?.takeIf { it.isNotBlank() }
+                    ?: "Torrent_${params.infoHash.take(8)}"
                 val cleanName = TorrentPathSafety.validateComponent(TorrentPathSafety.sanitizeRootName(rawName))
                 val validatedEntries = TorrentPathSafety.validateTorrentEntries(
                     listOf(TorrentPathSafety.RawTorrentEntry(0, listOf(cleanName), size))
@@ -593,7 +618,9 @@ class TorrentDownloadManager(
                     ),
                     validatedEntries = validatedEntries,
                     trackers = params.trackers,
-                    webSeeds = webSeeds
+                    webSeeds = webSeeds,
+                    originalRootName = rawName,
+                    hasResolvedMetadata = true
                 )
             }
         } catch (_: Exception) {
@@ -601,7 +628,7 @@ class TorrentDownloadManager(
         }
     }
 
-    private data class DetailedMagnetParams(
+    internal data class DetailedMagnetParams(
         val infoHash: String,
         val displayName: String?,
         val trackers: List<String>,
@@ -610,40 +637,69 @@ class TorrentDownloadManager(
         val exactLength: Long
     )
 
-    private fun parseMagnetDetailed(magnetUri: String): DetailedMagnetParams {
+    internal fun parseMagnetDetailed(magnetUri: String): DetailedMagnetParams {
         var infoHash = ""
+        var sawBtmhOnly = false
         var displayName: String? = null
         val trackers = mutableListOf<String>()
         val webSeeds = mutableListOf<String>()
         val torrentSources = mutableListOf<String>()
         var exactLength = -1L
 
-        val query = magnetUri.substringAfter("?", "")
+        val query = magnetUri.trim().substringAfter("?", "")
         for (param in query.split("&")) {
             val eqIdx = param.indexOf('=')
             if (eqIdx <= 0) continue
-            val key = param.substring(0, eqIdx).lowercase(Locale.US)
+            val key = param.substring(0, eqIdx).trim().lowercase(Locale.US)
             val rawVal = param.substring(eqIdx + 1)
-            val decoded = runCatching { URLDecoder.decode(rawVal, "UTF-8") }.getOrDefault(rawVal)
 
             when {
-                key == "xt" && decoded.startsWith("urn:btih:", ignoreCase = true) -> {
-                    infoHash = normalizeInfoHash(decoded.substringAfter("urn:btih:", ""))
+                key == "xt" || key.startsWith("xt.") -> {
+                    val decodedXt = FilenameResolver.decodeMagnetUrlParam(rawVal)
+                    if (decodedXt.startsWith("urn:btih:", ignoreCase = true)) {
+                        val candidateHash = normalizeInfoHash(decodedXt.substringAfter("urn:btih:", ""))
+                        if (candidateHash.length == 40) {
+                            infoHash = candidateHash
+                        }
+                    } else if (decodedXt.startsWith("urn:btmh:", ignoreCase = true)) {
+                        sawBtmhOnly = true
+                    }
                 }
-                key == "dn" -> displayName = decoded
-                key == "tr" -> trackers.add(decoded)
-                key == "ws" -> webSeeds.add(decoded)
-                (key == "xs" || key == "as") &&
-                    (decoded.startsWith("http://", ignoreCase = true) ||
-                        decoded.startsWith("https://", ignoreCase = true)) -> {
-                    torrentSources.add(decoded)
+                key == "dn" -> {
+                    val decodedDn = FilenameResolver.decodeMagnetDisplayName(rawVal)
+                    if (decodedDn.isNotBlank()) {
+                        displayName = decodedDn
+                    }
                 }
-                key == "xl" -> exactLength = decoded.toLongOrNull() ?: -1L
+                key == "tr" -> {
+                    val trUrl = FilenameResolver.decodeMagnetUrlParam(rawVal)
+                    if (trUrl.isNotBlank()) trackers.add(trUrl)
+                }
+                key == "ws" -> {
+                    val wsUrl = FilenameResolver.decodeMagnetUrlParam(rawVal)
+                    if (wsUrl.isNotBlank()) webSeeds.add(wsUrl)
+                }
+                (key == "xs" || key == "as") -> {
+                    val srcUrl = FilenameResolver.decodeMagnetUrlParam(rawVal)
+                    if (srcUrl.startsWith("http://", ignoreCase = true) ||
+                        srcUrl.startsWith("https://", ignoreCase = true) ||
+                        srcUrl.startsWith("file://", ignoreCase = true) ||
+                        srcUrl.startsWith("content://", ignoreCase = true)
+                    ) {
+                        torrentSources.add(srcUrl)
+                    }
+                }
+                key == "xl" -> {
+                    exactLength = FilenameResolver.decodeMagnetUrlParam(rawVal).toLongOrNull() ?: -1L
+                }
             }
         }
 
         if (infoHash.length != 40) {
-            infoHash = sha1Hex(magnetUri.toByteArray(StandardCharsets.UTF_8))
+            if (sawBtmhOnly) {
+                throw IllegalArgumentException("Unsupported magnet format: BitTorrent v2 (urn:btmh) without v1 (urn:btih) info-hash is not supported")
+            }
+            throw IllegalArgumentException("Invalid or missing BitTorrent v1 info-hash (xt=urn:btih:) in magnet link")
         }
 
         return DetailedMagnetParams(
@@ -766,13 +822,68 @@ class TorrentDownloadManager(
             repository.updateStatus(activeItem.id, DownloadStatus.DOWNLOADING)
 
             val sourceUri = activeItem.magnetUri ?: activeItem.url
-            val extMeta = resolveExtendedTorrentMetadata(sourceUri)
+            val resolvedExtMeta = resolveExtendedTorrentMetadata(sourceUri)
                 ?: throw IOException("Could not fetch torrent metadata from magnet/torrent or swarm peers")
-            val meta = extMeta.metadata
 
-            if (extMeta.validatedEntries.isEmpty()) {
+            if (!resolvedExtMeta.hasResolvedMetadata) {
+                val m = resolvedExtMeta.metadata
+                val reason = when {
+                    m.swarmMeasured && m.peers <= 0 && m.seeds <= 0 ->
+                        "Empty BitTorrent swarm (0 seeds, 0 peers) and no WebSeed or .torrent metadata source available"
+                    m.swarmMeasured && m.peers > 0 ->
+                        "Connected swarm peers did not provide BEP-9 (ut_metadata) torrent metadata"
+                    else ->
+                        "Could not resolve magnet metadata: trackers unreachable and DHT is not supported by this client"
+                }
+                throw IOException(reason)
+            }
+
+            if (resolvedExtMeta.validatedEntries.isEmpty()) {
                 throw IOException("Torrent metadata contains no valid files")
             }
+
+            val requestedRootName = activeItem.filename.ifBlank { resolvedExtMeta.metadata.name }
+            val baseSaveDir = File(activeItem.savePath)
+            val torrentFolder = TorrentPathSafety.allocateSafeJobRoot(
+                baseDownloadDir = baseSaveDir,
+                rawTorrentName = requestedRootName,
+                infoHashHex = resolvedExtMeta.metadata.hash
+            )
+            val resolvedFolderName = torrentFolder.name
+
+            // If this is a single-file torrent and the user provided a custom filename, honor it for the inner file too
+            // while keeping originalPathComponents intact for WebSeed URL resolution.
+            val extMeta = if (resolvedExtMeta.validatedEntries.size == 1) {
+                val origEntry = resolvedExtMeta.validatedEntries[0]
+                val origFile = resolvedExtMeta.metadata.files[0]
+                val effectiveInnerName = FilenameResolver.resolveEffectiveFilename(
+                    userEnteredFilename = activeItem.filename,
+                    serverOrMetadataFilename = origEntry.name,
+                    urlFallbackFilename = null,
+                    defaultPrefix = "Torrent"
+                )
+                val validatedInner = runCatching { TorrentPathSafety.validateComponent(effectiveInnerName) }
+                    .getOrDefault(origEntry.name)
+                if (validatedInner != origEntry.name) {
+                    val updatedEntry = origEntry.copy(
+                        name = validatedInner,
+                        relativePath = validatedInner
+                    )
+                    val updatedFile = origFile.copy(
+                        name = validatedInner,
+                        path = validatedInner
+                    )
+                    resolvedExtMeta.copy(
+                        metadata = resolvedExtMeta.metadata.copy(files = listOf(updatedFile)),
+                        validatedEntries = listOf(updatedEntry)
+                    )
+                } else {
+                    resolvedExtMeta
+                }
+            } else {
+                resolvedExtMeta
+            }
+            val meta = extMeta.metadata
 
             val selectedIndices = activeItem.selectedFiles?.takeIf { it.isNotEmpty() }?.toSet()
                 ?: meta.files.filter { it.isSelected }.map { it.index }.toSet().ifEmpty {
@@ -785,14 +896,6 @@ class TorrentDownloadManager(
             val effectiveSelectedIndices = filesToDownload.map { it.index }.toSet()
 
             val expectedTotal = filesToDownload.sumOf { it.size }
-            val baseSaveDir = File(activeItem.savePath)
-            val requestedRootName = activeItem.filename.ifBlank { meta.name }
-            val torrentFolder = TorrentPathSafety.allocateSafeJobRoot(
-                baseDownloadDir = baseSaveDir,
-                rawTorrentName = requestedRootName,
-                infoHashHex = meta.hash
-            )
-            val resolvedFolderName = torrentFolder.name
 
             val liveSeeds = meta.seeds
             val livePeers = meta.peers
@@ -896,8 +999,8 @@ class TorrentDownloadManager(
                 .filter { it.exists() && it.isFile }
                 .maxByOrNull { it.length() }
 
-            val detectedMime = primaryMediaFile?.takeIf { it.length() > 0L }?.let {
-                MediaAssetHelper.detectActualMimeType(it, fallbackIsVideo = true)
+            val detectedMime = primaryMediaFile?.let {
+                MediaAssetHelper.getMimeTypeForAnyFile(it)
             } ?: "application/x-bittorrent"
 
             val latestInDb = repository.getDownloadById(activeItem.id) ?: activeItem
@@ -962,7 +1065,36 @@ class TorrentDownloadManager(
         var lastUpdate = System.currentTimeMillis()
         var lastBytes = 0L
 
-        for (fileInfo in filesToDownload) {
+        val entryByIndex = extMeta.validatedEntries.associateBy { it.index }
+
+        // If selected files share a piece boundary with unselected neighbor files, include those neighbor files in staging
+        // so SHA-1 piece verification across file boundaries succeeds without promoting unselected files.
+        val requiredStagingFiles = buildList {
+            addAll(filesToDownload)
+            if (meta.hasPieceHashes && extMeta.pieceHashes.isNotEmpty() && selectedIndices.size < extMeta.validatedEntries.size) {
+                val pieceLen = meta.pieceSize.coerceAtLeast(1).toLong()
+                val boundaryPieces = mutableSetOf<Int>()
+                for (f in filesToDownload) {
+                    val e = entryByIndex[f.index] ?: continue
+                    if (e.length <= 0L) continue
+                    val firstP = (e.offsetInTorrent / pieceLen).toInt()
+                    val lastP = ((e.offsetInTorrent + e.length - 1L) / pieceLen).toInt()
+                    boundaryPieces.add(firstP)
+                    boundaryPieces.add(lastP)
+                }
+                for (e in extMeta.validatedEntries) {
+                    if (e.index in selectedIndices || e.length <= 0L) continue
+                    val firstP = (e.offsetInTorrent / pieceLen).toInt()
+                    val lastP = ((e.offsetInTorrent + e.length - 1L) / pieceLen).toInt()
+                    if ((firstP..lastP).any { it in boundaryPieces }) {
+                        meta.files.firstOrNull { it.index == e.index }?.let { add(it) }
+                    }
+                }
+            }
+        }.distinctBy { it.index }
+
+        for (fileInfo in requiredStagingFiles) {
+            val isUserSelected = fileInfo.index in selectedIndices
             ensureActive()
             // Validate containment of both final destination and staging destination before any I/O
             TorrentPathSafety.resolveContainedFile(torrentFolder, fileInfo.path)
@@ -981,37 +1113,21 @@ class TorrentDownloadManager(
 
             // If staged file already has exact expected length from a prior interrupted attempt, reuse it for verification
             if (stagedFile.exists() && stagedFile.length() == fileInfo.size && fileInfo.size > 0L) {
-                totalDownloaded += fileInfo.size
+                if (isUserSelected) {
+                    totalDownloaded += fileInfo.size
+                }
                 continue
             }
 
             var fileOk = false
-            val candidateUrls = buildList {
-                directFileUrlMap[fileInfo.path]?.let { add(it) }
-                directFileUrlMap[fileInfo.name]?.let { add(it) }
-
-                for (seed in webSeeds) {
-                    if (seed.endsWith(".torrent", ignoreCase = true)) continue
-                    val httpsSeed = if (seed.startsWith("http://archive.org/")) {
-                        seed.replaceFirst("http://", "https://")
-                    } else {
-                        seed
-                    }
-                    val cleanSeed = httpsSeed.trimEnd('/')
-                    if (meta.files.size == 1 && !httpsSeed.endsWith("/")) {
-                        add(httpsSeed)
-                    }
-                    if (cleanSeed.endsWith(fileInfo.name, ignoreCase = true)) {
-                        add(httpsSeed)
-                    }
-                    val encRoot = URLEncoder.encode(meta.name, "UTF-8").replace("+", "%20")
-                    val encPath = fileInfo.path.split("/").joinToString("/") {
-                        URLEncoder.encode(it, "UTF-8").replace("+", "%20")
-                    }
-                    add("$cleanSeed/$encRoot/$encPath")
-                    add("$cleanSeed/$encPath")
-                }
-            }.distinct()
+            val validatedEntry = entryByIndex[fileInfo.index]
+            val candidateUrls = buildWebSeedCandidateUrls(
+                extMeta = extMeta,
+                fileInfo = fileInfo,
+                validatedEntry = validatedEntry,
+                webSeeds = webSeeds,
+                directFileUrlMap = directFileUrlMap
+            )
 
             var lastCandidateFailure: String? = null
 
@@ -1059,16 +1175,17 @@ class TorrentDownloadManager(
                                         )
                                     }
                                     fos.write(buf, 0, read)
-                                    val currentTotal = totalDownloaded + fileBytesWritten
-
-                                    val now = System.currentTimeMillis()
-                                    val elapsed = now - lastUpdate
-                                    if (elapsed >= 350 && totalExpected > 0L) {
-                                        val speed = ((currentTotal - lastBytes) * 1000L) / elapsed
-                                        val pct = ((currentTotal * 100L) / totalExpected).toInt().coerceIn(1, 99)
-                                        onProgress(currentTotal, totalExpected, pct, speed, meta.peers, meta.seeds, 0L)
-                                        lastUpdate = now
-                                        lastBytes = currentTotal
+                                    if (isUserSelected) {
+                                        val currentTotal = totalDownloaded + fileBytesWritten
+                                        val now = System.currentTimeMillis()
+                                        val elapsed = now - lastUpdate
+                                        if (elapsed >= 350 && totalExpected > 0L) {
+                                            val speed = ((currentTotal - lastBytes) * 1000L) / elapsed
+                                            val pct = ((currentTotal * 100L) / totalExpected).toInt().coerceIn(1, 99)
+                                            onProgress(currentTotal, totalExpected, pct, speed, meta.peers, meta.seeds, 0L)
+                                            lastUpdate = now
+                                            lastBytes = currentTotal
+                                        }
                                     }
                                 }
                                 fos.flush()
@@ -1086,18 +1203,20 @@ class TorrentDownloadManager(
                             lastCandidateFailure = "WebSeed returned empty body for unknown-size file ${fileInfo.path}"
                         } else {
                             fileOk = true
-                            totalDownloaded += actualLen
-                            val effectiveTotal = totalExpected.coerceAtLeast(totalDownloaded).coerceAtLeast(1L)
-                            val pct = ((totalDownloaded * 100L) / effectiveTotal).toInt().coerceIn(1, 99)
-                            onProgress(
-                                totalDownloaded,
-                                effectiveTotal,
-                                pct,
-                                0L,
-                                meta.peers,
-                                meta.seeds,
-                                0L
-                            )
+                            if (isUserSelected) {
+                                totalDownloaded += actualLen
+                                val effectiveTotal = totalExpected.coerceAtLeast(totalDownloaded).coerceAtLeast(1L)
+                                val pct = ((totalDownloaded * 100L) / effectiveTotal).toInt().coerceIn(1, 99)
+                                onProgress(
+                                    totalDownloaded,
+                                    effectiveTotal,
+                                    pct,
+                                    0L,
+                                    meta.peers,
+                                    meta.seeds,
+                                    0L
+                                )
+                            }
                         }
                     }
                     if (fileOk) break
@@ -1135,6 +1254,77 @@ class TorrentDownloadManager(
         }
 
         true
+    }
+
+    internal fun buildWebSeedCandidateUrls(
+        extMeta: ExtendedTorrentMeta,
+        fileInfo: TorrentFileInfo,
+        validatedEntry: TorrentPathSafety.ValidatedTorrentEntry?,
+        webSeeds: List<String>,
+        directFileUrlMap: Map<String, String>
+    ): List<String> {
+        val meta = extMeta.metadata
+        val origRoot = extMeta.originalRootName.ifBlank { meta.name }
+        val origRelPath = validatedEntry?.originalPathComponents?.takeIf { it.isNotEmpty() }?.joinToString("/")
+            ?: fileInfo.path
+        val origFileName = validatedEntry?.originalPathComponents?.lastOrNull() ?: fileInfo.name
+
+        val encOrigRoot = FilenameResolver.encodeUriPathSegment(origRoot, encodePlus = true)
+        val encNormRoot = FilenameResolver.encodeUriPathSegment(meta.name, encodePlus = true)
+
+        val encOrigPath = FilenameResolver.encodeUriRelativePath(origRelPath, encodePlus = true)
+        val encOrigPathLiteralPlus = FilenameResolver.encodeUriRelativePath(origRelPath, encodePlus = false)
+        val encNormPath = FilenameResolver.encodeUriRelativePath(fileInfo.path, encodePlus = true)
+
+        return buildList {
+            directFileUrlMap[origRelPath]?.let { add(it) }
+            directFileUrlMap[fileInfo.path]?.let { add(it) }
+            directFileUrlMap[origFileName]?.let { add(it) }
+            directFileUrlMap[fileInfo.name]?.let { add(it) }
+
+            for (seed in webSeeds) {
+                if (seed.endsWith(".torrent", ignoreCase = true)) continue
+                val httpsSeed = if (seed.startsWith("http://archive.org/")) {
+                    seed.replaceFirst("http://", "https://")
+                } else {
+                    seed
+                }
+                val cleanSeed = httpsSeed.trimEnd('/')
+                if (meta.files.size == 1) {
+                    if (!httpsSeed.endsWith("/")) {
+                        add(httpsSeed)
+                    }
+                    if (cleanSeed.endsWith(origFileName, ignoreCase = true) ||
+                        cleanSeed.endsWith(encOrigPath, ignoreCase = true)
+                    ) {
+                        add(httpsSeed)
+                    }
+                    add("$cleanSeed/$encOrigPath")
+                    if (encOrigPathLiteralPlus != encOrigPath) {
+                        add("$cleanSeed/$encOrigPathLiteralPlus")
+                    }
+                    if (encNormPath != encOrigPath) {
+                        add("$cleanSeed/$encNormPath")
+                    }
+                    add("$cleanSeed/$encOrigRoot/$encOrigPath")
+                } else {
+                    add("$cleanSeed/$encOrigRoot/$encOrigPath")
+                    if (encOrigPathLiteralPlus != encOrigPath) {
+                        add("$cleanSeed/$encOrigRoot/$encOrigPathLiteralPlus")
+                    }
+                    if (encNormRoot != encOrigRoot || encNormPath != encOrigPath) {
+                        add("$cleanSeed/$encNormRoot/$encNormPath")
+                    }
+                    add("$cleanSeed/$encOrigPath")
+                    if (encOrigPathLiteralPlus != encOrigPath) {
+                        add("$cleanSeed/$encOrigPathLiteralPlus")
+                    }
+                    if (encNormPath != encOrigPath) {
+                        add("$cleanSeed/$encNormPath")
+                    }
+                }
+            }
+        }.distinct()
     }
 
     /**
@@ -1221,8 +1411,56 @@ class TorrentDownloadManager(
         val completedPieces = ConcurrentHashMap.newKeySet<Int>()
         val totalSelectedBytes = filesToDownload.sumOf { it.size }.coerceAtLeast(1L)
         var downloadedBytes = 0L
+
+        // Pre-check existing staged files so already-verified pieces from a partial WebSeed or resumed run are reused
+        for (pieceIdx in neededPieces) {
+            val pieceStartGlobal = pieceIdx.toLong() * pieceLength.toLong()
+            val thisPieceSize = minOf(pieceLength.toLong(), totalTorrentSize - pieceStartGlobal).toInt()
+            if (thisPieceSize <= 0) continue
+            val pieceEndGlobal = pieceStartGlobal + thisPieceSize
+            val pieceBuf = ByteArray(thisPieceSize)
+            var allSlicesAvailable = true
+            var selectedBytesInPiece = 0L
+            for (span in spans) {
+                val overlapStart = maxOf(pieceStartGlobal, span.startOffset)
+                val overlapEnd = minOf(pieceEndGlobal, span.endOffset)
+                if (overlapEnd > overlapStart) {
+                    val staged = TorrentPathSafety.resolveStagingFile(torrentFolder, span.entry.index)
+                    val requiredEndInFile = overlapEnd - span.startOffset
+                    if (!staged.exists() || staged.length() < requiredEndInFile) {
+                        allSlicesAvailable = false
+                        break
+                    }
+                    val readLen = (overlapEnd - overlapStart).toInt()
+                    val dstOffset = (overlapStart - pieceStartGlobal).toInt()
+                    val ok = runCatching {
+                        RandomAccessFile(staged, "r").use { raf ->
+                            raf.seek(overlapStart - span.startOffset)
+                            raf.readFully(pieceBuf, dstOffset, readLen)
+                        }
+                        true
+                    }.getOrDefault(false)
+                    if (!ok) {
+                        allSlicesAvailable = false
+                        break
+                    }
+                    if (span.selected) {
+                        selectedBytesInPiece += readLen
+                    }
+                }
+            }
+            if (allSlicesAvailable) {
+                val sha1 = MessageDigest.getInstance("SHA-1").digest(pieceBuf)
+                if (sha1.contentEquals(extMeta.pieceHashes[pieceIdx])) {
+                    completedPieces.add(pieceIdx)
+                    downloadedBytes += selectedBytesInPiece
+                }
+            }
+        }
+        if (completedPieces.size >= neededPieces.size) return@coroutineScope true
+
         var lastReportTime = System.currentTimeMillis()
-        var lastReportedBytes = 0L
+        var lastReportedBytes = downloadedBytes
         val connectedPeersCount = AtomicInteger(0)
 
         for (peer in peers.take(12)) {
@@ -1355,10 +1593,11 @@ class TorrentDownloadManager(
                                 continue
                             }
 
-                            // Write verified piece bytes into matching selected staging files
+                            // Write verified piece bytes into matching staging files (including boundary slices of
+                            // unselected neighbor files so verifyTorrentFiles can verify cross-file boundary pieces,
+                            // while promoteStagedFiles only promotes selectedIndices).
                             val pieceEndGlobal = pieceStartGlobal + thisPieceSize
                             for (span in spans) {
-                                if (!span.selected) continue
                                 val overlapStart = maxOf(pieceStartGlobal, span.startOffset)
                                 val overlapEnd = minOf(pieceEndGlobal, span.endOffset)
                                 if (overlapEnd > overlapStart) {
@@ -1369,7 +1608,9 @@ class TorrentDownloadManager(
                                         val srcOffset = (overlapStart - pieceStartGlobal).toInt()
                                         val writeLen = (overlapEnd - overlapStart).toInt()
                                         raf.write(pieceBuffer, srcOffset, writeLen)
-                                        downloadedBytes += writeLen
+                                        if (span.selected) {
+                                            downloadedBytes += writeLen
+                                        }
                                     }
                                 }
                             }
@@ -1711,7 +1952,8 @@ class TorrentDownloadManager(
         bytes: ByteArray,
         fallbackHash: String = sha1Hex(bytes),
         extraTrackers: List<String> = emptyList(),
-        extraWebSeeds: List<String> = emptyList()
+        extraWebSeeds: List<String> = emptyList(),
+        expectedInfoHash: String? = null
     ): ExtendedTorrentMeta {
         val decoder = SimpleBencodeDecoder(bytes)
         val root = decoder.readValue() as? Map<*, *>
@@ -1719,25 +1961,34 @@ class TorrentDownloadManager(
         val info = root["info"] as? Map<*, *>
             ?: throw IOException("Missing info dictionary")
 
-        val computedHash = decoder.infoSliceHashHex ?: fallbackHash
+        val computedHash = (decoder.infoSliceHashHex ?: fallbackHash).lowercase(Locale.US)
+        if (!expectedInfoHash.isNullOrBlank() && computedHash != expectedInfoHash.lowercase(Locale.US)) {
+            throw SecurityException(
+                "Torrent metadata info-hash ($computedHash) does not match magnet info-hash (${expectedInfoHash.lowercase(Locale.US)})"
+            )
+        }
 
         val trackers = mutableListOf<String>()
-        (root["announce"] as? ByteArray)?.toString(StandardCharsets.UTF_8)?.let { trackers.add(it) }
+        (root["announce"] as? ByteArray)?.let { trackers.add(FilenameResolver.decodeTorrentBytesToString(it)) }
         (root["announce-list"] as? List<*>)?.forEach { tier ->
             (tier as? List<*>)?.forEach { tr ->
-                (tr as? ByteArray)?.toString(StandardCharsets.UTF_8)?.let { trackers.add(it) }
+                (tr as? ByteArray)?.let { trackers.add(FilenameResolver.decodeTorrentBytesToString(it)) }
             }
         }
         trackers.addAll(extraTrackers)
 
         val webSeeds = mutableListOf<String>()
         when (val urlList = root["url-list"]) {
-            is ByteArray -> webSeeds.add(urlList.toString(StandardCharsets.UTF_8))
-            is List<*> -> urlList.forEach { (it as? ByteArray)?.toString(StandardCharsets.UTF_8)?.let(webSeeds::add) }
+            is ByteArray -> webSeeds.add(FilenameResolver.decodeTorrentBytesToString(urlList))
+            is List<*> -> urlList.forEach {
+                (it as? ByteArray)?.let { b -> webSeeds.add(FilenameResolver.decodeTorrentBytesToString(b)) }
+            }
         }
         when (val httpSeeds = root["httpseeds"]) {
-            is ByteArray -> webSeeds.add(httpSeeds.toString(StandardCharsets.UTF_8))
-            is List<*> -> httpSeeds.forEach { (it as? ByteArray)?.toString(StandardCharsets.UTF_8)?.let(webSeeds::add) }
+            is ByteArray -> webSeeds.add(FilenameResolver.decodeTorrentBytesToString(httpSeeds))
+            is List<*> -> httpSeeds.forEach {
+                (it as? ByteArray)?.let { b -> webSeeds.add(FilenameResolver.decodeTorrentBytesToString(b)) }
+            }
         }
         webSeeds.addAll(extraWebSeeds)
 
@@ -1755,9 +2006,11 @@ class TorrentDownloadManager(
         trackers: List<String>,
         webSeeds: List<String>
     ): ExtendedTorrentMeta {
-        val rawName = (info["name.utf-8"] as? ByteArray)?.toString(StandardCharsets.UTF_8)
-            ?: (info["name"] as? ByteArray)?.toString(StandardCharsets.UTF_8)
+        val rawNameBytes = (info["name.utf-8"] as? ByteArray) ?: (info["name"] as? ByteArray)
+        val rawName = rawNameBytes?.let { FilenameResolver.decodeTorrentBytesToString(it) }
+            ?.takeIf { it.isNotBlank() }
             ?: "Torrent_$infoHashHex"
+        val cleanOriginalRoot = FilenameResolver.stripBidiControls(rawName).trim().ifBlank { "Torrent_$infoHashHex" }
 
         val pieceLength = ((info["piece length"] as? Long) ?: 262144L).toInt()
         if (pieceLength <= 0) {
@@ -1779,7 +2032,7 @@ class TorrentDownloadManager(
 
         if (multiFiles != null && multiFiles.isNotEmpty()) {
             // Also validate that the root directory name is not a traversal vector
-            val safeDisplayName = TorrentPathSafety.sanitizeRootName(rawName)
+            val safeDisplayName = TorrentPathSafety.sanitizeRootName(cleanOriginalRoot)
             var idx = 0
             for (entry in multiFiles) {
                 val fMap = entry as? Map<*, *>
@@ -1792,8 +2045,9 @@ class TorrentDownloadManager(
                     throw SecurityException("Empty path list in multi-file torrent metadata")
                 }
                 val pathParts = pathList.map { elem ->
-                    (elem as? ByteArray)?.toString(StandardCharsets.UTF_8)
+                    val bytes = elem as? ByteArray
                         ?: throw SecurityException("Non-string path component in torrent metadata")
+                    FilenameResolver.decodeTorrentBytesToString(bytes)
                 }
                 rawEntries.add(
                     TorrentPathSafety.RawTorrentEntry(
@@ -1859,18 +2113,20 @@ class TorrentDownloadManager(
                 trackers = trackers,
                 webSeeds = webSeeds,
                 pieceHashes = pieceHashes,
-                rawPieceHashesBytes = rawPieces
+                rawPieceHashesBytes = rawPieces,
+                originalRootName = cleanOriginalRoot,
+                hasResolvedMetadata = true
             )
         } else {
-            // Single-file torrent: validate `rawName` strictly as a single path component!
-            val validatedSingleName = TorrentPathSafety.validateComponent(rawName)
+            // Single-file torrent: validate `cleanOriginalRoot` strictly as a single path component!
+            val validatedSingleName = TorrentPathSafety.validateComponent(cleanOriginalRoot)
             val singleLen = (info["length"] as? Long)
                 ?: throw SecurityException("Missing length in single-file torrent metadata")
             val validatedEntries = TorrentPathSafety.validateTorrentEntries(
                 listOf(
                     TorrentPathSafety.RawTorrentEntry(
                         index = 0,
-                        pathComponents = listOf(validatedSingleName),
+                        pathComponents = listOf(cleanOriginalRoot),
                         length = singleLen
                     )
                 )
@@ -1903,7 +2159,9 @@ class TorrentDownloadManager(
                 trackers = trackers,
                 webSeeds = webSeeds,
                 pieceHashes = pieceHashes,
-                rawPieceHashesBytes = rawPieces
+                rawPieceHashesBytes = rawPieces,
+                originalRootName = cleanOriginalRoot,
+                hasResolvedMetadata = true
             )
         }
     }
@@ -1915,57 +2173,91 @@ class TorrentDownloadManager(
         var infoSliceHashHex: String? = null
             private set
 
+        private var depth: Int = 0
+        private var dictDepth: Int = 0
+
+        companion object {
+            private const val MAX_BENCODE_DEPTH = 64
+        }
+
         fun readValue(): Any? {
-            if (position >= data.size) return null
-            return when (data[position].toInt().toChar()) {
-                'i' -> {
-                    position++
-                    val end = indexOf('e'.code.toByte(), position)
-                    val numStr = String(data, position, end - position, StandardCharsets.US_ASCII)
-                    position = end + 1
-                    numStr.toLongOrNull() ?: 0L
-                }
-                'l' -> {
-                    position++
-                    val list = mutableListOf<Any?>()
-                    while (position < data.size && data[position].toInt().toChar() != 'e') {
-                        list.add(readValue())
-                    }
-                    position++
-                    list
-                }
-                'd' -> {
-                    position++
-                    val map = LinkedHashMap<String, Any?>()
-                    while (position < data.size && data[position].toInt().toChar() != 'e') {
-                        val keyBytes = readByteString()
-                        val key = String(keyBytes, StandardCharsets.UTF_8)
-                        val valStart = position
-                        val value = readValue()
-                        val valEnd = position
-                        if (key == "info" && infoSliceHashHex == null && valEnd > valStart) {
-                            val digest = MessageDigest.getInstance("SHA-1")
-                                .digest(data.copyOfRange(valStart, valEnd))
-                            infoSliceHashHex = digest.joinToString("") { "%02x".format(it) }
+            if (position >= data.size) throw IOException("Unexpected end of bencoded input")
+            if (depth >= MAX_BENCODE_DEPTH) {
+                throw SecurityException("Bencoded structure exceeds maximum nesting depth ($MAX_BENCODE_DEPTH)")
+            }
+            depth++
+            try {
+                return when (val ch = data[position].toInt().toChar()) {
+                    'i' -> {
+                        position++
+                        val end = indexOf('e'.code.toByte(), position)
+                        if (end < 0 || end >= data.size) {
+                            throw IOException("Unterminated integer in bencoded data")
                         }
-                        map[key] = value
+                        val numStr = String(data, position, end - position, StandardCharsets.US_ASCII)
+                        position = end + 1
+                        numStr.toLongOrNull() ?: throw IOException("Invalid integer '$numStr' in bencoded data")
                     }
-                    position++
-                    map
+                    'l' -> {
+                        position++
+                        val list = mutableListOf<Any?>()
+                        while (position < data.size && data[position].toInt().toChar() != 'e') {
+                            list.add(readValue())
+                        }
+                        if (position >= data.size || data[position].toInt().toChar() != 'e') {
+                            throw IOException("Unterminated list in bencoded data")
+                        }
+                        position++
+                        list
+                    }
+                    'd' -> {
+                        position++
+                        dictDepth++
+                        val currentDictDepth = dictDepth
+                        try {
+                            val map = LinkedHashMap<String, Any?>()
+                            while (position < data.size && data[position].toInt().toChar() != 'e') {
+                                val keyBytes = readByteString()
+                                val key = String(keyBytes, StandardCharsets.UTF_8)
+                                val valStart = position
+                                val value = readValue()
+                                val valEnd = position
+                                if (currentDictDepth == 1 && key == "info" && infoSliceHashHex == null && valEnd > valStart) {
+                                    val digest = MessageDigest.getInstance("SHA-1")
+                                        .digest(data.copyOfRange(valStart, valEnd))
+                                    infoSliceHashHex = digest.joinToString("") { "%02x".format(it) }
+                                }
+                                map[key] = value
+                            }
+                            if (position >= data.size || data[position].toInt().toChar() != 'e') {
+                                throw IOException("Unterminated dictionary in bencoded data")
+                            }
+                            position++
+                            map
+                        } finally {
+                            dictDepth--
+                        }
+                    }
+                    in '0'..'9' -> readByteString()
+                    else -> throw IOException("Unexpected bencode token '$ch' at offset $position")
                 }
-                in '0'..'9' -> readByteString()
-                else -> {
-                    position++
-                    null
-                }
+            } finally {
+                depth--
             }
         }
 
         private fun readByteString(): ByteArray {
             val colon = indexOf(':'.code.toByte(), position)
-            val len = String(data, position, colon - position, StandardCharsets.US_ASCII).toIntOrNull() ?: 0
+            if (colon <= position || colon >= data.size) {
+                throw IOException("Malformed byte string length in bencoded data at offset $position")
+            }
+            val len = String(data, position, colon - position, StandardCharsets.US_ASCII).toIntOrNull()
+                ?: throw IOException("Invalid byte string length in bencoded data")
+            if (len < 0 || colon + 1 + len > data.size) {
+                throw IOException("Truncated byte string in bencoded data (declared $len bytes)")
+            }
             position = colon + 1
-            val end = (position + len).coerceAtMost(data.size)
+            val end = position + len
             val slice = data.copyOfRange(position, end)
             position = end
             return slice
@@ -1975,7 +2267,7 @@ class TorrentDownloadManager(
             for (i in start until data.size) {
                 if (data[i] == target) return i
             }
-            return data.size
+            return -1
         }
     }
 
@@ -1998,7 +2290,7 @@ class TorrentDownloadManager(
         return out
     }
 
-    private fun normalizeInfoHash(rawHash: String): String {
+    internal fun normalizeInfoHash(rawHash: String): String {
         val cleaned = rawHash.trim()
         if (cleaned.length == 40 && cleaned.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) {
             return cleaned.lowercase(Locale.US)
@@ -2008,9 +2300,13 @@ class TorrentDownloadManager(
             var buffer = 0
             var bitsLeft = 0
             val out = ByteArrayOutputStream(20)
+            var validBase32 = true
             for (ch in cleaned.uppercase(Locale.US)) {
                 val val5 = alphabet.indexOf(ch)
-                if (val5 < 0) break
+                if (val5 < 0) {
+                    validBase32 = false
+                    break
+                }
                 buffer = (buffer shl 5) or val5
                 bitsLeft += 5
                 if (bitsLeft >= 8) {
@@ -2019,11 +2315,11 @@ class TorrentDownloadManager(
                 }
             }
             val bytes = out.toByteArray()
-            if (bytes.size == 20) {
+            if (validBase32 && bytes.size == 20) {
                 return bytes.joinToString("") { "%02x".format(it) }
             }
         }
-        return sha1Hex(cleaned.toByteArray(StandardCharsets.UTF_8))
+        return ""
     }
 
     private fun sha1Hex(bytes: ByteArray): String {

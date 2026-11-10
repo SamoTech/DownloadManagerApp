@@ -30,6 +30,7 @@ import com.example.downloadmanager.model.DownloadType
 import com.example.downloadmanager.model.TorrentFileInfo
 import com.example.downloadmanager.model.VideoFormat
 import com.example.downloadmanager.service.DownloadService
+import com.example.downloadmanager.utils.FilenameResolver
 import com.example.downloadmanager.utils.UrlClassifier
 import com.google.android.material.checkbox.MaterialCheckBox
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -54,28 +55,46 @@ class AddDownloadActivity : AppCompatActivity() {
     private var selectedVideoFormat: VideoFormat? = null
     private var metadataExtractJob: Job? = null
     private var isUpdatingChipsProgrammatically = false
+    private var isSettingFilenameProgrammatically = false
+    private var userManuallyEditedFilename = false
     private val probeRequestToken = AtomicLong(0L)
 
     companion object {
         /**
-         * Normalizes and validates HTTP/HTTPS or magnet links, including extracting embedded URLs
-         * when a user pastes surrounding share text.
+         * Normalizes and validates HTTP/HTTPS, magnet, or local .torrent links, including extracting
+         * embedded URLs when a user pastes surrounding share text, while preserving raw Unicode/Arabic
+         * characters and spaces in magnet `dn=` parameters and file URLs.
          */
         fun normalizeAndValidateUrl(rawInput: String): String? {
-            val trimmed = rawInput.trim()
+            val trimmed = FilenameResolver.stripBidiControls(rawInput).trim()
             if (trimmed.isEmpty()) return null
 
-            // 1. Check for embedded magnet:? link
-            val magnetRegex = Regex(
-                "(magnet:\\?xt=urn:[a-zA-Z0-9]+:[a-zA-Z0-9\\-._~%&+=:/?#@!$'()*+,;]+)",
-                RegexOption.IGNORE_CASE
-            )
-            magnetRegex.find(trimmed)?.let { return it.value }
-            if (trimmed.startsWith("magnet:?", ignoreCase = true) && trimmed.contains("xt=urn:", ignoreCase = true)) {
+            // 1. Direct magnet:? link (parameters in any order, raw or percent-encoded Unicode dn=)
+            if (trimmed.startsWith("magnet:?", ignoreCase = true)) {
+                val singleLine = trimmed.lineSequence().firstOrNull()?.trim() ?: return null
+                return if (singleLine.contains("xt=", ignoreCase = true)) singleLine else null
+            }
+
+            // 2. Embedded magnet:? link inside pasted share text
+            val magnetIdx = trimmed.indexOf("magnet:?", ignoreCase = true)
+            if (magnetIdx >= 0) {
+                val sub = trimmed.substring(magnetIdx)
+                val line = sub.lineSequence().firstOrNull()?.trim() ?: ""
+                val token = line.substringBefore('"').substringBefore('\'').substringBefore('<').substringBefore('>').trim()
+                if (token.contains("xt=", ignoreCase = true)) {
+                    return token
+                }
+            }
+
+            // 3. Local .torrent URI or path
+            if (trimmed.startsWith("content://", ignoreCase = true) ||
+                trimmed.startsWith("file://", ignoreCase = true) ||
+                (trimmed.startsWith("/") && trimmed.lowercase(Locale.US).endsWith(".torrent"))
+            ) {
                 return trimmed
             }
 
-            // 2. Delegate HTTP/HTTPS normalization
+            // 4. Delegate HTTP/HTTPS normalization
             return VideoDownloadManager.normalizeHttpUrl(trimmed)
         }
     }
@@ -167,6 +186,16 @@ class AddDownloadActivity : AppCompatActivity() {
                 Toast.makeText(this, R.string.clipboard_empty_or_invalid, Toast.LENGTH_SHORT).show()
             }
         }
+
+        binding.etFilename.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                if (!isSettingFilenameProgrammatically) {
+                    userManuallyEditedFilename = !s.isNullOrBlank()
+                }
+            }
+        })
 
         binding.etUrl.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -265,15 +294,32 @@ class AddDownloadActivity : AppCompatActivity() {
         }
     }
 
+    private fun setSuggestedFilenameIfNotEdited(suggested: String) {
+        val clean = FilenameResolver.sanitizeSingleFilename(suggested, fallback = "")
+        if (clean.isBlank()) return
+        val current = binding.etFilename.text?.toString()?.trim().orEmpty()
+        if (userManuallyEditedFilename && current.isNotEmpty()) {
+            return
+        }
+        isSettingFilenameProgrammatically = true
+        try {
+            binding.etFilename.setText(clean)
+        } finally {
+            isSettingFilenameProgrammatically = false
+        }
+    }
+
     private fun applySampleMusicTrack(track: MusicDownloadManager.SampleTrack) {
+        userManuallyEditedFilename = false
         switchDownloadType(DownloadType.MUSIC)
         binding.etUrl.setText(track.url)
-        binding.etFilename.setText("${track.title}.mp3")
+        setSuggestedFilenameIfNotEdited("${track.title}.mp3")
         binding.etArtist.setText(track.artist)
         binding.tvDetectedMusicPlatform.text = "Detected: ${track.platform}"
     }
 
     private fun applySampleMagnet(magnetUri: String) {
+        userManuallyEditedFilename = false
         switchDownloadType(DownloadType.MAGNET)
         binding.etUrl.setText(magnetUri)
         val token = probeRequestToken.incrementAndGet()
@@ -296,7 +342,11 @@ class AddDownloadActivity : AppCompatActivity() {
 
         val presetTitle = intent.getStringExtra("preset_title") ?: intent.getStringExtra("title")
         if (!presetTitle.isNullOrBlank()) {
-            binding.etFilename.setText(presetTitle)
+            val cleanPreset = FilenameResolver.sanitizeSingleFilename(presetTitle, fallback = presetTitle)
+            isSettingFilenameProgrammatically = true
+            binding.etFilename.setText(cleanPreset)
+            isSettingFilenameProgrammatically = false
+            userManuallyEditedFilename = true
         }
 
         val incomingUrl = intent.getStringExtra("preset_url")
@@ -378,7 +428,7 @@ class AddDownloadActivity : AppCompatActivity() {
         if (binding.etFilename.text.isNullOrBlank()) {
             val quickName = downloadManager.getFilenameFromUrl(valid)
             if (!quickName.startsWith("download_")) {
-                binding.etFilename.setText(quickName)
+                setSuggestedFilenameIfNotEdited(quickName)
             }
         }
 
@@ -391,7 +441,7 @@ class AddDownloadActivity : AppCompatActivity() {
                 DownloadType.MUSIC -> extractMusicInfo(valid, token)
                 DownloadType.DIRECT -> {
                     if (isProbeStillCurrent(token, valid) && binding.etFilename.text.isNullOrBlank()) {
-                        binding.etFilename.setText(downloadManager.getFilenameFromUrl(valid))
+                        setSuggestedFilenameIfNotEdited(downloadManager.getFilenameFromUrl(valid))
                     }
                 }
             }
@@ -406,7 +456,7 @@ class AddDownloadActivity : AppCompatActivity() {
 
             torrentDownloadManager.parseMagnetLink(url)?.let { magnetInfo ->
                 if (isProbeStillCurrent(token, url) && binding.etFilename.text.isNullOrBlank()) {
-                    binding.etFilename.setText(magnetInfo.displayName)
+                    setSuggestedFilenameIfNotEdited(magnetInfo.displayName)
                 }
             }
 
@@ -419,13 +469,20 @@ class AddDownloadActivity : AppCompatActivity() {
                     binding.etUrl.error = se.message
                 }
                 return@launch
+            } catch (iae: IllegalArgumentException) {
+                if (isProbeStillCurrent(token, url)) {
+                    binding.progressBarTorrentFetch.visibility = View.GONE
+                    binding.tvTorrentMetaSummary.text = iae.message ?: "Unsupported or invalid magnet link"
+                    binding.etUrl.error = iae.message
+                }
+                return@launch
             }
 
             if (!isProbeStillCurrent(token, url)) return@launch
             binding.progressBarTorrentFetch.visibility = View.GONE
 
             if (metadata != null && metadata.files.isNotEmpty()) {
-                binding.etFilename.setText(metadata.name)
+                setSuggestedFilenameIfNotEdited(metadata.name)
                 val sizeLabel = formatBytes(metadata.totalSize)
                 val seedsLabel = if (metadata.seeds >= 0) {
                     getString(R.string.seeds, metadata.seeds)
@@ -474,17 +531,11 @@ class AddDownloadActivity : AppCompatActivity() {
             binding.tvDetectedVideoPlatform.text =
                 "Detected: $platform • ${streamInfo.video.title} (${streamInfo.formats.size} formats)"
 
-            val currentName = binding.etFilename.text?.toString()?.trim().orEmpty()
-            if (currentName.isEmpty() || currentName == "watch" || currentName.startsWith("download_") ||
-                currentName.length <= 16
-            ) {
-                val safeTitle = streamInfo.video.title
-                    .replace(Regex("[\\\\/:*?\"<>|]"), "_")
-                    .trim()
-                if (safeTitle.isNotEmpty()) {
-                    val ext = if (binding.rbAudioOnly.isChecked || binding.cbExtractAudio.isChecked) ".m4a" else ".mp4"
-                    binding.etFilename.setText("${safeTitle.take(80)}$ext")
-                }
+            val safeTitle = FilenameResolver.sanitizeSingleFilename(streamInfo.video.title, fallback = "").trim()
+            if (safeTitle.isNotEmpty()) {
+                val ext = if (binding.rbAudioOnly.isChecked || binding.cbExtractAudio.isChecked) ".m4a" else ".mp4"
+                val suggested = if (safeTitle.lowercase(Locale.US).endsWith(ext)) safeTitle else "${safeTitle.take(80)}$ext"
+                setSuggestedFilenameIfNotEdited(suggested)
             }
             selectedVideoFormat = videoDownloadManager.selectBestFormat(streamInfo.formats, getSelectedVideoQuality())
         }
@@ -527,15 +578,11 @@ class AddDownloadActivity : AppCompatActivity() {
             binding.tvDetectedMusicPlatform.text =
                 "Detected: ${trackInfo.platform}$provenanceNote • ${trackInfo.title}"
 
-            val currentName = binding.etFilename.text?.toString()?.trim().orEmpty()
-            if (currentName.isEmpty() || currentName == "watch" || currentName.startsWith("download_")) {
-                val ext = trackInfo.containerExt ?: MusicDownloadManager.extensionForFormat(getSelectedMusicFormatCode())
-                val safeTitle = trackInfo.title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
-                if (safeTitle.isNotEmpty()) {
-                    binding.etFilename.setText(
-                        if (safeTitle.lowercase(Locale.US).endsWith(ext)) safeTitle else "$safeTitle$ext"
-                    )
-                }
+            val ext = trackInfo.containerExt ?: MusicDownloadManager.extensionForFormat(getSelectedMusicFormatCode())
+            val safeTitle = FilenameResolver.sanitizeSingleFilename(trackInfo.title, fallback = "").trim()
+            if (safeTitle.isNotEmpty()) {
+                val suggested = if (safeTitle.lowercase(Locale.US).endsWith(ext)) safeTitle else "$safeTitle$ext"
+                setSuggestedFilenameIfNotEdited(suggested)
             }
             if (binding.etArtist.text.isNullOrBlank() && trackInfo.artist.isNotBlank()) {
                 binding.etArtist.setText(trackInfo.artist)

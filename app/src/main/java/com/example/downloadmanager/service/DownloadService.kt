@@ -173,7 +173,8 @@ class DownloadService : Service() {
                             filename = filename,
                             savePath = savePath,
                             downloadType = downloadType,
-                            status = DownloadStatus.QUEUED
+                            status = DownloadStatus.QUEUED,
+                            magnetUri = if (url.startsWith("magnet:", ignoreCase = true)) url else null
                         )
                         startNewDownload(item)
                     }
@@ -318,7 +319,18 @@ class DownloadService : Service() {
                 status = DownloadStatus.QUEUED,
                 errorMessage = null
             )
-            val id = repository.insert(queuedItem)
+            val id = runCatching {
+                when (queuedItem.downloadType) {
+                    DownloadType.TORRENT, DownloadType.MAGNET ->
+                        torrentDownloadManager.startTorrentDownload(queuedItem, queuedItem.selectedFiles)
+                    DownloadType.VIDEO ->
+                        videoDownloadManager.startVideoDownload(queuedItem)
+                    DownloadType.MUSIC ->
+                        musicDownloadManager.startMusicDownload(queuedItem)
+                    DownloadType.DIRECT ->
+                        downloadManager.startDownload(queuedItem)
+                }
+            }.getOrElse { repository.insert(queuedItem) }
             onIdCreated?.invoke(id)
             processQueue()
         }

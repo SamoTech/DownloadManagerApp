@@ -28,7 +28,8 @@ object TorrentPathSafety {
         val name: String,
         val relativePath: String,
         val length: Long,
-        val offsetInTorrent: Long
+        val offsetInTorrent: Long,
+        val originalPathComponents: List<String> = relativePath.split('/')
     )
 
     data class FileVerificationOutcome(
@@ -58,13 +59,15 @@ object TorrentPathSafety {
 
     /**
      * Validates a single path segment from torrent metadata.
-     * Rejects empty, ".", "..", slashes, backslashes, NUL/control chars, drive prefixes, and reserved names.
+     * Strips formatting-only bidi controls, normalizes to NFC, and rejects empty, ".", "..",
+     * slashes, backslashes, NUL/control chars, drive prefixes, and reserved names.
      */
     fun validateComponent(rawComponent: String): String {
-        if (rawComponent.isEmpty()) {
+        val stripped = FilenameResolver.stripBidiFormattingControls(rawComponent)
+        if (stripped.isEmpty()) {
             throw SecurityException("Torrent path contains an empty path component")
         }
-        val normalized = Normalizer.normalize(rawComponent, Normalizer.Form.NFC)
+        val normalized = Normalizer.normalize(stripped, Normalizer.Form.NFC)
         if (normalized.isBlank()) {
             throw SecurityException("Torrent path contains a whitespace-only component")
         }
@@ -95,16 +98,17 @@ object TorrentPathSafety {
      * slash-separated relative path without leading or trailing slashes.
      */
     fun validateRelativePath(rawPath: String): String {
-        if (rawPath.isEmpty()) {
+        val stripped = FilenameResolver.stripBidiFormattingControls(rawPath)
+        if (stripped.isEmpty()) {
             throw SecurityException("Torrent relative path cannot be empty")
         }
-        if (rawPath.startsWith("/") || rawPath.startsWith("\\") || DRIVE_PREFIX_REGEX.matches(rawPath)) {
+        if (stripped.startsWith("/") || stripped.startsWith("\\") || DRIVE_PREFIX_REGEX.matches(stripped)) {
             throw SecurityException("Absolute path rejected in torrent metadata: $rawPath")
         }
-        if (rawPath.contains('\\')) {
+        if (stripped.contains('\\')) {
             throw SecurityException("Backslash separator rejected in torrent path: $rawPath")
         }
-        val rawSegments = rawPath.split('/')
+        val rawSegments = stripped.split('/')
         if (rawSegments.isEmpty() || rawSegments.any { it.isEmpty() }) {
             throw SecurityException("Malformed or empty segment in torrent path: $rawPath")
         }
@@ -156,7 +160,8 @@ object TorrentPathSafety {
                     name = fileName,
                     relativePath = relPath,
                     length = entry.length,
-                    offsetInTorrent = runningOffset
+                    offsetInTorrent = runningOffset,
+                    originalPathComponents = entry.pathComponents.map { FilenameResolver.stripBidiFormattingControls(it) }
                 )
             )
             runningOffset += entry.length
@@ -295,9 +300,10 @@ object TorrentPathSafety {
     }
 
     fun sanitizeRootName(rawName: String): String {
-        val trimmed = Normalizer.normalize(rawName.trim(), Normalizer.Form.NFC)
-            .substringBeforeLast(".torrent")
-            .replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), "_")
+        val stripped = FilenameResolver.stripBidiFormattingControls(rawName.trim())
+        val trimmed = Normalizer.normalize(stripped, Normalizer.Form.NFC)
+            .let { if (it.endsWith(".torrent", ignoreCase = true)) it.dropLast(8) else it }
+            .replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F\\u007F]"), "_")
             .trim('.', ' ')
         if (trimmed.isEmpty() || trimmed == "." || trimmed == "..") {
             return "Torrent_Download"
@@ -309,6 +315,10 @@ object TorrentPathSafety {
      * Verifies staged (or target) files against declared lengths and SHA-1 piece hashes across file boundaries.
      * Note: Piece hashes in BitTorrent v1 are concatenated 20-byte SHA-1 digests over the contiguous logical
      * stream formed by concatenating all files in metadata order.
+     *
+     * When a piece spans a selected file and an unselected neighbor file, if the boundary bytes of the
+     * unselected neighbor are present in `.staging/part_<index>.tmp` (or in `jobRoot`), those boundary
+     * bytes are used to verify the SHA-1 piece hash while only selected files are promoted.
      */
     fun verifyTorrentFiles(
         jobRoot: File,
@@ -328,6 +338,17 @@ object TorrentPathSafety {
         for (entry in entries) {
             val isSelected = selectedIndices.contains(entry.index)
             if (!isSelected) {
+                // Still record any available boundary staging or disk file so cross-file boundary pieces can be verified
+                val boundaryStaged = runCatching { resolveStagingFile(jobRoot, entry.index) }.getOrNull()
+                val boundaryFinal = runCatching { resolveContainedFile(jobRoot, entry.relativePath) }.getOrNull()
+                val availableBoundaryFile = when {
+                    boundaryStaged != null && boundaryStaged.exists() && boundaryStaged.isFile -> boundaryStaged
+                    boundaryFinal != null && boundaryFinal.exists() && boundaryFinal.isFile -> boundaryFinal
+                    else -> null
+                }
+                if (availableBoundaryFile != null) {
+                    resolvedFiles[entry.index] = availableBoundaryFile
+                }
                 outcomes[entry.index] = FileVerificationOutcome(
                     index = entry.index,
                     relativePath = entry.relativePath,
@@ -339,10 +360,12 @@ object TorrentPathSafety {
                 continue
             }
 
+            val stagedCandidate = resolveStagingFile(jobRoot, entry.index)
+            val finalCandidate = resolveContainedFile(jobRoot, entry.relativePath)
             val targetFile = if (useStagingFiles) {
-                resolveStagingFile(jobRoot, entry.index)
+                if (stagedCandidate.exists() || !finalCandidate.exists()) stagedCandidate else finalCandidate
             } else {
-                resolveContainedFile(jobRoot, entry.relativePath)
+                finalCandidate
             }
             resolvedFiles[entry.index] = targetFile
 
@@ -378,7 +401,6 @@ object TorrentPathSafety {
         }
 
         if (!allSelectedLenghtsValid) {
-            // Fill remaining selected entries that passed length check as PARTIAL/UNVERIFIED since overall verification failed
             for (entry in entries) {
                 if (selectedIndices.contains(entry.index) && !outcomes.containsKey(entry.index)) {
                     val file = resolvedFiles[entry.index]
@@ -424,7 +446,6 @@ object TorrentPathSafety {
             )
         }
 
-        // Check whether piece hashes are available and valid
         val expectedPieces = if (pieceLength > 0) {
             ((totalTorrentSize + pieceLength - 1) / pieceLength).toInt()
         } else 0
@@ -435,7 +456,6 @@ object TorrentPathSafety {
             pieceHashes.size == expectedPieces * 20
 
         if (!canVerifyPieces) {
-            // Piece hashes are absent or incomplete; report honest unverified completion
             for (entry in entries) {
                 if (selectedIndices.contains(entry.index)) {
                     outcomes[entry.index] = FileVerificationOutcome(
@@ -466,7 +486,6 @@ object TorrentPathSafety {
             val pieceEndExclusive = minOf(totalTorrentSize, pieceStart + pieceLength.toLong())
             val currentPieceSize = (pieceEndExclusive - pieceStart).toInt()
 
-            // Identify all torrent entries overlapping [pieceStart, pieceEndExclusive)
             val overlappingEntries = entries.filter { entry ->
                 val entryStart = entry.offsetInTorrent
                 val entryEnd = entryStart + entry.length
@@ -474,13 +493,26 @@ object TorrentPathSafety {
             }
 
             if (overlappingEntries.none { selectedIndices.contains(it.index) }) {
-                // Piece does not touch any selected file
                 continue
             }
 
-            if (overlappingEntries.any { !selectedIndices.contains(it.index) }) {
-                // Boundary piece spans an unselected file whose bytes are not present;
-                // cannot cryptographically verify this boundary piece.
+            // Check if all overlapping entries (including any unselected boundary neighbors) have the needed bytes available
+            var boundaryBytesAvailable = true
+            var cursorCheck = pieceStart
+            var remainingCheck = currentPieceSize
+            for (entry in overlappingEntries) {
+                val fileOffset = cursorCheck - entry.offsetInTorrent
+                val bytesFromThisFile = minOf(remainingCheck.toLong(), entry.length - fileOffset).toInt()
+                val candidateFile = resolvedFiles[entry.index]
+                if (candidateFile == null || !candidateFile.exists() || candidateFile.length() < fileOffset + bytesFromThisFile) {
+                    boundaryBytesAvailable = false
+                    break
+                }
+                cursorCheck += bytesFromThisFile
+                remainingCheck -= bytesFromThisFile
+            }
+
+            if (!boundaryBytesAvailable) {
                 overlappingEntries.filter { selectedIndices.contains(it.index) }
                     .forEach { unverifiedBoundaryFileIndices.add(it.index) }
                 continue
@@ -519,7 +551,8 @@ object TorrentPathSafety {
             val actualHash = digest.digest()
             val expectedHash = pieceHashes.copyOfRange(pieceIndex * 20, (pieceIndex + 1) * 20)
             if (!actualHash.contentEquals(expectedHash)) {
-                overlappingEntries.forEach { failedFileIndices.add(it.index) }
+                overlappingEntries.filter { selectedIndices.contains(it.index) }
+                    .forEach { failedFileIndices.add(it.index) }
                 if (firstFailureReason == null) {
                     firstFailureReason = "SHA-1 piece hash mismatch at piece $pieceIndex"
                 }
@@ -573,7 +606,7 @@ object TorrentPathSafety {
 
     /**
      * Promotes verified staging files into their final destination paths inside [jobRoot].
-     * Ensures parent directories are safe and existing unrelated files are not silently corrupted.
+     * Publishes ONLY selected files and cleans up any unselected boundary staging files in `.staging`.
      */
     fun promoteStagedFiles(
         jobRoot: File,
@@ -582,8 +615,14 @@ object TorrentPathSafety {
     ) {
         ensureNotSymlink(jobRoot)
         for (entry in entries) {
-            if (!selectedIndices.contains(entry.index)) continue
             val stagedFile = resolveStagingFile(jobRoot, entry.index)
+            if (!selectedIndices.contains(entry.index)) {
+                // Remove any temporary boundary bytes staged for unselected neighbor files
+                if (stagedFile.exists()) {
+                    stagedFile.delete()
+                }
+                continue
+            }
             val finalFile = resolveContainedFile(jobRoot, entry.relativePath)
 
             finalFile.parentFile?.let { parent ->
@@ -600,6 +639,11 @@ object TorrentPathSafety {
                 if (stagedFile.exists()) {
                     stagedFile.delete()
                 }
+                continue
+            }
+
+            if (!stagedFile.exists() && finalFile.exists() && finalFile.length() == entry.length) {
+                // Already promoted in a previous verified pass
                 continue
             }
 
@@ -626,9 +670,10 @@ object TorrentPathSafety {
                 stagedFile.delete()
             }
         }
-        // Clean up staging directory if empty
+        // Clean up staging directory after promotion
         val stagingDir = resolveContainedFile(jobRoot, ".staging")
-        if (stagingDir.exists() && stagingDir.isDirectory && (stagingDir.list()?.isEmpty() == true)) {
+        if (stagingDir.exists() && stagingDir.isDirectory) {
+            stagingDir.listFiles()?.forEach { it.delete() }
             stagingDir.delete()
         }
     }

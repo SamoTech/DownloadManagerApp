@@ -24,6 +24,8 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="filename"
+            android:textAlignment="viewStart"
+            android:textDirection="firstStrong"
             android:textSize="14sp" />
 
         <TextView

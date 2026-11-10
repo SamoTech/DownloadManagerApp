@@ -38,11 +38,14 @@ jobs:
             fi
           fi
 
+      - name: Ensure gradlew is executable
+        run: chmod +x ./gradlew
+
       - name: Assemble Debug APK
-        run: gradle :app:assembleDebug --stacktrace
+        run: ./gradlew :app:assembleDebug --stacktrace
 
       - name: Run Unit Tests
-        run: gradle :app:testDebugUnitTest --stacktrace
+        run: ./gradlew :app:testDebugUnitTest --stacktrace
 
       - name: Run Android Lint
-        run: gradle :app:lintDebug --stacktrace
+        run: ./gradlew :app:lintDebug --stacktrace

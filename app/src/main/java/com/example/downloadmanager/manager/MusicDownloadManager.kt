@@ -7,6 +7,7 @@ import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
 import com.example.downloadmanager.model.DownloadType
+import com.example.downloadmanager.utils.FilenameResolver
 import com.example.downloadmanager.utils.HttpRangeValidator
 import com.example.downloadmanager.utils.MediaAssetHelper
 import com.example.downloadmanager.utils.UrlClassifier
@@ -1115,23 +1116,19 @@ class MusicDownloadManager(
             rawInputName.startsWith("download_") ||
             rawInputName.startsWith("Audio_Track")
 
-        val decodedSlug = try {
-            URLDecoder.decode(
-                validUrl.substringBefore("?").trimEnd('/').substringAfterLast("/"),
-                "UTF-8"
-            )
-        } catch (_: Exception) {
+        val decodedSlug = FilenameResolver.decodePercentPreservingPlus(
             validUrl.substringBefore("?").trimEnd('/').substringAfterLast("/")
-        }
+        )
 
         val fallbackTitle = cachedTrackInfo?.title
             ?: decodedSlug.substringBeforeLast(".").takeIf { it.isNotBlank() && it != "watch" }
             ?: "Audio_Track_${System.currentTimeMillis()}"
 
-        val baseTitle = (if (isGenericName) fallbackTitle else rawInputName.substringBeforeLast("."))
-            .replace(Regex("[^a-zA-Z0-9 _\\-().]"), "_")
-            .trim()
-            .ifBlank { "Audio_Track_${System.currentTimeMillis()}" }
+        val rawCandidate = if (isGenericName) fallbackTitle else rawInputName.substringBeforeLast(".")
+        val baseTitle = FilenameResolver.sanitizeSingleFilename(
+            rawCandidate,
+            fallback = "Audio_Track_${System.currentTimeMillis()}"
+        )
 
         val finalFilename = if (baseTitle.lowercase(Locale.US).endsWith(ext)) baseTitle else "$baseTitle$ext"
         val artist = artistName?.takeIf { it.isNotBlank() } ?: cachedTrackInfo?.artist ?: "Artist"
@@ -1225,7 +1222,7 @@ class MusicDownloadManager(
             var activeItem = repository.getDownloadById(downloadItem.id) ?: downloadItem
             var targetFilename = activeItem.filename
             if (info != null) {
-                val cleanTitle = info.title.replace(Regex("[^a-zA-Z0-9 _\\-()]"), "_").trim()
+                val cleanTitle = FilenameResolver.sanitizeSingleFilename(info.title, fallback = "").trim()
                 val ext = info.containerExt ?: "." + targetFilename.substringAfterLast(".", "mp3")
                 if (cleanTitle.isNotBlank() &&
                     (targetFilename.startsWith("Audio_Track") ||

@@ -60,7 +60,10 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:text="filename"
+                    android:textAlignment="viewStart"
                     android:textColor="@color/colorOnSurface"
+                    android:textDirection="firstStrong"
+                    android:textIsSelectable="true"
                     android:textSize="18sp"
                     android:textStyle="bold" />
             </LinearLayout>
@@ -207,7 +210,10 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
                     android:text="path"
-                    android:textColor="@color/gray" />
+                    android:textAlignment="viewStart"
+                    android:textColor="@color/gray"
+                    android:textDirection="firstStrong"
+                    android:textIsSelectable="true" />
 
                 <TextView
                     android:id="@+id/tvAddedDate"

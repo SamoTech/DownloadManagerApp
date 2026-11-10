@@ -486,12 +486,13 @@ class BrowserActivity : AppCompatActivity() {
                     ?.takeIf { it.isNotEmpty() }
                     ?: finalUrl
 
-                // Extract magnet links
-                val magnetRegex = Regex("""magnet:\?xt=urn:btih:[a-zA-Z0-9\-._~%&+=:/?#@!$'()*+,;]+""", RegexOption.IGNORE_CASE)
+                // Extract magnet links (supporting any parameter order and Unicode/Arabic dn=)
+                val magnetRegex = Regex("""magnet:\?[^\s"'<>]+""", RegexOption.IGNORE_CASE)
                 for (m in magnetRegex.findAll(html)) {
                     val mag = m.value.replace("&amp;", "&")
+                    if (!mag.contains("xt=urn:", ignoreCase = true) && !mag.contains("xt=urn%3A", ignoreCase = true)) continue
                     val dn = mag.substringAfter("dn=", "").substringBefore("&")
-                        .let { runCatching { java.net.URLDecoder.decode(it, "UTF-8") }.getOrDefault(it) }
+                        .let { com.example.downloadmanager.utils.FilenameResolver.decodeMagnetDisplayName(it) }
                         .ifBlank { "Magnet Swarm Link" }
                     discovered.add(
                         DetectedLinkItem(
