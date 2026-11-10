@@ -22,7 +22,8 @@ class AboutActivity : AppCompatActivity() {
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         supportActionBar?.title = getString(R.string.about)
         
-        binding.tvVersion.text = getString(R.string.version, BuildConfig.VERSION_NAME)
+        binding.tvVersion.text =
+            "${getString(R.string.version, BuildConfig.VERSION_NAME)} (Build ${BuildConfig.VERSION_CODE})"
         binding.tvDescription.text = getString(R.string.app_description)
 
         binding.btnPrivacyPolicy.setOnClickListener {

@@ -6,8 +6,10 @@ import android.view.MenuItem
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.preference.EditTextPreference
+import androidx.preference.Preference
 import androidx.preference.PreferenceFragmentCompat
 import androidx.preference.SwitchPreferenceCompat
+import com.example.downloadmanager.BuildConfig
 import com.example.downloadmanager.R
 
 class SettingsActivity : AppCompatActivity() {
@@ -19,6 +21,7 @@ class SettingsActivity : AppCompatActivity() {
         setSupportActionBar(findViewById(R.id.toolbar))
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         supportActionBar?.title = getString(R.string.settings)
+        supportActionBar?.subtitle = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
         
         if (savedInstanceState == null) {
             supportFragmentManager
@@ -39,6 +42,9 @@ class SettingsActivity : AppCompatActivity() {
     class SettingsFragment : PreferenceFragmentCompat() {
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             setPreferencesFromResource(R.xml.preferences, rootKey)
+
+            findPreference<Preference>("pref_app_version")?.summary =
+                "Luca Download Manager v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
 
             // Populate default save location if empty
             val savePathPref = findPreference<EditTextPreference>("default_save_path")

@@ -11,11 +11,13 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.preference.PreferenceManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.example.downloadmanager.BuildConfig
 import com.example.downloadmanager.R
 import com.example.downloadmanager.databinding.ActivityAddDownloadBinding
 import com.example.downloadmanager.manager.DownloadManager
@@ -58,6 +60,25 @@ class AddDownloadActivity : AppCompatActivity() {
     private var isSettingFilenameProgrammatically = false
     private var userManuallyEditedFilename = false
     private val probeRequestToken = AtomicLong(0L)
+
+    private val pickTorrentLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            userManuallyEditedFilename = false
+            switchDownloadType(DownloadType.TORRENT)
+            val uriString = uri.toString()
+            binding.etUrl.setText(uriString)
+            val token = probeRequestToken.incrementAndGet()
+            extractMagnetInfo(uriString, token)
+        }
+    }
 
     companion object {
         /**
@@ -107,6 +128,7 @@ class AddDownloadActivity : AppCompatActivity() {
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         supportActionBar?.title = getString(R.string.add_download)
+        binding.toolbar.subtitle = "Luca v${BuildConfig.VERSION_NAME}"
         binding.toolbar.setNavigationOnClickListener {
             onBackPressedDispatcher.onBackPressed()
         }
@@ -240,6 +262,9 @@ class AddDownloadActivity : AppCompatActivity() {
             applySampleMusicTrack(sampleTracks[3])
         }
 
+        binding.chipSampleTorrentFile.setOnClickListener {
+            applySampleTorrentFile(TorrentDownloadManager.SAMPLE_TORRENT_SINTEL)
+        }
         binding.chipSampleMagnet1.setOnClickListener {
             applySampleMagnet(TorrentDownloadManager.SAMPLE_MAGNET_WIRED_CD)
         }
@@ -251,6 +276,10 @@ class AddDownloadActivity : AppCompatActivity() {
         }
         binding.chipSampleMagnet4.setOnClickListener {
             applySampleMagnet(TorrentDownloadManager.SAMPLE_MAGNET_COSMOS_LAUNDROMAT)
+        }
+
+        binding.btnPickTorrentFile.setOnClickListener {
+            pickTorrentLauncher.launch(arrayOf("application/x-bittorrent", "application/octet-stream", "*/*"))
         }
 
         binding.btnFetchTorrentFiles.setOnClickListener {
@@ -324,6 +353,14 @@ class AddDownloadActivity : AppCompatActivity() {
         binding.etUrl.setText(magnetUri)
         val token = probeRequestToken.incrementAndGet()
         extractMagnetInfo(magnetUri, token)
+    }
+
+    private fun applySampleTorrentFile(torrentUrl: String) {
+        userManuallyEditedFilename = false
+        switchDownloadType(DownloadType.TORRENT)
+        binding.etUrl.setText(torrentUrl)
+        val token = probeRequestToken.incrementAndGet()
+        extractMagnetInfo(torrentUrl, token)
     }
 
     private fun handleIncomingIntent() {
@@ -494,8 +531,9 @@ class AddDownloadActivity : AppCompatActivity() {
                 } else {
                     getString(R.string.peers_unavailable)
                 }
+                val trackerNote = metadata.trackerStatus?.takeIf { it.isNotBlank() }?.let { " • $it" }.orEmpty()
                 binding.tvTorrentMetaSummary.text =
-                    "${metadata.name} • ${metadata.files.size} files ($sizeLabel) • $seedsLabel • $peersLabel"
+                    "${metadata.name} • ${metadata.files.size} files ($sizeLabel) • $seedsLabel • $peersLabel$trackerNote"
 
                 val adapter = TorrentFileSelectionAdapter(metadata.files)
                 torrentFilesAdapter = adapter
@@ -503,8 +541,10 @@ class AddDownloadActivity : AppCompatActivity() {
                 binding.rvTorrentFiles.adapter = adapter
                 binding.rvTorrentFiles.visibility = View.VISIBLE
             } else {
+                val trackerNote = metadata?.trackerStatus?.takeIf { it.isNotBlank() }
+                    ?: "${getString(R.string.seeds_unavailable)} • ${getString(R.string.peers_unavailable)}"
                 binding.tvTorrentMetaSummary.text =
-                    "Magnet link ready • ${getString(R.string.seeds_unavailable)} • ${getString(R.string.peers_unavailable)}"
+                    "Magnet link ready • $trackerNote"
             }
         }
     }
@@ -678,6 +718,13 @@ class AddDownloadActivity : AppCompatActivity() {
         val isAudioOnly = downloadType == DownloadType.MUSIC ||
             (downloadType == DownloadType.VIDEO && (binding.rbAudioOnly.isChecked || binding.cbExtractAudio.isChecked))
 
+        if ((downloadType == DownloadType.TORRENT || downloadType == DownloadType.MAGNET) &&
+            torrentFilesAdapter?.hasUserUncheckedAll() == true
+        ) {
+            Toast.makeText(this, "Please select at least one file to download", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         val selectedIndices = torrentFilesAdapter?.getSelectedFileIndices()
 
         binding.btnStartDownload.isEnabled = false
@@ -786,6 +833,10 @@ class AddDownloadActivity : AppCompatActivity() {
                 items[i] = items[i].copy(isSelected = selected)
             }
             notifyDataSetChanged()
+        }
+
+        fun hasUserUncheckedAll(): Boolean {
+            return items.isNotEmpty() && items.none { it.isSelected }
         }
 
         fun getSelectedFileIndices(): List<Int> {

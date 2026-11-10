@@ -327,7 +327,8 @@ object FilenameResolver {
             clean == "Magnet_Download" ||
             clean == "Torrent_Download" ||
             clean.startsWith("Torrent_") ||
-            clean.startsWith("Magnet_")
+            clean.startsWith("Magnet_") ||
+            clean.endsWith(".torrent", ignoreCase = true)
         ) {
             return true
         }

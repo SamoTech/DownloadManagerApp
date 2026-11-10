@@ -109,8 +109,25 @@ class DownloadDetailActivity : AppCompatActivity() {
         binding.tvProgress.text = getString(R.string.download_progress, downloadItem.progress)
         binding.progressBar.progress = downloadItem.progress
 
+        val err = downloadItem.errorMessage?.trim().orEmpty()
+        val errLower = err.lowercase(Locale.US)
+        val distinctReason = when {
+            errLower.contains("waiting for wi-fi") -> "Waiting for Wi-Fi"
+            errLower.contains("waiting for network") -> "Waiting for network connection"
+            errLower.contains("tracker unreachable") -> "Tracker unreachable"
+            errLower.contains("no peers returned") || errLower.contains("empty bittorrent swarm") -> "No peers returned"
+            errLower.contains("contacting tracker") -> "Contacting tracker..."
+            errLower.contains("connecting to") -> err
+            else -> null
+        }
+
         val statusSummary = buildString {
             append(getStatusText(downloadItem.status))
+            if (!distinctReason.isNullOrBlank()) {
+                append(" (")
+                append(distinctReason)
+                append(")")
+            }
             if (!downloadItem.integrityStatus.isNullOrBlank()) {
                 append(" • ")
                 append(downloadItem.integrityStatus)

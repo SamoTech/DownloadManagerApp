@@ -84,8 +84,8 @@ class DownloadAdapter(
                 tvEta.text = itemView.context.getString(R.string.unknown_eta)
             }
             
-            tvStatus.text = getStatusText(downloadItem.status)
-            tvStatus.setTextColor(getStatusColor(downloadItem.status))
+            tvStatus.text = getStatusText(downloadItem)
+            tvStatus.setTextColor(getStatusColor(downloadItem))
             
             if (downloadItem.downloadType == DownloadType.TORRENT ||
                 downloadItem.downloadType == DownloadType.MAGNET) {
@@ -217,26 +217,51 @@ class DownloadAdapter(
             }
         }
         
-        private fun getStatusText(status: DownloadStatus): String {
-            return when (status) {
-                DownloadStatus.QUEUED -> itemView.context.getString(R.string.queued)
-                DownloadStatus.DOWNLOADING -> itemView.context.getString(R.string.downloading)
+        private fun getStatusText(downloadItem: DownloadItem): String {
+            val err = downloadItem.errorMessage?.trim().orEmpty()
+            val errLower = err.lowercase()
+            return when (downloadItem.status) {
+                DownloadStatus.QUEUED -> when {
+                    errLower.contains("waiting for wi-fi") -> "Waiting for Wi-Fi"
+                    errLower.contains("waiting for network") -> "Waiting for network"
+                    errLower.startsWith("auto-retrying") -> err.substringBefore(":")
+                    else -> itemView.context.getString(R.string.queued)
+                }
+                DownloadStatus.DOWNLOADING -> when {
+                    errLower.contains("contacting tracker") -> "Contacting tracker..."
+                    errLower.contains("connecting to") -> err
+                    errLower.contains("tracker unreachable") -> "Tracker unreachable"
+                    errLower.contains("no peers returned") -> "No peers returned"
+                    else -> itemView.context.getString(R.string.downloading)
+                }
                 DownloadStatus.PAUSED -> itemView.context.getString(R.string.paused)
                 DownloadStatus.COMPLETED -> itemView.context.getString(R.string.completed_status)
-                DownloadStatus.FAILED -> itemView.context.getString(R.string.failed)
+                DownloadStatus.FAILED -> when {
+                    errLower.contains("tracker unreachable") -> "Tracker unreachable"
+                    errLower.contains("no peers returned") || errLower.contains("empty bittorrent swarm") -> "No peers returned"
+                    errLower.contains("peer connection failed") -> "Peer connection failed"
+                    errLower.contains("peer handshake/unchoke failed") -> "Peers choked / handshake failed"
+                    errLower.contains("peer transfer incomplete") -> "Peer transfer incomplete"
+                    else -> itemView.context.getString(R.string.failed)
+                }
                 DownloadStatus.CANCELLED -> itemView.context.getString(R.string.cancelled)
             }
         }
         
-        private fun getStatusColor(status: DownloadStatus): Int {
+        private fun getStatusColor(downloadItem: DownloadItem): Int {
             val context = itemView.context
-            return when (status) {
+            val errLower = downloadItem.errorMessage?.lowercase().orEmpty()
+            return when (downloadItem.status) {
                 DownloadStatus.DOWNLOADING -> ContextCompat.getColor(context, R.color.status_downloading)
                 DownloadStatus.COMPLETED -> ContextCompat.getColor(context, R.color.status_completed)
                 DownloadStatus.PAUSED -> ContextCompat.getColor(context, R.color.status_paused)
                 DownloadStatus.FAILED -> ContextCompat.getColor(context, R.color.status_failed)
                 DownloadStatus.CANCELLED -> ContextCompat.getColor(context, R.color.status_cancelled)
-                DownloadStatus.QUEUED -> ContextCompat.getColor(context, R.color.status_queued)
+                DownloadStatus.QUEUED -> if (errLower.contains("waiting for wi-fi") || errLower.contains("waiting for network")) {
+                    ContextCompat.getColor(context, R.color.status_paused)
+                } else {
+                    ContextCompat.getColor(context, R.color.status_queued)
+                }
             }
         }
         

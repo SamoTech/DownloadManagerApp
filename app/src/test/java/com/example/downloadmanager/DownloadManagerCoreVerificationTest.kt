@@ -1485,6 +1485,405 @@ class DownloadManagerCoreVerificationTest {
     }
 
     // =========================================================================
+    // Phase 7: Active .torrent Selected-File Trace, Compact + Dict-List HTTP
+    // Tracker Parsing, Distinct Statuses, and Version 6.0 Verification
+    // =========================================================================
+
+    @Test
+    fun phase7_activeTorrentSelectedFile_compactAndDictTrackers_andDistinctStatuses() = runBlocking {
+        // 0. Verify Luca Version 6.0 (Build 6)
+        assertEquals("6.0", BuildConfig.VERSION_NAME)
+        assertEquals(6, BuildConfig.VERSION_CODE)
+
+        val tempRoot = createTempDirectory("phase7_torrent_trace").toFile()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val peerServer = ServerSocket(0, 10, java.net.InetAddress.getByName("127.0.0.1"))
+        try {
+            server.executor = Executors.newCachedThreadPool()
+            val port = server.address.port
+
+            val dao = InMemoryDownloadDao()
+            val repo = DownloadRepository(dao)
+            val manager = TorrentDownloadManager(null, repo)
+
+            // 1. Unit-verify HTTP tracker parsing for BOTH compact and dictionary-list peer responses
+            val compactOut = ByteArrayOutputStream().apply {
+                write("d8:completei14e10:incompletei3e8:intervali1800e5:peers12:".toByteArray(StandardCharsets.ISO_8859_1))
+                // Peer 1: 127.0.0.1:6881
+                write(byteArrayOf(127, 0, 0, 1, ((6881 ushr 8) and 0xFF).toByte(), (6881 and 0xFF).toByte()))
+                // Peer 2: 10.0.0.2:51413
+                write(byteArrayOf(10, 0, 0, 2, ((51413 ushr 8) and 0xFF).toByte(), (51413 and 0xFF).toByte()))
+                write("e".toByteArray(StandardCharsets.ISO_8859_1))
+            }.toByteArray()
+            val parsedCompact = manager.parseHttpTrackerResponse(compactOut)
+            assertNotNull(parsedCompact)
+            assertEquals(14, parsedCompact!!.seeders)
+            assertEquals(3, parsedCompact.leechers)
+            assertEquals(2, parsedCompact.peers.size)
+            assertEquals("127.0.0.1", parsedCompact.peers[0].address.hostAddress)
+            assertEquals(6881, parsedCompact.peers[0].port)
+            assertEquals("10.0.0.2", parsedCompact.peers[1].address.hostAddress)
+            assertEquals(51413, parsedCompact.peers[1].port)
+
+            // Dictionary-list peer response (BEP-3 non-compact format)
+            val dictListResponse = (
+                "d8:completei9e10:incompletei4e8:intervali900e5:peersl" +
+                    "d2:ip9:127.0.0.17:peer id20:-TR4050-1234567890124:porti6881ee" +
+                    "d2:ip11:192.168.1.57:peer id20:-UT3550-abcdefghijkl4:porti51413ee" +
+                    "ee"
+                ).toByteArray(StandardCharsets.ISO_8859_1)
+            val parsedDictList = manager.parseHttpTrackerResponse(dictListResponse)
+            assertNotNull(parsedDictList)
+            assertEquals(9, parsedDictList!!.seeders)
+            assertEquals(4, parsedDictList.leechers)
+            assertEquals(2, parsedDictList.peers.size)
+            assertEquals("127.0.0.1", parsedDictList.peers[0].address.hostAddress)
+            assertEquals(6881, parsedDictList.peers[0].port)
+            assertEquals("192.168.1.5", parsedDictList.peers[1].address.hostAddress)
+            assertEquals(51413, parsedDictList.peers[1].port)
+
+            // Empty dictionary-list and empty compact peer responses
+            val emptyDictPeers = "d8:completei0e10:incompletei0e5:peerslee".toByteArray(StandardCharsets.ISO_8859_1)
+            val parsedEmptyDict = manager.parseHttpTrackerResponse(emptyDictPeers)
+            assertNotNull(parsedEmptyDict)
+            assertTrue(parsedEmptyDict!!.peers.isEmpty())
+            assertEquals(1, parsedEmptyDict.respondedTrackers)
+
+            // 2. End-to-End Trace: Active .torrent -> Select file -> Tap Start Download ->
+            //    Job saved in Room (QUEUED) -> Leaves queue (DOWNLOADING) -> Reaches HTTP tracker
+            //    (returning DICTIONARY-LIST peers) -> Connects to TCP peer -> Completes with matching bytes
+            val file0Bytes = "README_UNSELECTED_FILE_0_CONTENT_32B".toByteArray(StandardCharsets.UTF_8) // 36 bytes
+            val file1Bytes = "SELECTED_SUBTITLE_TRACK_ARABIC_ترجمة_عربية_100_PERCENT_MATCH!".toByteArray(StandardCharsets.UTF_8) // 69 bytes
+            val file2Bytes = "EXTRA_BONUS_UNSELECTED_TRAILER_DATA".toByteArray(StandardCharsets.UTF_8) // 35 bytes
+            val fullStream = file0Bytes + file1Bytes + file2Bytes
+            val pieceLen = 32L
+
+            val sha1 = MessageDigest.getInstance("SHA-1")
+            val piecesOut = ByteArrayOutputStream()
+            var off = 0
+            while (off < fullStream.size) {
+                val end = minOf(off + pieceLen.toInt(), fullStream.size)
+                sha1.reset()
+                piecesOut.write(sha1.digest(fullStream.copyOfRange(off, end)))
+                off = end
+            }
+            val totalPieceCount = (fullStream.size + pieceLen.toInt() - 1) / pieceLen.toInt()
+
+            // Build .torrent with NO WebSeeds so transfer MUST go through HTTP Tracker -> TCP Peer
+            val activeTorrentBytes = buildBencodedMultiFileTorrentWithoutWebSeed(
+                rootName = "Sintel_Active_Swarm",
+                files = listOf(
+                    Pair(listOf("readme.txt"), file0Bytes.size.toLong()),
+                    Pair(listOf("subtitles", "sintel_ar.srt"), file1Bytes.size.toLong()),
+                    Pair(listOf("bonus.bin"), file2Bytes.size.toLong())
+                ),
+                pieceLength = pieceLen,
+                pieces = piecesOut.toByteArray(),
+                announceUrl = "http://127.0.0.1:$port/announce_dict"
+            )
+            val activeInfoHashBytes = computeTorrentInfoHashNoWebSeed(activeTorrentBytes)
+
+            val trackerReachedCount = java.util.concurrent.atomic.AtomicInteger(0)
+            val peerConnectedCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+            val peerWorker = Thread {
+                try {
+                    peerServer.soTimeout = 6000
+                    val sock = peerServer.accept()
+                    peerConnectedCount.incrementAndGet()
+                    sock.use { s ->
+                        s.soTimeout = 6000
+                        val input = DataInputStream(s.getInputStream())
+                        val output = DataOutputStream(s.getOutputStream())
+
+                        // Read 68-byte handshake
+                        val hs = ByteArray(68)
+                        input.readFully(hs)
+
+                        // Reply with 68-byte handshake
+                        val peerId = "-LU6000-peer12345678".toByteArray(StandardCharsets.ISO_8859_1)
+                        val respHs = ByteArray(68)
+                        respHs[0] = 19
+                        System.arraycopy("BitTorrent protocol".toByteArray(StandardCharsets.ISO_8859_1), 0, respHs, 1, 19)
+                        System.arraycopy(activeInfoHashBytes, 0, respHs, 28, 20)
+                        System.arraycopy(peerId, 0, respHs, 48, 20)
+                        output.write(respHs)
+                        output.flush()
+
+                        // Read INTERESTED from client
+                        val intLen = input.readInt()
+                        if (intLen > 0) {
+                            val buf = ByteArray(intLen)
+                            input.readFully(buf)
+                        }
+
+                        // Send 16 HAVE messages before UNCHOKE to verify client handles >12 pre-unchoke messages
+                        for (p in 0 until totalPieceCount) {
+                            output.writeInt(5)
+                            output.writeByte(4) // HAVE
+                            output.writeInt(p)
+                        }
+                        for (extra in 0 until 15) {
+                            output.writeInt(5)
+                            output.writeByte(4)
+                            output.writeInt(0)
+                        }
+                        // Send UNCHOKE (id=1)
+                        output.writeInt(1)
+                        output.writeByte(1)
+                        output.flush()
+
+                        // Serve REQUEST messages until client disconnects
+                        while (!s.isClosed) {
+                            val reqLen = try {
+                                input.readInt()
+                            } catch (_: Exception) {
+                                break
+                            }
+                            if (reqLen <= 0) continue
+                            val reqId = input.readUnsignedByte()
+                            if (reqId == 6 && reqLen == 13) {
+                                val pieceIdx = input.readInt()
+                                val begin = input.readInt()
+                                val length = input.readInt()
+                                val globalOffset = pieceIdx * pieceLen.toInt() + begin
+                                val slice = fullStream.copyOfRange(globalOffset, globalOffset + length)
+                                output.writeInt(9 + slice.size)
+                                output.writeByte(7) // PIECE
+                                output.writeInt(pieceIdx)
+                                output.writeInt(begin)
+                                output.write(slice)
+                                output.flush()
+                            } else {
+                                val skip = ByteArray(reqLen - 1)
+                                input.readFully(skip)
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+            }.apply { isDaemon = true; start() }
+
+            // HTTP tracker endpoint returning DICTIONARY-LIST peers (not compact binary)
+            server.createContext("/announce_dict") { ex ->
+                trackerReachedCount.incrementAndGet()
+                val pPort = peerServer.localPort
+                val bencodedDictPeers = (
+                    "d8:completei5e10:incompletei2e8:intervali60e5:peersl" +
+                        "d2:ip9:127.0.0.17:peer id20:-LU6000-peer123456784:porti${pPort}ee" +
+                        "ee"
+                    ).toByteArray(StandardCharsets.ISO_8859_1)
+                ex.sendResponseHeaders(200, bencodedDictPeers.size.toLong())
+                ex.responseBody.use { it.write(bencodedDictPeers) }
+            }
+            // HTTP tracker endpoint returning 0 peers ("No peers returned")
+            server.createContext("/announce_empty") { ex ->
+                val emptyResp = "d8:completei0e10:incompletei0e8:intervali60e5:peers0:e".toByteArray(StandardCharsets.ISO_8859_1)
+                ex.sendResponseHeaders(200, emptyResp.size.toLong())
+                ex.responseBody.use { it.write(emptyResp) }
+            }
+            server.createContext("/Sintel_Active_Swarm.torrent") { ex ->
+                ex.sendResponseHeaders(200, activeTorrentBytes.size.toLong())
+                ex.responseBody.use { it.write(activeTorrentBytes) }
+            }
+            server.start()
+
+            val torrentUrl = "http://127.0.0.1:$port/Sintel_Active_Swarm.torrent"
+
+            // Step A: Fetch .torrent metadata (as AddDownloadActivity does when user pastes .torrent URL)
+            val previewMeta = manager.getTorrentMetadata(torrentUrl)
+            assertNotNull(previewMeta)
+            assertEquals("Sintel_Active_Swarm", previewMeta!!.name)
+            assertEquals(3, previewMeta.files.size)
+            assertEquals(5, previewMeta.seeds)
+            assertTrue(previewMeta.peers >= 1)
+
+            // Step B: User selects ONLY file index 1 ("subtitles/sintel_ar.srt") and taps Start Download
+            val saveDir = File(tempRoot, "active_selected_run").apply { mkdirs() }
+            val savedId = manager.startTorrentDownload(
+                downloadItem = DownloadItem(
+                    url = torrentUrl,
+                    filename = "Sintel_Active_Swarm.torrent", // Verify .torrent extension is stripped!
+                    savePath = saveDir.absolutePath,
+                    downloadType = DownloadType.TORRENT
+                ),
+                selectedFiles = listOf(1)
+            )
+
+            // Verify job is saved in Room with QUEUED status, stripped root name, and selectedFiles=[1]
+            val queuedRow = repo.getDownloadById(savedId)!!
+            assertEquals(DownloadStatus.QUEUED, queuedRow.status)
+            assertEquals("Sintel_Active_Swarm", queuedRow.filename)
+            assertEquals(listOf(1), queuedRow.selectedFiles)
+            assertEquals(file1Bytes.size.toLong(), queuedRow.fileSize)
+
+            // Step C: Job leaves queue and executes through TorrentDownloadManager
+            val observedProgress = mutableListOf<Int>()
+            var completedCallbackItem: DownloadItem? = null
+            manager.executeTorrentJob(
+                downloadItem = queuedRow,
+                onProgress = { _, _, pct, _, _, _, _ -> observedProgress.add(pct) },
+                onComplete = { completedCallbackItem = it },
+                onError = { _, err -> fail("Active .torrent selected-file download failed: $err") }
+            )
+
+            // Verify tracker was reached, peer connected, progress emitted, and selected file verified
+            assertTrue("Expected tracker to be queried", trackerReachedCount.get() >= 1)
+            assertEquals("Expected TCP peer connection", 1, peerConnectedCount.get())
+            assertTrue("Expected progress updates during piece transfer", observedProgress.isNotEmpty())
+            assertNotNull("Expected onComplete callback", completedCallbackItem)
+
+            val completedRow = repo.getDownloadById(savedId)!!
+            assertEquals(DownloadStatus.COMPLETED, completedRow.status)
+            assertEquals("VERIFIED", completedRow.integrityStatus)
+            assertEquals(file1Bytes.size.toLong(), completedRow.downloadedSize)
+
+            val selectedFileOnDisk = File(saveDir, "Sintel_Active_Swarm/subtitles/sintel_ar.srt")
+            val unselectedFile0OnDisk = File(saveDir, "Sintel_Active_Swarm/readme.txt")
+            val unselectedFile2OnDisk = File(saveDir, "Sintel_Active_Swarm/bonus.bin")
+            assertTrue("Selected file must exist on disk", selectedFileOnDisk.exists())
+            assertArrayEquals("Selected file bytes must match exactly", file1Bytes, selectedFileOnDisk.readBytes())
+            assertFalse("Unselected file 0 must not be promoted", unselectedFile0OnDisk.exists())
+            assertFalse("Unselected file 2 must not be promoted", unselectedFile2OnDisk.exists())
+
+            peerWorker.join(1000)
+
+            // 3. Verify distinct statuses:
+            //    (a) "Tracker unreachable" when no tracker responds
+            val unreachableTorrentBytes = buildBencodedMultiFileTorrentWithoutWebSeed(
+                rootName = "Unreachable_Swarm",
+                files = listOf(Pair(listOf("data.bin"), file0Bytes.size.toLong())),
+                pieceLength = pieceLen,
+                pieces = piecesOut.toByteArray().copyOfRange(0, 20),
+                announceUrl = "http://127.0.0.1:1/announce"
+            )
+            server.createContext("/unreachable.torrent") { ex ->
+                ex.sendResponseHeaders(200, unreachableTorrentBytes.size.toLong())
+                ex.responseBody.use { it.write(unreachableTorrentBytes) }
+            }
+            val unreachableId = manager.startTorrentDownload(
+                DownloadItem(
+                    url = "http://127.0.0.1:$port/unreachable.torrent",
+                    filename = "Unreachable_Swarm",
+                    savePath = File(tempRoot, "unreachable_run").apply { mkdirs() }.absolutePath,
+                    downloadType = DownloadType.TORRENT
+                )
+            )
+            var unreachableErr: String? = null
+            manager.executeTorrentJob(
+                downloadItem = repo.getDownloadById(unreachableId)!!,
+                onProgress = { _, _, _, _, _, _, _ -> },
+                onComplete = { fail("Unreachable tracker must not succeed") },
+                onError = { _, err -> unreachableErr = err }
+            )
+            assertNotNull(unreachableErr)
+            assertTrue(
+                "Expected 'Tracker unreachable' status but got: $unreachableErr",
+                unreachableErr!!.startsWith(TorrentDownloadManager.STATUS_TRACKER_UNREACHABLE)
+            )
+            assertEquals(DownloadStatus.FAILED, repo.getDownloadById(unreachableId)?.status)
+
+            //    (b) "No peers returned" when tracker responds with 0 peers
+            val emptySwarmTorrentBytes = buildBencodedMultiFileTorrentWithoutWebSeed(
+                rootName = "Empty_Swarm",
+                files = listOf(Pair(listOf("data.bin"), file0Bytes.size.toLong())),
+                pieceLength = pieceLen,
+                pieces = piecesOut.toByteArray().copyOfRange(0, 20),
+                announceUrl = "http://127.0.0.1:$port/announce_empty"
+            )
+            server.createContext("/empty_swarm.torrent") { ex ->
+                ex.sendResponseHeaders(200, emptySwarmTorrentBytes.size.toLong())
+                ex.responseBody.use { it.write(emptySwarmTorrentBytes) }
+            }
+            val emptySwarmId = manager.startTorrentDownload(
+                DownloadItem(
+                    url = "http://127.0.0.1:$port/empty_swarm.torrent",
+                    filename = "Empty_Swarm",
+                    savePath = File(tempRoot, "empty_swarm_run").apply { mkdirs() }.absolutePath,
+                    downloadType = DownloadType.TORRENT
+                )
+            )
+            var emptySwarmErr: String? = null
+            manager.executeTorrentJob(
+                downloadItem = repo.getDownloadById(emptySwarmId)!!,
+                onProgress = { _, _, _, _, _, _, _ -> },
+                onComplete = { fail("Empty swarm must not succeed") },
+                onError = { _, err -> emptySwarmErr = err }
+            )
+            assertNotNull(emptySwarmErr)
+            assertTrue(
+                "Expected 'No peers returned' status but got: $emptySwarmErr",
+                emptySwarmErr!!.startsWith(TorrentDownloadManager.STATUS_NO_PEERS_RETURNED)
+            )
+            assertEquals(DownloadStatus.FAILED, repo.getDownloadById(emptySwarmId)?.status)
+        } finally {
+            runCatching { server.stop(0) }
+            runCatching { peerServer.close() }
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    private fun buildBencodedMultiFileTorrentWithoutWebSeed(
+        rootName: String,
+        files: List<Pair<List<String>, Long>>,
+        pieceLength: Long,
+        pieces: ByteArray,
+        announceUrl: String
+    ): ByteArray {
+        val out = ByteArrayOutputStream()
+        fun writeAscii(s: String) = out.write(s.toByteArray(StandardCharsets.ISO_8859_1))
+        fun writeBencodeBytes(b: ByteArray) {
+            writeAscii("${b.size}:")
+            out.write(b)
+        }
+        fun writeBencodeString(s: String) = writeBencodeBytes(s.toByteArray(StandardCharsets.UTF_8))
+        fun writeBencodeLong(v: Long) = writeAscii("i${v}e")
+
+        writeAscii("d")
+        writeBencodeString("announce")
+        writeBencodeString(announceUrl)
+        writeBencodeString("info")
+        writeAscii("d")
+        writeBencodeString("files")
+        writeAscii("l")
+        for ((pathParts, len) in files) {
+            writeAscii("d")
+            writeBencodeString("length")
+            writeBencodeLong(len)
+            writeBencodeString("path")
+            writeAscii("l")
+            for (part in pathParts) {
+                writeBencodeString(part)
+            }
+            writeAscii("e")
+            writeAscii("e")
+        }
+        writeAscii("e")
+        writeBencodeString("name")
+        writeBencodeString(rootName)
+        writeBencodeString("piece length")
+        writeBencodeLong(pieceLength)
+        writeBencodeString("pieces")
+        writeBencodeBytes(pieces)
+        writeAscii("e")
+        writeAscii("e")
+        return out.toByteArray()
+    }
+
+    private fun computeTorrentInfoHashNoWebSeed(torrentBytes: ByteArray): ByteArray {
+        val marker = "4:infod".toByteArray(StandardCharsets.ISO_8859_1)
+        var infoStart = -1
+        for (i in 0..(torrentBytes.size - marker.size)) {
+            if (torrentBytes.sliceArray(i until (i + marker.size)).contentEquals(marker)) {
+                infoStart = i + 6
+                break
+            }
+        }
+        val infoEnd = torrentBytes.size - 1
+        val sha1 = MessageDigest.getInstance("SHA-1")
+        return sha1.digest(torrentBytes.copyOfRange(infoStart, infoEnd))
+    }
+
+    // =========================================================================
     // Helpers to build deterministic bencoded single-file & multi-file .torrent fixtures
     // =========================================================================
     private fun buildBencodedSingleFileTorrent(

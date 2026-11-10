@@ -376,6 +376,17 @@
                         android:textStyle="bold" />
 
                     <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnPickTorrentFile"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="38dp"
+                        android:layout_marginEnd="6dp"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:text="Pick .torrent"
+                        android:textSize="12sp" />
+
+                    <com.google.android.material.button.MaterialButton
                         android:id="@+id/btnFetchTorrentFiles"
                         style="@style/Widget.Material3.Button.TonalButton"
                         android:layout_width="wrap_content"
@@ -390,7 +401,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:text="Quick-test verified multi-file Magnet links:"
+                    android:text="Quick-test verified multi-file .torrent &amp; Magnet links:"
                     android:textColor="@color/gray"
                     android:textSize="12sp" />
 
@@ -406,6 +417,13 @@
                         app:singleLine="true">
 
                         <com.google.android.material.chip.Chip
+                            android:id="@+id/chipSampleTorrentFile"
+                            style="@style/Widget.Material3.Chip.Suggestion"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Sintel (.torrent File)" />
+
+                        <com.google.android.material.chip.Chip
                             android:id="@+id/chipSampleMagnet1"
                             style="@style/Widget.Material3.Chip.Suggestion"
                             android:layout_width="wrap_content"
@@ -417,7 +435,7 @@
                             style="@style/Widget.Material3.Chip.Suggestion"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="Sintel (MP4 + 9 Subtitles)" />
+                            android:text="Sintel (Magnet + 9 Subs)" />
 
                         <com.google.android.material.chip.Chip
                             android:id="@+id/chipSampleMagnet3"

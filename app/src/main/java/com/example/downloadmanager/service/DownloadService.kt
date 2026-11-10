@@ -542,7 +542,10 @@ class DownloadService : Service() {
             "sha-256 mismatch",
             "alternate-source match rejected",
             "requires sign-in",
-            "disabled in settings"
+            "disabled in settings",
+            "tracker unreachable",
+            "no peers returned",
+            "empty bittorrent swarm"
         )
         if (nonRetryableIndicators.any { lower.contains(it) }) {
             return false

@@ -23,6 +23,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.LinearLayoutManager
+import com.example.downloadmanager.BuildConfig
 import com.example.downloadmanager.R
 import com.example.downloadmanager.adapter.DownloadAdapter
 import com.example.downloadmanager.databinding.ActivityMainBinding
@@ -69,6 +70,9 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
         
         setSupportActionBar(binding.toolbar)
+        val versionLabel = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
+        supportActionBar?.subtitle = "v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
+        binding.tvAppVersion.text = versionLabel
         
         val database = DownloadDatabase.getDatabase(application)
         val repository = DownloadRepository(database.downloadDao())
