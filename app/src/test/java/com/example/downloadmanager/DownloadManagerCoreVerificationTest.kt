@@ -1491,9 +1491,9 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun phase7_activeTorrentSelectedFile_compactAndDictTrackers_andDistinctStatuses() = runBlocking {
-        // 0. Verify Luca Version 6.0 (Build 6)
-        assertEquals("6.0", BuildConfig.VERSION_NAME)
-        assertEquals(6, BuildConfig.VERSION_CODE)
+        // 0. Verify Luca Version 9.0 (Build 9)
+        assertEquals("9.0", BuildConfig.VERSION_NAME)
+        assertEquals(9, BuildConfig.VERSION_CODE)
 
         val tempRoot = createTempDirectory("phase7_torrent_trace").toFile()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -1974,6 +1974,510 @@ class DownloadManagerCoreVerificationTest {
         writeAscii("e")
         writeAscii("e")
         return out.toByteArray()
+    }
+
+    // =========================================================================
+    // Phase 8: Luca 8.0 Review Verification — 12-File Picker & Swarm Transfer,
+    // Duplicate Bencode Key Rejection, Info-Hash Enforcement, Job Storage
+    // Isolation, Active Download Guard, and HTTP Strong Validator Checks
+    // =========================================================================
+
+    @Test
+    fun phase8_v8ReviewVerification_12FilePicker_duplicateBencodeKeys_hashEnforcement_jobIsolation_andHttpValidators() = runBlocking {
+        val tempRoot = createTempDirectory("phase8_v8_review").toFile()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val peerServer = ServerSocket(0, 10, java.net.InetAddress.getByName("127.0.0.1"))
+        try {
+            server.executor = Executors.newCachedThreadPool()
+            val port = server.address.port
+
+            val dao = InMemoryDownloadDao()
+            val repo = DownloadRepository(dao)
+            val manager = TorrentDownloadManager(null, repo)
+
+            // 1. Build a 12-file .torrent and verify all 12 files are parsed and default to selected
+            val twelveFileContents = (0 until 12).map { idx ->
+                "FILE_${idx.toString().padStart(2, '0')}_PAYLOAD_VERIFIED_BYTES_${"X".repeat(18 + idx)}".toByteArray(StandardCharsets.UTF_8)
+            }
+            val fullStreamOut = ByteArrayOutputStream()
+            twelveFileContents.forEach { fullStreamOut.write(it) }
+            val fullStream = fullStreamOut.toByteArray()
+            val pieceLen = 64L
+
+            val sha1 = MessageDigest.getInstance("SHA-1")
+            val piecesOut = ByteArrayOutputStream()
+            var off = 0
+            while (off < fullStream.size) {
+                val end = minOf(off + pieceLen.toInt(), fullStream.size)
+                sha1.reset()
+                piecesOut.write(sha1.digest(fullStream.copyOfRange(off, end)))
+                off = end
+            }
+            val totalPieceCount = (fullStream.size + pieceLen.toInt() - 1) / pieceLen.toInt()
+
+            val twelveFileSpecs = (0 until 12).map { idx ->
+                Pair(listOf("chapter_${(idx / 4) + 1}", "track_${(idx + 1).toString().padStart(2, '0')}.bin"), twelveFileContents[idx].size.toLong())
+            }
+            val twelveFileTorrentBytes = buildBencodedMultiFileTorrentWithoutWebSeed(
+                rootName = "Luca_12File_Collection",
+                files = twelveFileSpecs,
+                pieceLength = pieceLen,
+                pieces = piecesOut.toByteArray(),
+                announceUrl = "http://127.0.0.1:$port/announce_12files"
+            )
+            val twelveInfoHashBytes = computeTorrentInfoHashNoWebSeed(twelveFileTorrentBytes)
+            val twelveInfoHashHex = twelveInfoHashBytes.joinToString("") { "%02x".format(it) }
+
+            val parsed12Meta = manager.parseBencodedTorrentBytes(
+                bytes = twelveFileTorrentBytes,
+                fallbackHash = twelveInfoHashHex,
+                expectedInfoHash = twelveInfoHashHex
+            )
+            assertNotNull(parsed12Meta)
+            assertEquals(12, parsed12Meta.metadata.files.size)
+            assertTrue("All 12 files must default to selected", parsed12Meta.metadata.files.all { it.isSelected })
+            assertNotNull("rawInfoBytes must be captured from exact bencoded info slice", parsed12Meta.rawInfoBytes)
+            val rawInfoSha1Hex = MessageDigest.getInstance("SHA-1")
+                .digest(parsed12Meta.rawInfoBytes)
+                .joinToString("") { "%02x".format(it) }
+            assertEquals(twelveInfoHashHex, rawInfoSha1Hex)
+
+            // 2. Verify AddDownloadActivity.TorrentFileSelectionAdapter & resolveSubmittedTorrentSelection
+            //    with 12 files: stable IDs, selecting 4th (index 3) and last (index 11) rows,
+            //    preserving selection across refresh, and rejecting empty selection without fallback
+            var latestSelectedCount = -1
+            var latestTotalCount = -1
+            val adapter = AddDownloadActivity.TorrentFileSelectionAdapter(
+                files = parsed12Meta.metadata.files,
+                onSelectionChanged = { selCount, totCount, _ ->
+                    latestSelectedCount = selCount
+                    latestTotalCount = totCount
+                }
+            )
+            assertEquals(12, adapter.itemCount)
+            assertEquals(12, adapter.getSelectedFileIndices().size)
+            for (pos in 0 until 12) {
+                assertEquals(pos.toLong(), adapter.getItemId(pos))
+            }
+
+            // Select only the 4th (index 3) and last (index 11) rows; unselect all others
+            adapter.setSelectedIndices(setOf(3, 11))
+            assertEquals(2, latestSelectedCount)
+            assertEquals(12, latestTotalCount)
+            assertEquals(listOf(3, 11), adapter.getSelectedFileIndices())
+
+            // Simulate metadata refresh / scroll rebind with same file indices
+            adapter.updateFiles(parsed12Meta.metadata.files, preserveExistingSelection = true)
+            assertEquals(listOf(3, 11), adapter.getSelectedFileIndices())
+            assertEquals(
+                listOf(3, 11),
+                AddDownloadActivity.resolveSubmittedTorrentSelection(adapter, userModifiedSelection = true)
+            )
+            // When user did NOT modify selection and all 12 remain selected, null (explicit all-files) is returned
+            adapter.selectAll(true)
+            assertNull(AddDownloadActivity.resolveSubmittedTorrentSelection(adapter, userModifiedSelection = false))
+
+            // Empty selection must be rejected and NEVER fall back to all files
+            adapter.selectAll(false)
+            assertEquals(emptyList<Int>(), adapter.getSelectedFileIndices())
+            try {
+                AddDownloadActivity.resolveSubmittedTorrentSelection(adapter, userModifiedSelection = true)
+                fail("Expected empty selection in picker to throw IllegalArgumentException")
+            } catch (expected: IllegalArgumentException) {
+                assertTrue(expected.message!!.contains("at least one file", ignoreCase = true))
+            }
+
+            // Restore selection to [3, 11] for the real download transfer
+            adapter.setSelectedIndices(setOf(3, 11))
+            val submittedSelection = AddDownloadActivity.resolveSubmittedTorrentSelection(adapter, userModifiedSelection = true)
+            assertEquals(listOf(3, 11), submittedSelection)
+
+            // Verify startTorrentDownload also rejects emptyList() and out-of-range indices
+            server.createContext("/Luca_12File_Collection.torrent") { ex ->
+                ex.sendResponseHeaders(200, twelveFileTorrentBytes.size.toLong())
+                ex.responseBody.use { it.write(twelveFileTorrentBytes) }
+            }
+            val peerConnected = java.util.concurrent.atomic.AtomicInteger(0)
+            val peerHandshakePeerIds = java.util.concurrent.CopyOnWriteArrayList<String>()
+            val trackerAnnouncePeerIds = java.util.concurrent.CopyOnWriteArrayList<String>()
+
+            server.createContext("/announce_12files") { ex ->
+                val rawQuery = ex.requestURI.rawQuery ?: ""
+                val peerIdParam = rawQuery.split("&")
+                    .firstOrNull { it.startsWith("peer_id=") }
+                    ?.substringAfter("peer_id=")
+                    ?.let { java.net.URLDecoder.decode(it, "ISO-8859-1") }
+                if (peerIdParam != null) {
+                    trackerAnnouncePeerIds.add(peerIdParam)
+                }
+                val pPort = peerServer.localPort
+                val compactResp = ByteArrayOutputStream().apply {
+                    write("d8:completei9e10:incompletei4e8:intervali60e5:peers6:".toByteArray(StandardCharsets.ISO_8859_1))
+                    write(byteArrayOf(127, 0, 0, 1, ((pPort ushr 8) and 0xFF).toByte(), (pPort and 0xFF).toByte()))
+                    write("e".toByteArray(StandardCharsets.ISO_8859_1))
+                }.toByteArray()
+                ex.sendResponseHeaders(200, compactResp.size.toLong())
+                ex.responseBody.use { it.write(compactResp) }
+            }
+            server.start()
+
+            val twelveTorrentUrl = "http://127.0.0.1:$port/Luca_12File_Collection.torrent"
+            val saveDir12 = File(tempRoot, "twelve_file_downloads").apply { mkdirs() }
+
+            val preview12 = manager.getTorrentMetadata(twelveTorrentUrl)
+            assertNotNull(preview12)
+            assertEquals(12, preview12!!.files.size)
+            assertEquals(9, preview12.seeds)
+            assertTrue(preview12.peers >= 1)
+
+            // Reject emptyList()
+            try {
+                manager.startTorrentDownload(
+                    DownloadItem(
+                        url = twelveTorrentUrl,
+                        filename = "Luca_12File_Collection",
+                        savePath = saveDir12.absolutePath,
+                        downloadType = DownloadType.TORRENT
+                    ),
+                    selectedFiles = emptyList()
+                )
+                fail("Expected startTorrentDownload with emptyList() to throw IllegalArgumentException")
+            } catch (_: IllegalArgumentException) {}
+
+            // Reject stale/out-of-range selection (e.g., index 99 on a 12-file torrent)
+            try {
+                manager.startTorrentDownload(
+                    DownloadItem(
+                        url = twelveTorrentUrl,
+                        filename = "Luca_12File_Collection",
+                        savePath = saveDir12.absolutePath,
+                        downloadType = DownloadType.TORRENT
+                    ),
+                    selectedFiles = listOf(99)
+                )
+                fail("Expected startTorrentDownload with out-of-range index to throw IllegalArgumentException")
+            } catch (_: IllegalArgumentException) {}
+
+            // Start TCP peer serving the 12-file swarm
+            val peerThread = Thread {
+                try {
+                    peerServer.soTimeout = 6000
+                    val sock = peerServer.accept()
+                    peerConnected.incrementAndGet()
+                    sock.use { s ->
+                        s.soTimeout = 6000
+                        val input = DataInputStream(s.getInputStream())
+                        val output = DataOutputStream(s.getOutputStream())
+
+                        val hs = ByteArray(68)
+                        input.readFully(hs)
+                        val clientPeerId = String(hs.copyOfRange(48, 68), StandardCharsets.ISO_8859_1)
+                        peerHandshakePeerIds.add(clientPeerId)
+
+                        val respHs = ByteArray(68)
+                        respHs[0] = 19
+                        System.arraycopy("BitTorrent protocol".toByteArray(StandardCharsets.ISO_8859_1), 0, respHs, 1, 19)
+                        System.arraycopy(twelveInfoHashBytes, 0, respHs, 28, 20)
+                        System.arraycopy("-LU8000-swarmpeer001".toByteArray(StandardCharsets.ISO_8859_1), 0, respHs, 48, 20)
+                        output.write(respHs)
+                        output.flush()
+
+                        val intLen = input.readInt()
+                        if (intLen > 0) input.readFully(ByteArray(intLen))
+
+                        for (p in 0 until totalPieceCount) {
+                            output.writeInt(5)
+                            output.writeByte(4)
+                            output.writeInt(p)
+                        }
+                        output.writeInt(1)
+                        output.writeByte(1) // UNCHOKE
+                        output.flush()
+
+                        while (!s.isClosed) {
+                            val reqLen = try { input.readInt() } catch (_: Exception) { break }
+                            if (reqLen <= 0) continue
+                            val reqId = input.readUnsignedByte()
+                            if (reqId == 6 && reqLen == 13) {
+                                val pieceIdx = input.readInt()
+                                val begin = input.readInt()
+                                val length = input.readInt()
+                                val globalOffset = pieceIdx * pieceLen.toInt() + begin
+                                val slice = fullStream.copyOfRange(globalOffset, globalOffset + length)
+                                output.writeInt(9 + slice.size)
+                                output.writeByte(7)
+                                output.writeInt(pieceIdx)
+                                output.writeInt(begin)
+                                output.write(slice)
+                                output.flush()
+                            } else {
+                                input.readFully(ByteArray(reqLen - 1))
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+            }.apply { isDaemon = true; start() }
+
+            // Submit the exact selected indices [3, 11] (4th and last rows)
+            val job12Id = manager.startTorrentDownload(
+                DownloadItem(
+                    url = twelveTorrentUrl,
+                    filename = "Luca_12File_Collection",
+                    savePath = saveDir12.absolutePath,
+                    downloadType = DownloadType.TORRENT
+                ),
+                selectedFiles = submittedSelection
+            )
+            val queued12 = repo.getDownloadById(job12Id)!!
+            assertEquals(listOf(3, 11), queued12.selectedFiles)
+            val expectedSelectedBytes = (twelveFileContents[3].size + twelveFileContents[11].size).toLong()
+            assertEquals(expectedSelectedBytes, queued12.fileSize)
+
+            var completed12: DownloadItem? = null
+            manager.executeTorrentJob(
+                downloadItem = queued12,
+                onProgress = { _, _, _, _, _, _, _ -> },
+                onComplete = { completed12 = it },
+                onError = { _, err -> fail("12-file selected download failed: $err") }
+            )
+            assertNotNull("Expected 12-file selected download to complete", completed12)
+            assertEquals(DownloadStatus.COMPLETED, repo.getDownloadById(job12Id)!!.status)
+            assertEquals(1, peerConnected.get())
+
+            // Verify sessionPeerId consistency between HTTP tracker announce and TCP peer handshake
+            assertTrue("Peer handshake must record 20-byte peer_id", peerHandshakePeerIds.isNotEmpty())
+            assertEquals(20, peerHandshakePeerIds.first().length)
+            if (trackerAnnouncePeerIds.isNotEmpty()) {
+                assertTrue(
+                    "Tracker announce peer_id must match peer handshake peer_id for the download session",
+                    trackerAnnouncePeerIds.contains(peerHandshakePeerIds.first())
+                )
+            }
+
+            // Verify ONLY index 3 and index 11 exist on disk with exact matching bytes
+            for (idx in 0 until 12) {
+                val relPath = twelveFileSpecs[idx].first.joinToString("/")
+                val targetFile = File(saveDir12, "Luca_12File_Collection/$relPath")
+                if (idx == 3 || idx == 11) {
+                    assertTrue("Selected file index $idx must exist on disk", targetFile.exists())
+                    assertArrayEquals("Selected file index $idx bytes must match", twelveFileContents[idx], targetFile.readBytes())
+                } else {
+                    assertFalse("Unselected file index $idx must NOT be promoted", targetFile.exists())
+                }
+            }
+            peerThread.join(1000)
+
+            // 3. Verify SimpleBencodeDecoder rejects duplicate dictionary keys
+            val duplicateKeyBencode = "d3:fooi1e3:fooi2ee".toByteArray(StandardCharsets.ISO_8859_1)
+            try {
+                TorrentDownloadManager.SimpleBencodeDecoder(duplicateKeyBencode).readValue()
+                fail("Expected duplicate bencode dictionary key to throw SecurityException")
+            } catch (expected: SecurityException) {
+                assertTrue(expected.message!!.contains("Duplicate dictionary key"))
+            }
+
+            // 4. Verify parseBencodedTorrentBytes rejects mismatched expectedInfoHash
+            try {
+                manager.parseBencodedTorrentBytes(
+                    bytes = twelveFileTorrentBytes,
+                    fallbackHash = twelveInfoHashHex,
+                    expectedInfoHash = "0000000000000000000000000000000000000000"
+                )
+                fail("Expected mismatched expectedInfoHash to throw SecurityException")
+            } catch (expected: SecurityException) {
+                assertTrue(expected.message!!.contains("does not match magnet info-hash"))
+            }
+
+            // 5. Verify per-job storage isolation (jobId + infoHash) and open/share path containment
+            val isolationBase = File(tempRoot, "isolation_base").apply { mkdirs() }
+            val rootJob101 = TorrentPathSafety.allocateSafeJobRoot(
+                baseDownloadDir = isolationBase,
+                rawTorrentName = "Shared_Swarm_Folder",
+                infoHashHex = twelveInfoHashHex,
+                jobId = 101L
+            )
+            val rootJob102 = TorrentPathSafety.allocateSafeJobRoot(
+                baseDownloadDir = isolationBase,
+                rawTorrentName = "Shared_Swarm_Folder",
+                infoHashHex = twelveInfoHashHex,
+                jobId = 102L
+            )
+            val rootJob101Retry = TorrentPathSafety.allocateSafeJobRoot(
+                baseDownloadDir = isolationBase,
+                rawTorrentName = "Shared_Swarm_Folder",
+                infoHashHex = twelveInfoHashHex,
+                jobId = 101L
+            )
+            assertEquals("Retry of same jobId must reuse job directory", rootJob101.canonicalPath, rootJob101Retry.canonicalPath)
+            assertFalse(
+                "Separate jobs for the same torrent must receive isolated directories",
+                rootJob101.canonicalPath == rootJob102.canonicalPath
+            )
+
+            // Create a completed file inside rootJob101 and verify MediaAssetHelper ownership check
+            val job101File = File(rootJob101, "track.mp3").apply { writeBytes("MP3DATA".toByteArray()) }
+            val resolvedForOwner = MediaAssetHelper.resolveTargetFileForOpenOrShare(
+                DownloadItem(
+                    id = 101L,
+                    url = twelveTorrentUrl,
+                    filename = rootJob101.name,
+                    savePath = isolationBase.absolutePath,
+                    downloadType = DownloadType.TORRENT
+                )
+            )
+            assertNotNull("Owner job 101 must resolve its torrent folder/file", resolvedForOwner)
+            assertEquals(job101File.canonicalPath, resolvedForOwner!!.canonicalPath)
+
+            val resolvedForWrongJob = MediaAssetHelper.resolveTargetFileForOpenOrShare(
+                DownloadItem(
+                    id = 102L,
+                    url = twelveTorrentUrl,
+                    filename = rootJob101.name,
+                    savePath = isolationBase.absolutePath,
+                    downloadType = DownloadType.TORRENT
+                )
+            )
+            assertNull("Non-owner job 102 must NOT resolve job 101's folder", resolvedForWrongJob)
+
+            val resolvedTraversal = MediaAssetHelper.resolveTargetFileForOpenOrShare(
+                DownloadItem(
+                    id = 101L,
+                    url = twelveTorrentUrl,
+                    filename = "../outside_secret.txt",
+                    savePath = isolationBase.absolutePath,
+                    downloadType = DownloadType.DIRECT
+                )
+            )
+            assertNull("Path traversal filename must be rejected", resolvedTraversal)
+
+            // 6. Verify DownloadService in-process active download ownership guard
+            com.example.downloadmanager.service.DownloadService.markDownloadRunningForTest(777L, true)
+            assertTrue(com.example.downloadmanager.service.DownloadService.isDownloadActivelyRunning(777L))
+            com.example.downloadmanager.service.DownloadService.markDownloadRunningForTest(777L, false)
+            assertFalse(com.example.downloadmanager.service.DownloadService.isDownloadActivelyRunning(777L))
+
+            // 7. Verify HttpRangeValidator.hasStrongValidator & unverified partial .part rejection
+            assertFalse(HttpRangeValidator.hasStrongValidator(null, null))
+            assertFalse(HttpRangeValidator.hasStrongValidator("W/\"weak-etag\"", null))
+            assertTrue(HttpRangeValidator.hasStrongValidator("\"strong-etag-1\"", null))
+            assertTrue(HttpRangeValidator.hasStrongValidator(null, "Wed, 21 Oct 2025 07:28:00 GMT"))
+            assertFalse(HttpRangeValidator.isValidatorCompatible(null, null, null, null))
+
+            val httpPayload = "AUTHENTIC_SERVER_PAYLOAD_BYTES_2026_VERIFIED".toByteArray(StandardCharsets.UTF_8)
+            server.createContext("/no_validator.bin") { ex ->
+                ex.sendResponseHeaders(200, httpPayload.size.toLong())
+                ex.responseBody.use { it.write(httpPayload) }
+            }
+            val httpDir = File(tempRoot, "http_validator_check").apply { mkdirs() }
+            val httpMgr = DownloadManager(null, repo)
+            val httpInsertedId = repo.insert(
+                DownloadItem(
+                    url = "http://127.0.0.1:$port/no_validator.bin",
+                    filename = "no_validator.bin",
+                    savePath = httpDir.absolutePath,
+                    downloadType = DownloadType.DIRECT,
+                    status = DownloadStatus.QUEUED
+                )
+            )
+            // Plant a corrupted staging .part file of the exact same byte length when expectedSha256 is null
+            val corruptPart = File(httpDir, ".no_validator.bin.part.$httpInsertedId").apply {
+                writeBytes("CORRUPTED_STALE_PART_FILE_SAME_LEN_000000000".toByteArray(StandardCharsets.UTF_8))
+            }
+            assertEquals(httpPayload.size.toLong(), corruptPart.length())
+
+            val httpItem = repo.getDownloadById(httpInsertedId)!!
+            httpMgr.executeDownloadJob(
+                downloadItem = httpItem,
+                onProgress = { _, _, _, _ -> },
+                onComplete = {},
+                onError = { _, err -> fail("HTTP download with stale unverified .part failed: $err") }
+            )
+            val finalHttpFile = File(httpDir, "no_validator.bin")
+            assertTrue(finalHttpFile.exists())
+            assertArrayEquals(
+                "Stale unverified .part of matching size must NOT be promoted; fresh server bytes must be downloaded",
+                httpPayload,
+                finalHttpFile.readBytes()
+            )
+
+            // 8. Verify DownloadStatusConverter preserves null (all files) vs emptyList vs explicit indices across SQLite round-trip
+            val statusConverter = com.example.downloadmanager.model.DownloadStatusConverter()
+            assertNull(
+                "All-files selection (null) must remain null after SQLite converter round-trip",
+                statusConverter.toIntList(statusConverter.fromIntList(null))
+            )
+            assertEquals(
+                "Empty selection must remain emptyList after SQLite converter round-trip",
+                emptyList<Int>(),
+                statusConverter.toIntList(statusConverter.fromIntList(emptyList()))
+            )
+            assertEquals(
+                "Explicit selection [3, 11] must round-trip intact through SQLite converter",
+                listOf(3, 11),
+                statusConverter.toIntList(statusConverter.fromIntList(listOf(3, 11)))
+            )
+
+            // 9. Verify real BrowserActivity detection & download offers for Audio sites (Spotify, SoundCloud, Bandcamp),
+            //    Video sites (YouTube, TikTok), and general sites (.torrent, magnet, .pdf, .apk)
+            val spotifyOffers = com.example.downloadmanager.activity.BrowserActivity.buildOfferItemsForPageUrl(
+                "https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8",
+                "Track Name"
+            )
+            assertEquals(1, spotifyOffers.size)
+            assertEquals(DownloadType.MUSIC, spotifyOffers.first().downloadType)
+
+            val soundCloudOffers = com.example.downloadmanager.activity.BrowserActivity.buildOfferItemsForPageUrl(
+                "https://soundcloud.com/artist-name/song-name",
+                "Artist - Song"
+            )
+            assertEquals(1, soundCloudOffers.size)
+            assertEquals(DownloadType.MUSIC, soundCloudOffers.first().downloadType)
+
+            val bandcampOffers = com.example.downloadmanager.activity.BrowserActivity.buildOfferItemsForPageUrl(
+                "https://exampleartist.bandcamp.com/track/indie-song",
+                "Indie Song"
+            )
+            assertEquals(1, bandcampOffers.size)
+            assertEquals(DownloadType.MUSIC, bandcampOffers.first().downloadType)
+
+            val youtubeOffers = com.example.downloadmanager.activity.BrowserActivity.buildOfferItemsForPageUrl(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "Sample Video"
+            )
+            assertEquals(2, youtubeOffers.size)
+            assertEquals(DownloadType.VIDEO, youtubeOffers[0].downloadType)
+            assertEquals(DownloadType.MUSIC, youtubeOffers[1].downloadType)
+
+            val tiktokOffers = com.example.downloadmanager.activity.BrowserActivity.buildOfferItemsForPageUrl(
+                "https://www.tiktok.com/@creator/video/7123456789012345678",
+                "Creator Clip"
+            )
+            assertEquals(2, tiktokOffers.size)
+            assertEquals(DownloadType.VIDEO, tiktokOffers[0].downloadType)
+            assertEquals(DownloadType.MUSIC, tiktokOffers[1].downloadType)
+
+            val classifiedMp3 = com.example.downloadmanager.activity.BrowserActivity.classifyDiscoveredResourceUrl(
+                "https://cdn.example.com/media/مستوى_الصوت.mp3"
+            )
+            assertNotNull(classifiedMp3)
+            assertEquals(DownloadType.MUSIC, classifiedMp3!!.downloadType)
+
+            val classifiedTorrent = com.example.downloadmanager.activity.BrowserActivity.classifyDiscoveredResourceUrl(
+                "https://releases.example.com/archive.torrent"
+            )
+            assertNotNull(classifiedTorrent)
+            assertEquals(DownloadType.TORRENT, classifiedTorrent!!.downloadType)
+
+            val classifiedPdf = com.example.downloadmanager.activity.BrowserActivity.classifyDiscoveredResourceUrl(
+                "https://docs.example.com/specification.pdf"
+            )
+            assertNotNull(classifiedPdf)
+            assertEquals(DownloadType.DIRECT, classifiedPdf!!.downloadType)
+        } finally {
+            try { peerServer.close() } catch (_: Exception) {}
+            server.stop(0)
+            tempRoot.deleteRecursively()
+        }
     }
 
     private fun computeTorrentInfoHash(torrentBytes: ByteArray): ByteArray {

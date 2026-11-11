@@ -258,41 +258,7 @@ class MusicDownloadManager(
                 .replace(Regex("\\s+"), " ")
                 .trim()
         }
-
-        fun getSampleMusicTracks(): List<SampleTrack> = listOf(
-            SampleTrack(
-                title = "Flickermood",
-                artist = "Forss",
-                platform = "SoundCloud",
-                url = "https://soundcloud.com/forss/flickermood"
-            ),
-            SampleTrack(
-                title = "SoundHelix Song 1 (Electronic Synth MP3)",
-                artist = "T. Schürger",
-                platform = "Direct MP3",
-                url = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"
-            ),
-            SampleTrack(
-                title = "Never Gonna Give You Up (30s Preview / Opt-In Match)",
-                artist = "Rick Astley",
-                platform = "Spotify",
-                url = "https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8"
-            ),
-            SampleTrack(
-                title = "Elephants Dream Orchestral Score (CC-BY MP3)",
-                artist = "Jan Morgenstern",
-                platform = "Internet Archive Audio",
-                url = "https://archive.org/download/ElephantsDream/ED-CM-5.1-DVD-C.mp3"
-            )
-        )
     }
-
-    data class SampleTrack(
-        val title: String,
-        val artist: String,
-        val platform: String,
-        val url: String
-    )
 
     private fun isAlternateSourceAllowedByPrefs(): Boolean {
         val ctx = context ?: return false

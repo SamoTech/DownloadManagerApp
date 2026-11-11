@@ -128,6 +128,12 @@
             android:entries="@array/seed_until_options"
             android:entryValues="@array/seed_until_values"
             app:useSimpleSummaryProvider="true" />
+
+        <SwitchPreferenceCompat
+            android:key="allow_third_party_torrent_resolvers"
+            android:title="@string/allow_third_party_torrent_resolvers"
+            android:summary="@string/allow_third_party_torrent_resolvers_summary"
+            android:defaultValue="false" />
     </PreferenceCategory>
 
     <PreferenceCategory

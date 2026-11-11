@@ -93,7 +93,24 @@ object HttpRangeValidator {
     }
 
     /**
-     * Returns true if the stored validator (`etag` or `lastModified`) is compatible with the new response headers.
+     * Returns true if at least one strong representation validator is present:
+     * a non-weak ETag (not starting with `W/`) or a non-blank `Last-Modified` timestamp.
+     */
+    fun hasStrongValidator(etag: String?, lastModified: String?): Boolean {
+        val cleanEtag = etag?.trim()
+        if (!cleanEtag.isNullOrEmpty() && !cleanEtag.startsWith("W/", ignoreCase = true)) {
+            return true
+        }
+        val cleanLastMod = lastModified?.trim()
+        if (!cleanLastMod.isNullOrEmpty()) {
+            return true
+        }
+        return false
+    }
+
+    /**
+     * Returns true if the stored validator (`etag` or `lastModified`) is a strong validator and
+     * matches the new response headers.
      * Note: Weak ETags (`W/"..."`) cannot be trusted for byte-range equivalence per RFC 9110 Section 13.1.5.
      */
     fun isValidatorCompatible(
@@ -102,8 +119,13 @@ object HttpRangeValidator {
         responseEtag: String?,
         responseLastModified: String?
     ): Boolean {
+        if (!hasStrongValidator(storedEtag, storedLastModified)) {
+            return false
+        }
+        val hasStrongStoredEtag = !storedEtag.isNullOrBlank() &&
+            !storedEtag.trim().startsWith("W/", ignoreCase = true)
         if (!storedEtag.isNullOrBlank()) {
-            if (storedEtag.trim().startsWith("W/", ignoreCase = true)) {
+            if (!hasStrongStoredEtag) {
                 return false
             }
             if (responseEtag.isNullOrBlank()) {
@@ -113,7 +135,10 @@ object HttpRangeValidator {
                 return false
             }
         }
-        if (!storedLastModified.isNullOrBlank() && !responseLastModified.isNullOrBlank()) {
+        if (!storedLastModified.isNullOrBlank()) {
+            if (responseLastModified.isNullOrBlank()) {
+                return false
+            }
             if (storedLastModified.trim() != responseLastModified.trim()) {
                 return false
             }

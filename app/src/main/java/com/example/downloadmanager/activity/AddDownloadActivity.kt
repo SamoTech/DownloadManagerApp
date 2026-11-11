@@ -53,7 +53,11 @@ class AddDownloadActivity : AppCompatActivity() {
     private lateinit var torrentDownloadManager: TorrentDownloadManager
 
     private var downloadType: DownloadType = DownloadType.DIRECT
-    private var torrentFilesAdapter: TorrentFileSelectionAdapter? = null
+    internal var torrentFilesAdapter: TorrentFileSelectionAdapter? = null
+    private var currentTorrentIdentity: String? = null
+    private var preservedSelectedIndices: LinkedHashSet<Int>? = null
+    private var userModifiedTorrentSelection: Boolean = false
+    private var isUpdatingSelectAllCheckbox: Boolean = false
     private var selectedVideoFormat: VideoFormat? = null
     private var metadataExtractJob: Job? = null
     private var isUpdatingChipsProgrammatically = false
@@ -73,14 +77,45 @@ class AddDownloadActivity : AppCompatActivity() {
             }
             userManuallyEditedFilename = false
             switchDownloadType(DownloadType.TORRENT)
-            val uriString = uri.toString()
-            binding.etUrl.setText(uriString)
+            val cachedOrUriString = torrentDownloadManager.cachePickedTorrentUri(uri) ?: uri.toString()
+            binding.etUrl.setText(cachedOrUriString)
             val token = probeRequestToken.incrementAndGet()
-            extractMagnetInfo(uriString, token)
+            extractMagnetInfo(cachedOrUriString, token)
         }
     }
 
     companion object {
+        private const val STATE_TORRENT_IDENTITY = "state_torrent_identity"
+        private const val STATE_SELECTED_FILE_INDICES = "state_selected_file_indices"
+        private const val STATE_USER_MODIFIED_SELECTION = "state_user_modified_selection"
+
+        /**
+         * Distinguishes an explicit request for all files (`null`) from an explicit file index selection
+         * (`List<Int>`), and rejects empty or out-of-range selections with `IllegalArgumentException`
+         * so an invalid selection never falls back to all files.
+         */
+        internal fun resolveSubmittedTorrentSelection(
+            adapter: TorrentFileSelectionAdapter?,
+            userModifiedSelection: Boolean
+        ): List<Int>? {
+            if (adapter == null || adapter.itemCount == 0) {
+                return null
+            }
+            val validIndices = adapter.getAllValidIndices()
+            val selected = adapter.getSelectedFileIndices()
+            if (selected.isEmpty()) {
+                throw IllegalArgumentException("Please select at least one file to download")
+            }
+            if (selected.any { it !in validIndices }) {
+                throw IllegalArgumentException("Selected file index is out of range for this torrent")
+            }
+            return if (!userModifiedSelection && selected.size == validIndices.size) {
+                null
+            } else {
+                selected
+            }
+        }
+
         /**
          * Normalizes and validates HTTP/HTTPS, magnet, or local .torrent links, including extracting
          * embedded URLs when a user pastes surrounding share text, while preserving raw Unicode/Arabic
@@ -128,9 +163,18 @@ class AddDownloadActivity : AppCompatActivity() {
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         supportActionBar?.title = getString(R.string.add_download)
-        binding.toolbar.subtitle = "Luca v${BuildConfig.VERSION_NAME}"
+        binding.toolbar.subtitle = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
         binding.toolbar.setNavigationOnClickListener {
             onBackPressedDispatcher.onBackPressed()
+        }
+
+        if (savedInstanceState != null) {
+            currentTorrentIdentity = savedInstanceState.getString(STATE_TORRENT_IDENTITY)
+            userModifiedTorrentSelection = savedInstanceState.getBoolean(STATE_USER_MODIFIED_SELECTION, false)
+            val savedArray = savedInstanceState.getIntArray(STATE_SELECTED_FILE_INDICES)
+            if (savedArray != null) {
+                preservedSelectedIndices = LinkedHashSet(savedArray.toList())
+            }
         }
 
         val database = DownloadDatabase.getDatabase(application)
@@ -146,10 +190,50 @@ class AddDownloadActivity : AppCompatActivity() {
 
         val prefs = PreferenceManager.getDefaultSharedPreferences(this)
         binding.cbAllowAlternateSource.isChecked = prefs.getBoolean("allow_alternate_music_source", false)
+        applyDefaultFormatPreferences(prefs)
 
+        setupTorrentRecyclerView()
         setupChipSelector()
         setupListeners()
-        handleIncomingIntent()
+        if (savedInstanceState == null) {
+            handleIncomingIntent()
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        val activeSelection = torrentFilesAdapter?.getSelectedFileIndices()
+            ?: preservedSelectedIndices?.toList()
+        outState.putString(STATE_TORRENT_IDENTITY, currentTorrentIdentity)
+        outState.putBoolean(STATE_USER_MODIFIED_SELECTION, userModifiedTorrentSelection)
+        if (activeSelection != null) {
+            outState.putIntArray(STATE_SELECTED_FILE_INDICES, activeSelection.toIntArray())
+        }
+    }
+
+    private fun setupTorrentRecyclerView() {
+        binding.rvTorrentFiles.layoutManager = object : LinearLayoutManager(this) {
+            override fun canScrollVertically(): Boolean = false
+        }
+        binding.rvTorrentFiles.isNestedScrollingEnabled = false
+        binding.rvTorrentFiles.itemAnimator = null
+    }
+
+    private fun applyDefaultFormatPreferences(prefs: android.content.SharedPreferences) {
+        when (prefs.getString("default_video_quality", "best")) {
+            "high" -> binding.rbHighQuality.isChecked = true
+            "medium" -> binding.rbMediumQuality.isChecked = true
+            "low" -> binding.rbLowQuality.isChecked = true
+            "audio" -> binding.rbAudioOnly.isChecked = true
+            else -> binding.rbBestQuality.isChecked = true
+        }
+        when (prefs.getString("default_music_format", "mp3_320")) {
+            "mp3_192" -> binding.rbMusicMp3192.isChecked = true
+            "flac" -> binding.rbMusicFlac.isChecked = true
+            "m4a_256" -> binding.rbMusicM4a.isChecked = true
+            "ogg_192" -> binding.rbMusicOgg.isChecked = true
+            else -> binding.rbMusicMp3320.isChecked = true
+        }
     }
 
     private fun setupChipSelector() {
@@ -248,36 +332,6 @@ class AddDownloadActivity : AppCompatActivity() {
             showSavePathSelectorDialog(isTorrent = true)
         }
 
-        val sampleTracks = MusicDownloadManager.getSampleMusicTracks()
-        binding.chipSampleSoundCloud.setOnClickListener {
-            applySampleMusicTrack(sampleTracks[0])
-        }
-        binding.chipSampleYtMusic.setOnClickListener {
-            applySampleMusicTrack(sampleTracks[1])
-        }
-        binding.chipSampleBandcamp.setOnClickListener {
-            applySampleMusicTrack(sampleTracks[2])
-        }
-        binding.chipSampleArchive.setOnClickListener {
-            applySampleMusicTrack(sampleTracks[3])
-        }
-
-        binding.chipSampleTorrentFile.setOnClickListener {
-            applySampleTorrentFile(TorrentDownloadManager.SAMPLE_TORRENT_SINTEL)
-        }
-        binding.chipSampleMagnet1.setOnClickListener {
-            applySampleMagnet(TorrentDownloadManager.SAMPLE_MAGNET_WIRED_CD)
-        }
-        binding.chipSampleMagnet2.setOnClickListener {
-            applySampleMagnet(TorrentDownloadManager.SAMPLE_MAGNET_SINTEL)
-        }
-        binding.chipSampleMagnet3.setOnClickListener {
-            applySampleMagnet(TorrentDownloadManager.SAMPLE_MAGNET_BIG_BUCK_BUNNY)
-        }
-        binding.chipSampleMagnet4.setOnClickListener {
-            applySampleMagnet(TorrentDownloadManager.SAMPLE_MAGNET_COSMOS_LAUNDROMAT)
-        }
-
         binding.btnPickTorrentFile.setOnClickListener {
             pickTorrentLauncher.launch(arrayOf("application/x-bittorrent", "application/octet-stream", "*/*"))
         }
@@ -293,6 +347,8 @@ class AddDownloadActivity : AppCompatActivity() {
         }
 
         binding.cbSelectAllFiles.setOnCheckedChangeListener { _, isChecked ->
+            if (isUpdatingSelectAllCheckbox) return@setOnCheckedChangeListener
+            userModifiedTorrentSelection = true
             torrentFilesAdapter?.selectAll(isChecked)
         }
 
@@ -338,31 +394,6 @@ class AddDownloadActivity : AppCompatActivity() {
         }
     }
 
-    private fun applySampleMusicTrack(track: MusicDownloadManager.SampleTrack) {
-        userManuallyEditedFilename = false
-        switchDownloadType(DownloadType.MUSIC)
-        binding.etUrl.setText(track.url)
-        setSuggestedFilenameIfNotEdited("${track.title}.mp3")
-        binding.etArtist.setText(track.artist)
-        binding.tvDetectedMusicPlatform.text = "Detected: ${track.platform}"
-    }
-
-    private fun applySampleMagnet(magnetUri: String) {
-        userManuallyEditedFilename = false
-        switchDownloadType(DownloadType.MAGNET)
-        binding.etUrl.setText(magnetUri)
-        val token = probeRequestToken.incrementAndGet()
-        extractMagnetInfo(magnetUri, token)
-    }
-
-    private fun applySampleTorrentFile(torrentUrl: String) {
-        userManuallyEditedFilename = false
-        switchDownloadType(DownloadType.TORRENT)
-        binding.etUrl.setText(torrentUrl)
-        val token = probeRequestToken.incrementAndGet()
-        extractMagnetInfo(torrentUrl, token)
-    }
-
     private fun handleIncomingIntent() {
         val typeExtra = intent.getStringExtra("download_type") ?: intent.getStringExtra("type")
         if (!typeExtra.isNullOrBlank()) {
@@ -393,9 +424,16 @@ class AddDownloadActivity : AppCompatActivity() {
 
         if (!incomingUrl.isNullOrBlank()) {
             val cleaned = normalizeAndValidateUrl(incomingUrl) ?: incomingUrl.trim()
-            binding.etUrl.setText(cleaned)
-            autoDetectTypeFromUrl(cleaned)
-            triggerMetadataExtractionDebounced(cleaned)
+            val effectiveUrl = if (cleaned.startsWith("content://", ignoreCase = true)) {
+                runCatching {
+                    torrentDownloadManager.cachePickedTorrentUri(android.net.Uri.parse(cleaned))
+                }.getOrNull() ?: cleaned
+            } else {
+                cleaned
+            }
+            binding.etUrl.setText(effectiveUrl)
+            autoDetectTypeFromUrl(effectiveUrl)
+            triggerMetadataExtractionDebounced(effectiveUrl)
         }
     }
 
@@ -535,17 +573,76 @@ class AddDownloadActivity : AppCompatActivity() {
                 binding.tvTorrentMetaSummary.text =
                     "${metadata.name} • ${metadata.files.size} files ($sizeLabel) • $seedsLabel • $peersLabel$trackerNote"
 
-                val adapter = TorrentFileSelectionAdapter(metadata.files)
-                torrentFilesAdapter = adapter
-                binding.rvTorrentFiles.layoutManager = LinearLayoutManager(this@AddDownloadActivity)
-                binding.rvTorrentFiles.adapter = adapter
-                binding.rvTorrentFiles.visibility = View.VISIBLE
+                bindTorrentFilesToPicker(
+                    torrentIdentity = metadata.hash.ifBlank { url.lowercase(Locale.US) },
+                    files = metadata.files
+                )
             } else {
                 val trackerNote = metadata?.trackerStatus?.takeIf { it.isNotBlank() }
                     ?: "${getString(R.string.seeds_unavailable)} • ${getString(R.string.peers_unavailable)}"
                 binding.tvTorrentMetaSummary.text =
                     "Magnet link ready • $trackerNote"
             }
+        }
+    }
+
+    internal fun bindTorrentFilesToPicker(
+        torrentIdentity: String,
+        files: List<TorrentFileInfo>
+    ) {
+        val normalizedIdentity = torrentIdentity.trim().lowercase(Locale.US)
+        val sameIdentity = currentTorrentIdentity != null && currentTorrentIdentity == normalizedIdentity
+        val previousSelected: Set<Int>? = when {
+            sameIdentity && torrentFilesAdapter != null ->
+                torrentFilesAdapter!!.getSelectedFileIndices().toSet()
+            sameIdentity && preservedSelectedIndices != null ->
+                preservedSelectedIndices
+            else -> {
+                userModifiedTorrentSelection = false
+                null
+            }
+        }
+        currentTorrentIdentity = normalizedIdentity
+
+        val filesWithPreservedSelection = if (previousSelected != null) {
+            files.map { fileInfo ->
+                fileInfo.copy(isSelected = fileInfo.index in previousSelected)
+            }
+        } else {
+            files.map { it.copy() }
+        }
+
+        val adapter = TorrentFileSelectionAdapter(filesWithPreservedSelection) { selectedCount, totalCount, selectedBytes ->
+            preservedSelectedIndices = LinkedHashSet(torrentFilesAdapter?.getSelectedFileIndices().orEmpty())
+            updateTorrentSelectionHeader(selectedCount, totalCount, selectedBytes)
+        }
+        adapter.onUserToggledSelection = {
+            userModifiedTorrentSelection = true
+        }
+        torrentFilesAdapter = adapter
+        preservedSelectedIndices = LinkedHashSet(adapter.getSelectedFileIndices())
+        if (binding.rvTorrentFiles.layoutManager == null) {
+            setupTorrentRecyclerView()
+        }
+        binding.rvTorrentFiles.adapter = adapter
+        binding.rvTorrentFiles.visibility = View.VISIBLE
+        binding.rvTorrentFiles.requestLayout()
+        binding.scrollContainer.requestLayout()
+        updateTorrentSelectionHeader(
+            selectedCount = adapter.getSelectedFileIndices().size,
+            totalCount = adapter.itemCount,
+            selectedBytes = adapter.getSelectedSizeBytes()
+        )
+    }
+
+    private fun updateTorrentSelectionHeader(selectedCount: Int, totalCount: Int, selectedBytes: Long) {
+        val sizeStr = if (selectedBytes > 0L) " (${formatBytes(selectedBytes)})" else ""
+        binding.tvSelectedFilesCount.text = "$selectedCount / $totalCount selected$sizeStr"
+        val shouldBeChecked = totalCount > 0 && selectedCount == totalCount
+        if (binding.cbSelectAllFiles.isChecked != shouldBeChecked) {
+            isUpdatingSelectAllCheckbox = true
+            binding.cbSelectAllFiles.isChecked = shouldBeChecked
+            isUpdatingSelectAllCheckbox = false
         }
     }
 
@@ -718,27 +815,39 @@ class AddDownloadActivity : AppCompatActivity() {
         val isAudioOnly = downloadType == DownloadType.MUSIC ||
             (downloadType == DownloadType.VIDEO && (binding.rbAudioOnly.isChecked || binding.cbExtractAudio.isChecked))
 
-        if ((downloadType == DownloadType.TORRENT || downloadType == DownloadType.MAGNET) &&
-            torrentFilesAdapter?.hasUserUncheckedAll() == true
-        ) {
-            Toast.makeText(this, "Please select at least one file to download", Toast.LENGTH_SHORT).show()
-            return
+        val selectedIndices: List<Int>? = if (downloadType == DownloadType.TORRENT || downloadType == DownloadType.MAGNET) {
+            try {
+                resolveSubmittedTorrentSelection(torrentFilesAdapter, userModifiedTorrentSelection)
+            } catch (iae: IllegalArgumentException) {
+                Toast.makeText(this, iae.message ?: "Please select at least one file to download", Toast.LENGTH_SHORT).show()
+                return
+            }
+        } else {
+            null
         }
 
-        val selectedIndices = torrentFilesAdapter?.getSelectedFileIndices()
+        val effectiveUrl = if ((downloadType == DownloadType.TORRENT || downloadType == DownloadType.MAGNET) &&
+            validUrl.startsWith("content://", ignoreCase = true)
+        ) {
+            runCatching {
+                torrentDownloadManager.cachePickedTorrentUri(android.net.Uri.parse(validUrl))
+            }.getOrNull() ?: validUrl
+        } else {
+            validUrl
+        }
 
         binding.btnStartDownload.isEnabled = false
 
         lifecycleScope.launch {
             try {
                 val baseItem = DownloadItem(
-                    url = validUrl,
+                    url = effectiveUrl,
                     filename = finalFilename,
                     savePath = savePath,
                     downloadType = downloadType,
                     status = DownloadStatus.QUEUED,
                     isAudioOnly = isAudioOnly,
-                    magnetUri = if (validUrl.startsWith("magnet:", ignoreCase = true)) validUrl else null,
+                    magnetUri = if (effectiveUrl.startsWith("magnet:", ignoreCase = true)) effectiveUrl else null,
                     selectedFiles = selectedIndices
                 )
 
@@ -792,16 +901,29 @@ class AddDownloadActivity : AppCompatActivity() {
         }
     }
 
-    private class TorrentFileSelectionAdapter(
-        files: List<TorrentFileInfo>
+    internal class TorrentFileSelectionAdapter(
+        files: List<TorrentFileInfo>,
+        private val onSelectionChanged: ((selectedCount: Int, totalCount: Int, selectedBytes: Long) -> Unit)? = null
     ) : RecyclerView.Adapter<TorrentFileSelectionAdapter.ViewHolder>() {
 
         private val items = files.map { it.copy() }.toMutableList()
+        private val selectedByStableIndex = LinkedHashSet<Int>(
+            items.filter { it.isSelected }.map { it.index }
+        )
+        var onUserToggledSelection: (() -> Unit)? = null
+
+        init {
+            runCatching { setHasStableIds(true) }
+        }
 
         class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
             val cbFileSelect: MaterialCheckBox = view.findViewById(R.id.cbFileSelect)
             val tvFileName: TextView = view.findViewById(R.id.tvFileName)
             val tvFileSize: TextView = view.findViewById(R.id.tvFileSize)
+        }
+
+        override fun getItemId(position: Int): Long {
+            return items[position].index.toLong()
         }
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
@@ -812,15 +934,23 @@ class AddDownloadActivity : AppCompatActivity() {
 
         override fun onBindViewHolder(holder: ViewHolder, position: Int) {
             val item = items[position]
+            val isCheckedNow = item.index in selectedByStableIndex
+            if (item.isSelected != isCheckedNow) {
+                items[position] = item.copy(isSelected = isCheckedNow)
+            }
             holder.tvFileName.text = item.path.ifBlank { item.name }
             holder.tvFileSize.text = formatFileSize(item.size)
             holder.cbFileSelect.setOnCheckedChangeListener(null)
-            holder.cbFileSelect.isChecked = item.isSelected
+            holder.cbFileSelect.isChecked = isCheckedNow
 
             val toggleListener = View.OnClickListener {
-                val updated = !items[position].isSelected
-                items[position] = items[position].copy(isSelected = updated)
-                holder.cbFileSelect.isChecked = updated
+                val adapterPos = holder.adapterPosition
+                if (adapterPos in items.indices) {
+                    val currentItem = items[adapterPos]
+                    val updated = currentItem.index !in selectedByStableIndex
+                    setFileSelectedByIndex(currentItem.index, updated, fromUser = true)
+                    holder.cbFileSelect.isChecked = updated
+                }
             }
             holder.cbFileSelect.setOnClickListener(toggleListener)
             holder.itemView.setOnClickListener(toggleListener)
@@ -828,20 +958,90 @@ class AddDownloadActivity : AppCompatActivity() {
 
         override fun getItemCount(): Int = items.size
 
-        fun selectAll(selected: Boolean) {
-            for (i in items.indices) {
-                items[i] = items[i].copy(isSelected = selected)
+        fun setFileSelectedByIndex(fileIndex: Int, selected: Boolean, fromUser: Boolean = true) {
+            val pos = items.indexOfFirst { it.index == fileIndex }
+            if (pos < 0) return
+            if (fromUser) {
+                onUserToggledSelection?.invoke()
             }
-            notifyDataSetChanged()
+            if (selected) {
+                selectedByStableIndex.add(fileIndex)
+            } else {
+                selectedByStableIndex.remove(fileIndex)
+            }
+            items[pos] = items[pos].copy(isSelected = selected)
+            notifySelectionChanged()
+        }
+
+        fun selectAll(selected: Boolean) {
+            selectedByStableIndex.clear()
+            for (i in items.indices) {
+                val entry = items[i]
+                if (selected) {
+                    selectedByStableIndex.add(entry.index)
+                }
+                items[i] = entry.copy(isSelected = selected)
+            }
+            runCatching { notifyDataSetChanged() }
+            notifySelectionChanged()
+        }
+
+        fun setSelectedIndices(indices: Set<Int>) {
+            val validIndices = getAllValidIndices()
+            selectedByStableIndex.clear()
+            selectedByStableIndex.addAll(indices.intersect(validIndices))
+            for (i in items.indices) {
+                val entry = items[i]
+                items[i] = entry.copy(isSelected = entry.index in selectedByStableIndex)
+            }
+            runCatching { notifyDataSetChanged() }
+            notifySelectionChanged()
+        }
+
+        fun updateFiles(newFiles: List<TorrentFileInfo>, preserveExistingSelection: Boolean = true) {
+            val preserved = if (preserveExistingSelection) selectedByStableIndex.toSet() else null
+            items.clear()
+            items.addAll(newFiles.map { it.copy() })
+            selectedByStableIndex.clear()
+            if (preserved != null) {
+                val validIndices = items.mapTo(LinkedHashSet()) { it.index }
+                selectedByStableIndex.addAll(preserved.intersect(validIndices))
+                for (i in items.indices) {
+                    items[i] = items[i].copy(isSelected = items[i].index in selectedByStableIndex)
+                }
+            } else {
+                selectedByStableIndex.addAll(items.filter { it.isSelected }.map { it.index })
+            }
+            runCatching { notifyDataSetChanged() }
+            notifySelectionChanged()
         }
 
         fun hasUserUncheckedAll(): Boolean {
-            return items.isNotEmpty() && items.none { it.isSelected }
+            return items.isNotEmpty() && selectedByStableIndex.isEmpty()
         }
 
+        fun getAllValidIndices(): Set<Int> {
+            return items.mapTo(LinkedHashSet()) { it.index }
+        }
+
+        /**
+         * Returns the exact selected file indices sorted by their stable torrent file index.
+         * Never falls back to all files when empty!
+         */
         fun getSelectedFileIndices(): List<Int> {
-            val selected = items.filter { it.isSelected }.map { it.index }
-            return selected.ifEmpty { items.map { it.index } }
+            return items.filter { it.index in selectedByStableIndex }.map { it.index }
+        }
+
+        fun getSelectedSizeBytes(): Long {
+            return items.filter { it.index in selectedByStableIndex }.sumOf { it.size }
+        }
+
+        private fun notifySelectionChanged() {
+            onSelectionChanged?.invoke(
+                selectedByStableIndex.size,
+                items.size,
+                getSelectedSizeBytes()
+            )
         }
 
         private fun formatFileSize(bytes: Long): String {

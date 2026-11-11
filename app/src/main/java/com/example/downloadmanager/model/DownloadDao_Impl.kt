@@ -373,7 +373,7 @@ public class DownloadDao_Impl(
     }
 
     public override suspend fun deleteInvalidDownloads() {
-        val _sql = "DELETE FROM downloads WHERE url NOT LIKE 'http://%' AND url NOT LIKE 'https://%' AND url NOT LIKE 'magnet:%'"
+        val _sql = "DELETE FROM downloads WHERE url NOT LIKE 'http://%' AND url NOT LIKE 'https://%' AND url NOT LIKE 'magnet:%' AND url NOT LIKE 'file://%' AND url NOT LIKE 'content://%' AND url NOT LIKE '/%.torrent'"
         return performSuspending(__db, false, true) { _connection ->
             val _stmt = _connection.prepare(_sql)
             try {

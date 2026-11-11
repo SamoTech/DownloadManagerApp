@@ -69,6 +69,7 @@ class DownloadDetailActivity : AppCompatActivity() {
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         supportActionBar?.title = getString(R.string.download_details)
+        supportActionBar?.subtitle = "Luca v${com.example.downloadmanager.BuildConfig.VERSION_NAME} (Build ${com.example.downloadmanager.BuildConfig.VERSION_CODE})"
         
         downloadId = intent.getLongExtra("download_id", -1L)
         if (downloadId == -1L) {
@@ -235,16 +236,28 @@ class DownloadDetailActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             val files = torrentDownloadManager.listFilesForTorrentItem(downloadItem)
-            binding.llTorrentFilesList.removeAllViews()
             binding.tvTorrentFilesHeader.text = "Torrent Files (${files.size})"
 
-            val torrentDir = File(downloadItem.savePath, downloadItem.filename)
+            val baseDir = File(downloadItem.savePath)
+            val torrentDir = runCatching {
+                val cleanFolder = com.example.downloadmanager.utils.TorrentPathSafety.validateComponent(downloadItem.filename)
+                com.example.downloadmanager.utils.TorrentPathSafety.resolveContainedFile(baseDir, cleanFolder)
+            }.getOrNull()
             val density = resources.displayMetrics.density
 
-            for (fileInfo in files) {
-                val safeContainedFile = runCatching {
-                    com.example.downloadmanager.utils.TorrentPathSafety.resolveContainedFile(torrentDir, fileInfo.path)
-                }.getOrNull()
+            val reuseExistingRows = binding.llTorrentFilesList.childCount == files.size && files.isNotEmpty()
+            if (!reuseExistingRows) {
+                binding.llTorrentFilesList.removeAllViews()
+            }
+
+            for ((idx, fileInfo) in files.withIndex()) {
+                val safeContainedFile = if (torrentDir != null) {
+                    runCatching {
+                        com.example.downloadmanager.utils.TorrentPathSafety.resolveContainedFile(torrentDir, fileInfo.path)
+                    }.getOrNull()
+                } else {
+                    null
+                }
 
                 val stateLabel = when (fileInfo.state) {
                     com.example.downloadmanager.model.TorrentFileState.VERIFIED -> "✓ Verified"
@@ -255,50 +268,61 @@ class DownloadDetailActivity : AppCompatActivity() {
                     com.example.downloadmanager.model.TorrentFileState.FAILED -> "✕ Failed"
                 }
 
-                val row = LinearLayout(this@DownloadDetailActivity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    val padV = (8 * density).toInt()
-                    setPadding(0, padV, 0, padV)
-                }
-
                 val displayPath = fileInfo.path.ifBlank { fileInfo.name }
-                val tvName = TextView(this@DownloadDetailActivity).apply {
-                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                    text = "$displayPath ($stateLabel)"
-                    textSize = 13f
-                    textDirection = View.TEXT_DIRECTION_FIRST_STRONG
-                    textAlignment = View.TEXT_ALIGNMENT_VIEW_START
-                    setTextColor(
-                        ContextCompat.getColor(
-                            this@DownloadDetailActivity,
-                            if (fileInfo.canOpen) R.color.colorOnSurface else R.color.gray
-                        )
-                    )
-                }
-
+                val nameText = "$displayPath ($stateLabel)"
+                val nameColor = ContextCompat.getColor(
+                    this@DownloadDetailActivity,
+                    if (fileInfo.canOpen) R.color.colorOnSurface else R.color.gray
+                )
                 val sizeText = if (fileInfo.state == com.example.downloadmanager.model.TorrentFileState.PARTIAL && fileInfo.size > 0L) {
                     "${formatFileSize(fileInfo.downloadedBytes)} / ${formatFileSize(fileInfo.size)}"
                 } else {
                     formatFileSize(fileInfo.size.takeIf { it > 0L } ?: fileInfo.downloadedBytes)
                 }
-                val tvSize = TextView(this@DownloadDetailActivity).apply {
-                    text = sizeText
-                    textSize = 12f
-                    setTextColor(ContextCompat.getColor(this@DownloadDetailActivity, R.color.gray))
-                    setPadding((8 * density).toInt(), 0, 0, 0)
-                }
 
-                row.addView(tvName)
-                row.addView(tvSize)
+                val row: LinearLayout
+                val tvName: TextView
+                val tvSize: TextView
 
-                if (fileInfo.canOpen && safeContainedFile != null && safeContainedFile.exists()) {
-                    row.setOnClickListener {
-                        openFile(downloadItem.copy(filename = "${downloadItem.filename}/${fileInfo.path}"))
+                if (reuseExistingRows) {
+                    row = binding.llTorrentFilesList.getChildAt(idx) as LinearLayout
+                    tvName = row.getChildAt(0) as TextView
+                    tvSize = row.getChildAt(1) as TextView
+                } else {
+                    row = LinearLayout(this@DownloadDetailActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        val padV = (8 * density).toInt()
+                        setPadding(0, padV, 0, padV)
                     }
+                    tvName = TextView(this@DownloadDetailActivity).apply {
+                        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                        textSize = 13f
+                        textDirection = View.TEXT_DIRECTION_FIRST_STRONG
+                        textAlignment = View.TEXT_ALIGNMENT_VIEW_START
+                    }
+                    tvSize = TextView(this@DownloadDetailActivity).apply {
+                        textSize = 12f
+                        setTextColor(ContextCompat.getColor(this@DownloadDetailActivity, R.color.gray))
+                        setPadding((8 * density).toInt(), 0, 0, 0)
+                    }
+                    row.addView(tvName)
+                    row.addView(tvSize)
+                    binding.llTorrentFilesList.addView(row)
                 }
 
-                binding.llTorrentFilesList.addView(row)
+                tvName.text = nameText
+                tvName.setTextColor(nameColor)
+                tvSize.text = sizeText
+
+                if (fileInfo.canOpen && safeContainedFile != null && safeContainedFile.exists() && safeContainedFile.isFile) {
+                    row.setOnClickListener {
+                        openSpecificValidatedFile(downloadItem, safeContainedFile)
+                    }
+                } else {
+                    row.setOnClickListener(null)
+                    row.isClickable = false
+                }
             }
         }
     }
@@ -423,10 +447,16 @@ class DownloadDetailActivity : AppCompatActivity() {
     
     private fun openFile(downloadItem: DownloadItem) {
         val resolvedFile = MediaAssetHelper.resolveTargetFileForOpenOrShare(downloadItem)
-        val candidateName = resolvedFile?.name ?: downloadItem.filename
-        val effectiveMime = resolvedFile?.let {
-            MediaAssetHelper.getMimeTypeForAnyFile(it, downloadItem.mimeType)
-        } ?: downloadItem.mimeType
+        if (resolvedFile == null || !resolvedFile.exists() || !resolvedFile.isFile) {
+            Toast.makeText(this, R.string.error_file_not_found, Toast.LENGTH_SHORT).show()
+            return
+        }
+        openSpecificValidatedFile(downloadItem, resolvedFile)
+    }
+
+    private fun openSpecificValidatedFile(downloadItem: DownloadItem, file: File) {
+        val candidateName = file.name
+        val effectiveMime = MediaAssetHelper.getMimeTypeForAnyFile(file, downloadItem.mimeType)
         val isVideo = MediaAssetHelper.isVideoFileOrType(
             candidateName,
             downloadItem.downloadType,
@@ -448,7 +478,6 @@ class DownloadDetailActivity : AppCompatActivity() {
         }
 
         try {
-            val file = resolvedFile ?: File(downloadItem.savePath, downloadItem.filename)
             if (file.exists() && file.isFile) {
                 val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
                 val mime = MediaAssetHelper.getMimeTypeForAnyFile(file, downloadItem.mimeType)
@@ -470,8 +499,7 @@ class DownloadDetailActivity : AppCompatActivity() {
     private fun shareFile(downloadItem: DownloadItem) {
         try {
             val file = MediaAssetHelper.resolveTargetFileForOpenOrShare(downloadItem)
-                ?: File(downloadItem.savePath, downloadItem.filename)
-            if (file.exists() && file.isFile) {
+            if (file != null && file.exists() && file.isFile) {
                 val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
                 val mime = MediaAssetHelper.getMimeTypeForAnyFile(file, downloadItem.mimeType)
                 val intent = Intent(Intent.ACTION_SEND).apply {

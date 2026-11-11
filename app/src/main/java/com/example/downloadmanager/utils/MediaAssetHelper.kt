@@ -61,8 +61,13 @@ object MediaAssetHelper {
             val read = FileInputStream(file).use { it.read(header) }
             if (read < 12) return null
 
-            // 1. ISO Base Media File Format (MP4 / M4A / 3GP / DASH) -> "ftyp" at offset 4
-            if (header[4] == 'f'.code.toByte() &&
+            // 1. ISO Base Media File Format (MP4 / M4A / 3GP / DASH) -> "ftyp" at offset 4 with valid box size
+            val boxSize = ((header[0].toInt() and 0xFF) shl 24) or
+                ((header[1].toInt() and 0xFF) shl 16) or
+                ((header[2].toInt() and 0xFF) shl 8) or
+                (header[3].toInt() and 0xFF)
+            if (boxSize in 8..4096 &&
+                header[4] == 'f'.code.toByte() &&
                 header[5] == 't'.code.toByte() &&
                 header[6] == 'y'.code.toByte() &&
                 header[7] == 'p'.code.toByte()
@@ -119,15 +124,22 @@ object MediaAssetHelper {
                 header[3] == 'F'.code.toByte()
             ) {
                 val subType = String(header, 8, 4, Charsets.US_ASCII)
-                return if (subType == "WAVE") "audio/wav" else "video/x-msvideo"
+                return when (subType) {
+                    "WAVE" -> "audio/wav"
+                    "AVI " -> "video/x-msvideo"
+                    else -> null
+                }
             }
 
-            // 6. ID3v2 MP3 or MPEG ADTS/MP3 frame sync (0xFF 0xE0..0xFF)
-            if ((header[0] == 'I'.code.toByte() &&
-                    header[1] == 'D'.code.toByte() &&
-                    header[2] == '3'.code.toByte()) ||
-                (header[0] == 0xFF.toByte() && (header[1].toInt() and 0xE0) == 0xE0)
+            // 6. ID3v2 MP3 or validated MPEG audio frame sync header
+            if (header[0] == 'I'.code.toByte() &&
+                header[1] == 'D'.code.toByte() &&
+                header[2] == '3'.code.toByte() &&
+                (header[3].toInt() and 0xFF) in 2..4
             ) {
+                return "audio/mpeg"
+            }
+            if (isValidMpegFrameSync(header)) {
                 return "audio/mpeg"
             }
 
@@ -135,6 +147,19 @@ object MediaAssetHelper {
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun isValidMpegFrameSync(header: ByteArray): Boolean {
+        if (header.size < 4) return false
+        val b0 = header[0].toInt() and 0xFF
+        val b1 = header[1].toInt() and 0xFF
+        val b2 = header[2].toInt() and 0xFF
+        if (b0 != 0xFF || (b1 and 0xE0) != 0xE0) return false
+        val versionBits = (b1 shr 3) and 0x03
+        val layerBits = (b1 shr 1) and 0x03
+        val bitrateIdx = (b2 shr 4) and 0x0F
+        val sampleRateIdx = (b2 shr 2) and 0x03
+        return versionBits != 1 && layerBits != 0 && bitrateIdx in 1..14 && sampleRateIdx != 3
     }
 
     fun hasVideoTrack(file: File): Boolean {
@@ -240,32 +265,42 @@ object MediaAssetHelper {
 
     /**
      * Resolves the primary target file on disk when opening or sharing a completed [DownloadItem].
-     * Works for both direct files (`savePath/filename`) and torrent job folders (`savePath/filename/<contained_file>`),
-     * including non-media files (`.pdf`, `.jpg`, `.txt`, etc.) and Unicode/Arabic names.
+     * Strictly enforces canonical path containment inside `item.savePath` and per-job folder ownership
+     * so open/share can never escape the job's download directory or expose another job's files.
      */
     fun resolveTargetFileForOpenOrShare(item: DownloadItem): File? {
+        if (item.savePath.isBlank() || item.filename.isBlank()) return null
         val baseDir = File(item.savePath)
-        val directFile = File(baseDir, item.filename)
+        if (!baseDir.exists() || !baseDir.isDirectory) return null
+
+        val directFile = runCatching {
+            val cleanName = TorrentPathSafety.validateComponent(item.filename)
+            TorrentPathSafety.resolveContainedFile(baseDir, cleanName)
+        }.getOrNull() ?: return null
+
         if (directFile.exists() && directFile.isFile) {
             return directFile
         }
 
-        // If directFile is a torrent job folder, resolve the best contained file inside it
+        // If directFile is a torrent job folder, verify job ownership and resolve the best contained file inside it
         if (directFile.exists() && directFile.isDirectory) {
+            if (!isDirectoryOwnedByJob(directFile, item.id)) {
+                return null
+            }
             findBestFileInJobDirectory(directFile, item.filename, item.torrentName)?.let { return it }
         }
 
-        val torrentDirName = item.torrentName?.takeIf { it.isNotBlank() }
-        if (torrentDirName != null) {
-            val torrentDir = File(baseDir, torrentDirName)
-            if (torrentDir.exists() && torrentDir.isDirectory) {
-                findBestFileInJobDirectory(torrentDir, item.filename, item.torrentName)?.let { return it }
-            } else if (torrentDir.exists() && torrentDir.isFile) {
-                return torrentDir
-            }
-        }
+        return null
+    }
 
-        return resolvePlayableFile(item)
+    private fun isDirectoryOwnedByJob(dir: File, jobId: Long): Boolean {
+        val marker = File(dir, TorrentPathSafety.TORRENT_IDENTITY_MARKER)
+        if (!marker.exists()) return true
+        val content = runCatching { marker.readText(Charsets.UTF_8).trim() }.getOrDefault("")
+        if (content.startsWith("job:") && jobId > 0L) {
+            return content.startsWith("job:$jobId|")
+        }
+        return true
     }
 
     private fun findBestFileInJobDirectory(
@@ -280,6 +315,7 @@ object MediaAssetHelper {
         val candidates = dir.walkTopDown()
             .onEnter { sub ->
                 sub.name != ".staging" &&
+                    sub.name != TorrentPathSafety.STAGING_DIR_NAME &&
                     runCatching { TorrentPathSafety.ensureNotSymlink(sub); true }.getOrDefault(false) &&
                     (sub.canonicalFile.path == rootCanonical.path || sub.canonicalFile.path.startsWith(rootPrefix))
             }
@@ -309,53 +345,27 @@ object MediaAssetHelper {
 
     /**
      * Resolves the actual playable file on disk for a specific [DownloadItem].
-     * Never returns unrelated files from the shared Downloads folder.
+     * Strictly contained within `item.savePath` and isolated per job.
      */
     fun resolvePlayableFile(item: DownloadItem): File? {
-        val baseDir = File(item.savePath)
-        val directFile = File(baseDir, item.filename)
-        if (directFile.exists() && directFile.isFile && directFile.length() > 512L) {
-            return directFile
-        }
-
-        // 1. If directFile is a multi-file torrent directory, find the largest media file inside it
-        if (directFile.exists() && directFile.isDirectory) {
-            findBestMediaFileInDirectory(directFile)?.let { return it }
-        }
-
-        // 2. If item has a torrentName directory inside savePath, check inside that specific subfolder
-        val torrentDirName = item.torrentName?.takeIf { it.isNotBlank() }
-        if (torrentDirName != null) {
-            val torrentDir = File(baseDir, torrentDirName)
-            if (torrentDir.exists() && torrentDir.isDirectory) {
-                findBestMediaFileInDirectory(torrentDir)?.let { return it }
-            }
-            val directInTorrentDir = File(torrentDir, item.filename)
-            if (directInTorrentDir.exists() && directInTorrentDir.isFile && directInTorrentDir.length() > 512L) {
-                return directInTorrentDir
-            }
-        }
-
-        // 3. Check if the same base filename exists with a different audio/video extension in baseDir
-        val itemBaseName = item.filename.substringBeforeLast(".").trim()
-        if (itemBaseName.isNotEmpty() && baseDir.exists() && baseDir.isDirectory) {
-            val exactBaseMatch = baseDir.listFiles()?.firstOrNull { f ->
-                f.isFile && f.length() > 512L &&
-                    f.name.substringBeforeLast(".").equals(itemBaseName, ignoreCase = true)
-            }
-            if (exactBaseMatch != null) return exactBaseMatch
-        }
-
-        return if (directFile.exists() && directFile.isFile) directFile else null
+        val resolved = resolveTargetFileForOpenOrShare(item) ?: return null
+        return if (resolved.exists() && resolved.isFile) resolved else null
     }
 
     private fun findBestMediaFileInDirectory(dir: File): File? {
         if (!dir.exists() || !dir.isDirectory) return null
+        val rootCanonical = runCatching { dir.canonicalFile }.getOrNull() ?: return null
+        val rootPrefix = rootCanonical.path + File.separator
         return dir.walkTopDown()
-            .onEnter { it.name != ".staging" }
+            .onEnter { sub ->
+                sub.name != ".staging" &&
+                    sub.name != TorrentPathSafety.STAGING_DIR_NAME &&
+                    runCatching { TorrentPathSafety.ensureNotSymlink(sub); true }.getOrDefault(false)
+            }
             .filter { f ->
                 f.isFile && !f.name.startsWith(".") && f.length() > 0L &&
-                    (f.extension.lowercase() in VIDEO_EXTENSIONS || f.extension.lowercase() in AUDIO_EXTENSIONS)
+                    (f.extension.lowercase() in VIDEO_EXTENSIONS || f.extension.lowercase() in AUDIO_EXTENSIONS) &&
+                    runCatching { f.canonicalFile.path.startsWith(rootPrefix) }.getOrDefault(false)
             }
             .sortedByDescending { it.length() }
             .firstOrNull()

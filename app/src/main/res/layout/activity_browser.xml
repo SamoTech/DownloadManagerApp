@@ -75,65 +75,6 @@
                     android:src="@drawable/ic_retry"
                     app:tint="@android:color/white" />
             </LinearLayout>
-
-            <!-- Quick Bookmarks & Sniffer Bar -->
-            <HorizontalScrollView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:scrollbars="none">
-
-                <com.google.android.material.chip.ChipGroup
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    app:singleLine="true">
-
-                    <com.google.android.material.chip.Chip
-                        android:id="@+id/chipSiteSampleHub"
-                        style="@style/Widget.Material3.Chip.Assist"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Discovery Hub"
-                        android:textColor="@android:color/white"
-                        app:chipBackgroundColor="@color/colorPrimary" />
-
-                    <com.google.android.material.chip.Chip
-                        android:id="@+id/chipSiteArchiveAudio"
-                        style="@style/Widget.Material3.Chip.Assist"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Archive.org Audio"
-                        android:textColor="@android:color/white"
-                        app:chipBackgroundColor="@color/colorDashboardCard" />
-
-                    <com.google.android.material.chip.Chip
-                        android:id="@+id/chipSiteSoundCloud"
-                        style="@style/Widget.Material3.Chip.Assist"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="SoundCloud"
-                        android:textColor="@android:color/white"
-                        app:chipBackgroundColor="@color/colorDashboardCard" />
-
-                    <com.google.android.material.chip.Chip
-                        android:id="@+id/chipSiteBandcamp"
-                        style="@style/Widget.Material3.Chip.Assist"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Bandcamp"
-                        android:textColor="@android:color/white"
-                        app:chipBackgroundColor="@color/colorDashboardCard" />
-
-                    <com.google.android.material.chip.Chip
-                        android:id="@+id/chipSiteWikimedia"
-                        style="@style/Widget.Material3.Chip.Assist"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Wikimedia Media"
-                        android:textColor="@android:color/white"
-                        app:chipBackgroundColor="@color/colorDashboardCard" />
-                </com.google.android.material.chip.ChipGroup>
-            </HorizontalScrollView>
         </LinearLayout>
 
         <ProgressBar
@@ -146,23 +87,32 @@
             android:progressDrawable="@drawable/progress_bar_drawable"
             android:visibility="gone" />
 
-        <!-- Native Smart Browser Viewport (Page Header + Interactive Links & Media Stream Inspector) -->
+        <!-- Real Web Browser Viewport + Contextual Media & File Offer Banner -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
             android:orientation="vertical">
 
-            <!-- Current Page Info Banner -->
+            <!-- Real Android WebView for visiting any website -->
+            <android.webkit.WebView
+                android:id="@+id/webView"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1" />
+
+            <!-- Contextual Detected Download Offer Banner (Audio / Video / Files) -->
             <LinearLayout
                 android:id="@+id/pageSummaryCard"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginHorizontal="12dp"
-                android:layout_marginTop="10dp"
+                android:layout_marginHorizontal="10dp"
+                android:layout_marginVertical="6dp"
                 android:background="@drawable/card_background"
+                android:elevation="3dp"
                 android:orientation="vertical"
-                android:padding="14dp">
+                android:padding="12dp"
+                android:visibility="gone">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -171,10 +121,11 @@
                     android:orientation="horizontal">
 
                     <ImageView
+                        android:id="@+id/ivOfferIcon"
                         android:layout_width="20dp"
                         android:layout_height="20dp"
                         android:contentDescription="@string/smart_browser"
-                        android:src="@drawable/ic_browser"
+                        android:src="@drawable/ic_download"
                         app:tint="@color/colorPrimary" />
 
                     <TextView
@@ -185,9 +136,9 @@
                         android:layout_weight="1"
                         android:ellipsize="end"
                         android:maxLines="1"
-                        android:text="Luca Smart Browser &amp; Link Sniffer"
+                        android:text="Download Available"
                         android:textColor="@color/colorOnSurface"
-                        android:textSize="15sp"
+                        android:textSize="14sp"
                         android:textStyle="bold" />
 
                     <TextView
@@ -197,7 +148,7 @@
                         android:background="@drawable/icon_badge_background"
                         android:paddingHorizontal="8dp"
                         android:paddingVertical="3dp"
-                        android:text="SNIFFER READY"
+                        android:text="DETECTED"
                         android:textColor="@color/colorPrimary"
                         android:textSize="10sp"
                         android:textStyle="bold" />
@@ -207,24 +158,55 @@
                     android:id="@+id/tvPageDescription"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
+                    android:layout_marginTop="4dp"
                     android:ellipsize="end"
                     android:maxLines="2"
-                    android:text="Automatically inspects webpages to extract downloadable music, video streams, torrents, and direct files."
+                    android:text="Downloadable media or file detected on this page."
                     android:textColor="@color/gray"
                     android:textSize="12sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:gravity="end|center_vertical"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnQuickOfferSecondary"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="36dp"
+                        android:layout_marginEnd="8dp"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:text="Download Audio"
+                        android:textSize="12sp"
+                        android:visibility="gone"
+                        app:cornerRadius="10dp"
+                        app:icon="@drawable/ic_music"
+                        app:iconSize="15dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnQuickOfferPrimary"
+                        style="@style/Widget.Material3.Button"
+                        android:layout_width="wrap_content"
+                        android:layout_height="36dp"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:text="Download"
+                        android:textSize="12sp"
+                        app:cornerRadius="10dp"
+                        app:icon="@drawable/ic_download"
+                        app:iconSize="15dp" />
+                </LinearLayout>
             </LinearLayout>
 
-            <!-- RecyclerView of Page Elements & Discovered Downloadable Links -->
             <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/rvBrowserContent"
                 android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:layout_marginTop="6dp"
-                android:layout_weight="1"
-                android:clipToPadding="false"
-                android:paddingHorizontal="12dp"
-                android:paddingBottom="84dp" />
+                android:layout_height="wrap_content"
+                android:visibility="gone" />
         </LinearLayout>
 
         <!-- Bottom Browser Navigation & Link Sniffer Status Bar -->
@@ -273,7 +255,7 @@
                 android:layout_height="38dp"
                 android:insetTop="0dp"
                 android:insetBottom="0dp"
-                android:text="Rescan"
+                android:text="Scan Page"
                 android:textColor="@color/colorAccent"
                 android:textSize="12sp" />
         </LinearLayout>

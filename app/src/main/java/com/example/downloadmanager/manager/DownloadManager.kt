@@ -274,31 +274,40 @@ class DownloadManager(
 
             val stagingFile = File(saveDir, ".${resolvedFilename}.part.${activeItem.id}")
 
-            // Check if validator changed relative to an existing partial staging file
-            val hasExistingPartial = stagingFile.exists() && stagingFile.length() > 0L
-            val validatorChanged = hasExistingPartial &&
-                (!activeItem.etag.isNullOrBlank() || !activeItem.lastModified.isNullOrBlank()) &&
-                !HttpRangeValidator.isValidatorCompatible(
-                    storedEtag = activeItem.etag,
-                    storedLastModified = activeItem.lastModified,
-                    responseEtag = probe.etag,
-                    responseLastModified = probe.lastModified
-                )
-
-            if (validatorChanged) {
-                Log.i(TAG, "Source representation changed for job ${activeItem.id}; restarting staging file cleanly")
-                stagingFile.delete()
-            }
-
             val effectiveEtag = probe.etag ?: activeItem.etag
             val effectiveLastMod = probe.lastModified ?: activeItem.lastModified
             val effectiveSha256 = activeItem.expectedSha256 ?: probe.sha256Header
+
+            // Partial resume requires either a matching strong validator across requests or a full-file SHA-256 digest
+            val hasExistingPartial = stagingFile.exists() && stagingFile.length() > 0L
+            if (hasExistingPartial) {
+                val hasFullDigest = !effectiveSha256.isNullOrBlank()
+                val hasCompatibleStrongValidator =
+                    HttpRangeValidator.hasStrongValidator(activeItem.etag, activeItem.lastModified) &&
+                        (
+                            (probe.etag == null && probe.lastModified == null) ||
+                                HttpRangeValidator.isValidatorCompatible(
+                                    storedEtag = activeItem.etag,
+                                    storedLastModified = activeItem.lastModified,
+                                    responseEtag = probe.etag,
+                                    responseLastModified = probe.lastModified
+                                )
+                            )
+                if (!hasCompatibleStrongValidator && !hasFullDigest) {
+                    Log.i(TAG, "Partial staging file lacks strong validator or SHA-256 for job ${activeItem.id}; restarting from byte 0")
+                    stagingFile.delete()
+                }
+            }
+
+            val hasStrongValidatorOrDigest =
+                HttpRangeValidator.hasStrongValidator(effectiveEtag, effectiveLastMod) ||
+                    !effectiveSha256.isNullOrBlank()
 
             activeItem = activeItem.copy(
                 filename = resolvedFilename,
                 fileSize = resolvedSize.coerceAtLeast(0L),
                 mimeType = resolvedMime,
-                isResumable = probe.supportsRange,
+                isResumable = probe.supportsRange && hasStrongValidatorOrDigest,
                 etag = effectiveEtag,
                 lastModified = effectiveLastMod,
                 expectedSha256 = effectiveSha256,
@@ -309,6 +318,7 @@ class DownloadManager(
 
             val existingStagedBytes = if (stagingFile.exists()) stagingFile.length() else 0L
             val useMultiConnection = probe.supportsRange &&
+                hasStrongValidatorOrDigest &&
                 resolvedSize >= segmentThresholdBytes &&
                 existingStagedBytes == 0L &&
                 preferredSegments > 1
@@ -476,8 +486,12 @@ class DownloadManager(
         allow416Retry: Boolean = true
     ): StreamTransferOutcome = coroutineScope {
         val rawExistingLen = if (stagingFile.exists() && stagingFile.isFile) stagingFile.length() else 0L
+        val canResumePartial = item.isResumable && (
+            HttpRangeValidator.hasStrongValidator(item.etag, item.lastModified) ||
+                !item.expectedSha256.isNullOrBlank()
+            )
         val existingLen = when {
-            !item.isResumable -> {
+            !canResumePartial -> {
                 if (stagingFile.exists()) stagingFile.delete()
                 0L
             }
@@ -487,13 +501,20 @@ class DownloadManager(
                 0L
             }
             probedTotalSize > 0L && rawExistingLen == probedTotalSize -> {
-                // Already fully staged on disk
-                return@coroutineScope StreamTransferOutcome(
-                    expectedTotalSize = probedTotalSize,
-                    etag = item.etag,
-                    lastModified = item.lastModified,
-                    expectedSha256 = item.expectedSha256
-                )
+                // Never accept matching file size alone as proof of completion unless verified by SHA-256!
+                val expectedSha = item.expectedSha256?.trim()
+                if (!expectedSha.isNullOrEmpty() &&
+                    HttpRangeValidator.computeSha256Hex(stagingFile).equals(expectedSha, ignoreCase = true)
+                ) {
+                    return@coroutineScope StreamTransferOutcome(
+                        expectedTotalSize = probedTotalSize,
+                        etag = item.etag,
+                        lastModified = item.lastModified,
+                        expectedSha256 = expectedSha
+                    )
+                }
+                stagingFile.delete()
+                0L
             }
             else -> rawExistingLen
         }
@@ -515,21 +536,28 @@ class DownloadManager(
 
         okHttpClient.newCall(reqBuilder.build()).execute().use { response ->
             if (response.code == 416) {
-                // HTTP 416 Range Not Satisfiable
+                // HTTP 416 Range Not Satisfiable: never accept 416 or matching size alone without SHA-256 verification
                 val rangeSpec = HttpRangeValidator.parseContentRange(response.header("Content-Range"))
                 val remoteTotal = rangeSpec?.total
-                if (remoteTotal != null && remoteTotal > 0L && existingLen == remoteTotal) {
+                val expectedSha = (extractSha256FromHeaders(response) ?: item.expectedSha256)?.trim()
+                if (remoteTotal != null &&
+                    remoteTotal > 0L &&
+                    existingLen == remoteTotal &&
+                    !expectedSha.isNullOrEmpty() &&
+                    stagingFile.exists() &&
+                    HttpRangeValidator.computeSha256Hex(stagingFile).equals(expectedSha, ignoreCase = true)
+                ) {
                     return@use StreamTransferOutcome(
                         expectedTotalSize = remoteTotal,
                         etag = response.header("ETag") ?: item.etag,
                         lastModified = response.header("Last-Modified") ?: item.lastModified,
-                        expectedSha256 = extractSha256FromHeaders(response) ?: item.expectedSha256
+                        expectedSha256 = expectedSha
                     )
                 }
                 stagingFile.delete()
                 if (allow416Retry) {
                     return@use downloadSingleStream(
-                        item = item.copy(downloadedSize = 0L, etag = null, lastModified = null),
+                        item = item.copy(downloadedSize = 0L, etag = null, lastModified = null, isResumable = false),
                         stagingFile = stagingFile,
                         probedTotalSize = -1L,
                         onProgress = onProgress,
@@ -553,12 +581,15 @@ class DownloadManager(
             var expectedTotalSize: Long
 
             if (existingLen > 0L && response.code == 206) {
-                val validatorOk = HttpRangeValidator.isValidatorCompatible(
-                    storedEtag = item.etag,
-                    storedLastModified = item.lastModified,
-                    responseEtag = responseEtag,
-                    responseLastModified = responseLastMod
-                )
+                val validatorOk = (
+                    HttpRangeValidator.hasStrongValidator(item.etag, item.lastModified) &&
+                        HttpRangeValidator.isValidatorCompatible(
+                            storedEtag = item.etag,
+                            storedLastModified = item.lastModified,
+                            responseEtag = responseEtag,
+                            responseLastModified = responseLastMod
+                        )
+                    ) || ! (responseSha256 ?: item.expectedSha256).isNullOrBlank()
                 val validatedRange = runCatching {
                     HttpRangeValidator.validate206Range(
                         contentRangeHeader = response.header("Content-Range"),
@@ -570,14 +601,15 @@ class DownloadManager(
                 }.getOrNull()
 
                 if (!validatorOk || validatedRange == null) {
-                    // Server returned mismatched range or changed entity validator; restart cleanly from 0
+                    // Server returned mismatched range or lacks strong validator; restart cleanly from 0
                     response.close()
                     stagingFile.delete()
                     return@use downloadSingleStream(
                         item = item.copy(
                             downloadedSize = 0L,
                             etag = responseEtag,
-                            lastModified = responseLastMod
+                            lastModified = responseLastMod,
+                            isResumable = false
                         ),
                         stagingFile = stagingFile,
                         probedTotalSize = -1L,
@@ -608,18 +640,27 @@ class DownloadManager(
                 }
             }
 
+            val finalEtag = responseEtag ?: item.etag
+            val finalLastMod = responseLastMod ?: item.lastModified
+            val finalSha = responseSha256 ?: item.expectedSha256
+            val canResumeLater = (response.code == 206 || item.isResumable) &&
+                (HttpRangeValidator.hasStrongValidator(finalEtag, finalLastMod) || !finalSha.isNullOrBlank())
+
             repository.updateResumeValidators(
                 id = item.id,
-                etag = responseEtag ?: item.etag,
-                lastModified = responseLastMod ?: item.lastModified,
-                isResumable = (response.code == 206 || item.isResumable),
+                etag = finalEtag,
+                lastModified = finalLastMod,
+                isResumable = canResumeLater,
                 fileSize = expectedTotalSize.coerceAtLeast(0L)
             )
 
+            val speedLimitBytesPerSec = getConfiguredSpeedLimitBytesPerSec()
             val body = response.body ?: throw IOException("Empty response body")
             var downloaded = startingOffset
             var lastUpdateTime = System.currentTimeMillis()
             var lastBytes = downloaded
+            val windowStartMs = System.currentTimeMillis()
+            var windowBytesRead = 0L
 
             stagingFile.parentFile?.mkdirs()
             body.byteStream().use { input ->
@@ -636,6 +677,7 @@ class DownloadManager(
                         }
 
                         downloaded += read
+                        windowBytesRead += read
                         if (expectedTotalSize >= 0L && downloaded > expectedTotalSize) {
                             throw IOException(
                                 "Response body exceeded declared Content-Length ($expectedTotalSize bytes)"
@@ -643,6 +685,14 @@ class DownloadManager(
                         }
 
                         output.write(buffer, 0, read)
+
+                        if (speedLimitBytesPerSec > 0L) {
+                            val expectedMs = (windowBytesRead * 1000L) / speedLimitBytesPerSec
+                            val actualMs = System.currentTimeMillis() - windowStartMs
+                            if (expectedMs > actualMs + 15L) {
+                                delay((expectedMs - actualMs).coerceAtMost(250L))
+                            }
+                        }
 
                         val now = System.currentTimeMillis()
                         val elapsed = now - lastUpdateTime
@@ -672,11 +722,20 @@ class DownloadManager(
             onProgress(downloaded, expectedTotalSize.coerceAtLeast(downloaded), 100, 0L)
             StreamTransferOutcome(
                 expectedTotalSize = expectedTotalSize,
-                etag = responseEtag ?: item.etag,
-                lastModified = responseLastMod ?: item.lastModified,
-                expectedSha256 = responseSha256 ?: item.expectedSha256
+                etag = finalEtag,
+                lastModified = finalLastMod,
+                expectedSha256 = finalSha
             )
         }
+    }
+
+    private fun getConfiguredSpeedLimitBytesPerSec(): Long {
+        val ctx = context ?: return 0L
+        return runCatching {
+            val prefs = PreferenceManager.getDefaultSharedPreferences(ctx)
+            val kbPerSec = prefs.getString("download_speed_limit", "0")?.trim()?.toLongOrNull() ?: 0L
+            if (kbPerSec > 0L) kbPerSec * 1024L else 0L
+        }.getOrDefault(0L)
     }
 
     private suspend fun downloadMultiThreaded(
@@ -686,6 +745,11 @@ class DownloadManager(
         connections: Int,
         onProgress: (Long, Long, Int, Long) -> Unit
     ): StreamTransferOutcome = coroutineScope {
+        if (!HttpRangeValidator.hasStrongValidator(item.etag, item.lastModified) &&
+            item.expectedSha256.isNullOrBlank()
+        ) {
+            throw RangeIgnoredFallbackException("Cannot combine multi-segment ranges without strong validator or SHA-256")
+        }
         val numParts = connections.coerceIn(2, 8)
         stagingFile.parentFile?.mkdirs()
         RandomAccessFile(stagingFile, "rw").use { it.setLength(totalSize) }
@@ -742,6 +806,23 @@ class DownloadManager(
                         }
                         if (response.code != 206) {
                             throw IOException("Segment $idx failed with HTTP ${response.code}")
+                        }
+
+                        if (HttpRangeValidator.hasStrongValidator(item.etag, item.lastModified)) {
+                            val segEtag = response.header("ETag")
+                            val segLastMod = response.header("Last-Modified")
+                            if ((segEtag != null || segLastMod != null) &&
+                                !HttpRangeValidator.isValidatorCompatible(
+                                    storedEtag = item.etag,
+                                    storedLastModified = item.lastModified,
+                                    responseEtag = segEtag ?: item.etag,
+                                    responseLastModified = segLastMod ?: item.lastModified
+                                )
+                            ) {
+                                throw RangeIgnoredFallbackException(
+                                    "Segment $idx entity validator mismatch during range combine"
+                                )
+                            }
                         }
 
                         // Strictly validate Content-Range and Content-Length before writing at offset

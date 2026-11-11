@@ -1,21 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <external-path
-        name="external_files"
-        path="." />
+        name="external_downloads"
+        path="Download/" />
+    <external-path
+        name="external_downloads_plural"
+        path="Downloads/" />
+    <external-files-path
+        name="app_external_downloads"
+        path="Download/" />
+    <external-files-path
+        name="app_external_downloads_plural"
+        path="Downloads/" />
     <external-files-path
         name="external_files"
         path="." />
     <files-path
-        name="files"
-        path="." />
+        name="internal_downloads"
+        path="Downloads/" />
+    <files-path
+        name="internal_exports"
+        path="exports/" />
     <cache-path
-        name="cache"
-        path="." />
-    <external-cache-path
-        name="external_cache"
-        path="." />
-    <external-media-path
-        name="external_media"
-        path="." />
+        name="shared_exports_cache"
+        path="exports/" />
 </paths>

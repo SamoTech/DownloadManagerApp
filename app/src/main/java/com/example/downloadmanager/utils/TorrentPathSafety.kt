@@ -50,6 +50,9 @@ object TorrentPathSafety {
         val failureReason: String? = null
     )
 
+    const val TORRENT_IDENTITY_MARKER = ".torrent_job_id"
+    const val STAGING_DIR_NAME = ".staging"
+
     private val DRIVE_PREFIX_REGEX = Regex("^[A-Za-z]:.*")
     private val WINDOWS_RESERVED_NAMES = setOf(
         "CON", "PRN", "AUX", "NUL",
@@ -223,10 +226,16 @@ object TorrentPathSafety {
 
     /**
      * Allocates a safe job root directory inside [baseDownloadDir] for a torrent job.
-     * Prevents unrelated existing files or concurrent jobs from being silently overwritten.
+     * Prevents unrelated existing files or concurrent/separate jobs with the same info-hash
+     * from colliding, while allowing retries of the same [jobId] to reuse its directory.
      */
     @Synchronized
-    fun allocateSafeJobRoot(baseDownloadDir: File, rawTorrentName: String, infoHashHex: String? = null): File {
+    fun allocateSafeJobRoot(
+        baseDownloadDir: File,
+        rawTorrentName: String,
+        infoHashHex: String? = null,
+        jobId: Long = 0L
+    ): File {
         if (!baseDownloadDir.exists()) {
             baseDownloadDir.mkdirs()
         }
@@ -243,20 +252,19 @@ object TorrentPathSafety {
 
         val markerName = ".torrent_job_id"
         val normalizedHash = infoHashHex?.trim()?.lowercase(Locale.US)?.takeIf { it.isNotEmpty() }
+        val ownershipToken = buildOwnershipToken(normalizedHash, jobId)
 
         if (candidate.exists()) {
             if (candidate.isFile) {
-                // Existing regular file with the same name as the torrent root directory; pick a suffixed directory
-                candidate = findAvailableDirectory(baseDownloadDir, cleanBaseName, normalizedHash)
-            } else if (normalizedHash != null) {
+                candidate = findAvailableDirectory(baseDownloadDir, cleanBaseName, normalizedHash, jobId, ownershipToken)
+            } else {
                 val markerFile = File(candidate, markerName)
-                val existingHash = if (markerFile.exists() && markerFile.isFile) {
+                val existingMarker = if (markerFile.exists() && markerFile.isFile) {
                     runCatching { markerFile.readText().trim().lowercase(Locale.US) }.getOrNull()
                 } else null
-                // If directory has unrelated files without our marker or belongs to a different infoHash, allocate a new root
                 val hasExistingContent = (candidate.list()?.any { it != markerName && it != ".staging" } == true)
-                if ((existingHash != null && existingHash != normalizedHash) || (existingHash == null && hasExistingContent)) {
-                    candidate = findAvailableDirectory(baseDownloadDir, cleanBaseName, normalizedHash)
+                if (!canReuseDirectory(existingMarker, hasExistingContent, normalizedHash, jobId, ownershipToken)) {
+                    candidate = findAvailableDirectory(baseDownloadDir, cleanBaseName, normalizedHash, jobId, ownershipToken)
                 }
             }
         }
@@ -265,24 +273,67 @@ object TorrentPathSafety {
             throw IllegalStateException("Unable to create torrent job directory: ${candidate.path}")
         }
         ensureNotSymlink(candidate)
-        if (normalizedHash != null) {
+        if (ownershipToken != null) {
             val markerFile = resolveContainedFile(candidate, markerName)
-            if (!markerFile.exists()) {
-                runCatching { markerFile.writeText(normalizedHash) }
-            }
+            runCatching { markerFile.writeText(ownershipToken) }
         }
         return candidate
     }
 
-    private fun findAvailableDirectory(baseDir: File, baseName: String, infoHashHex: String?): File {
-        val shortHash = infoHashHex?.take(8)
-        if (!shortHash.isNullOrEmpty()) {
+    private fun buildOwnershipToken(normalizedHash: String?, jobId: Long): String? {
+        return when {
+            jobId > 0L && normalizedHash != null -> "job:$jobId|hash:$normalizedHash"
+            jobId > 0L -> "job:$jobId"
+            normalizedHash != null -> normalizedHash
+            else -> null
+        }
+    }
+
+    internal fun canReuseDirectory(
+        existingMarker: String?,
+        hasExistingContent: Boolean,
+        normalizedHash: String?,
+        jobId: Long,
+        ownershipToken: String?
+    ): Boolean {
+        if (existingMarker == null) {
+            return !hasExistingContent
+        }
+        if (ownershipToken != null && existingMarker == ownershipToken) {
+            return true
+        }
+        if (jobId > 0L) {
+            if (existingMarker.startsWith("job:")) {
+                val markerJobPart = existingMarker.substringBefore("|")
+                val markerHashPart = existingMarker.substringAfter("hash:", "")
+                if (markerJobPart != "job:$jobId") {
+                    return false
+                }
+                return normalizedHash == null || markerHashPart.isEmpty() || markerHashPart == normalizedHash
+            }
+            // Legacy hash-only marker: only reuse if it matches normalizedHash and no other job claimed it
+            return normalizedHash != null && existingMarker == normalizedHash && !hasExistingContent
+        }
+        return normalizedHash != null && existingMarker == normalizedHash
+    }
+
+    private fun findAvailableDirectory(
+        baseDir: File,
+        baseName: String,
+        normalizedHash: String?,
+        jobId: Long,
+        ownershipToken: String?
+    ): File {
+        val markerName = ".torrent_job_id"
+        val shortHash = normalizedHash?.take(8)
+        if (!shortHash.isNullOrEmpty() && jobId <= 0L) {
             val hashCandidate = File(baseDir, "${baseName}_$shortHash")
             ensureNotSymlink(hashCandidate)
             if (!hashCandidate.exists() || hashCandidate.isDirectory) {
-                val marker = File(hashCandidate, ".torrent_job_id")
-                val existing = if (marker.exists()) runCatching { marker.readText().trim() }.getOrNull() else null
-                if (!hashCandidate.exists() || existing == infoHashHex) {
+                val marker = File(hashCandidate, markerName)
+                val existing = if (marker.exists()) runCatching { marker.readText().trim().lowercase(Locale.US) }.getOrNull() else null
+                val hasContent = (hashCandidate.list()?.any { it != markerName && it != ".staging" } == true)
+                if (!hashCandidate.exists() || canReuseDirectory(existing, hasContent, normalizedHash, jobId, ownershipToken)) {
                     return hashCandidate
                 }
             }
@@ -293,6 +344,14 @@ object TorrentPathSafety {
             ensureNotSymlink(numbered)
             if (!numbered.exists()) {
                 return numbered
+            }
+            if (numbered.isDirectory) {
+                val marker = File(numbered, markerName)
+                val existing = if (marker.exists()) runCatching { marker.readText().trim().lowercase(Locale.US) }.getOrNull() else null
+                val hasContent = (numbered.list()?.any { it != markerName && it != ".staging" } == true)
+                if (existing != null && canReuseDirectory(existing, hasContent, normalizedHash, jobId, ownershipToken)) {
+                    return numbered
+                }
             }
             suffix++
         }

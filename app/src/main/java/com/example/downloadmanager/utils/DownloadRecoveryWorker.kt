@@ -35,14 +35,16 @@ class DownloadRecoveryWorker(
             for (item in allDownloads) {
                 when (item.status) {
                     DownloadStatus.DOWNLOADING -> {
-                        // Interrupted by reboot or process termination: move to QUEUED preserving partial state
-                        dao.updateStatusNarrow(
-                            id = item.id,
-                            status = DownloadStatus.QUEUED,
-                            errorMessage = "Interrupted — queued for resume",
-                            completedTimestamp = null
-                        )
-                        hasPendingQueue = true
+                        if (!DownloadService.isDownloadActivelyRunning(item.id)) {
+                            // Interrupted by reboot or process termination: move to QUEUED preserving partial state
+                            dao.updateStatusNarrow(
+                                id = item.id,
+                                status = DownloadStatus.QUEUED,
+                                errorMessage = "Interrupted — queued for resume",
+                                completedTimestamp = null
+                            )
+                            hasPendingQueue = true
+                        }
                     }
                     DownloadStatus.QUEUED -> {
                         hasPendingQueue = true

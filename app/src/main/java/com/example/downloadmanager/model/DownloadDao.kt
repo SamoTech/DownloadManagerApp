@@ -25,7 +25,7 @@ interface DownloadDao {
     @Query("DELETE FROM downloads WHERE status = 'COMPLETED'")
     suspend fun deleteCompletedDownloads()
 
-    @Query("DELETE FROM downloads WHERE url NOT LIKE 'http://%' AND url NOT LIKE 'https://%' AND url NOT LIKE 'magnet:%'")
+    @Query("DELETE FROM downloads WHERE url NOT LIKE 'http://%' AND url NOT LIKE 'https://%' AND url NOT LIKE 'magnet:%' AND url NOT LIKE 'file://%' AND url NOT LIKE 'content://%' AND url NOT LIKE '/%.torrent'")
     suspend fun deleteInvalidDownloads()
 
     @Query("SELECT * FROM downloads ORDER BY addedDate DESC")

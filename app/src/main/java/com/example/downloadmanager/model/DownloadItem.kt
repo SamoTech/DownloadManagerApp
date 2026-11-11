@@ -97,7 +97,8 @@ class DownloadStatusConverter {
 
     @TypeConverter
     fun toIntList(data: String?): List<Int>? {
-        if (data.isNullOrBlank()) return emptyList()
+        if (data == null) return null
+        if (data.isBlank()) return emptyList()
         return data.split(",").mapNotNull { it.trim().toIntOrNull() }
     }
 }

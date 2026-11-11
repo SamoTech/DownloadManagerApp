@@ -109,6 +109,8 @@
     <string name="extract_audio">Extract Audio Track</string>
     <string name="allow_third_party_resolvers">Allow Third-Party Social Video Resolvers</string>
     <string name="allow_third_party_resolvers_summary">Query public resolver APIs (tikwm, vxtwitter, fxtwitter, ddinstagram) when direct social page extraction is restricted</string>
+    <string name="allow_third_party_torrent_resolvers">Allow Third-Party Torrent Metadata Caches</string>
+    <string name="allow_third_party_torrent_resolvers_summary">Query external torrent metadata cache services (iTorrents, Torrage, Btdig) when resolving magnet links</string>
 
     <string name="music_settings">Music &amp; Audio Settings</string>
     <string name="music_download">Music Download</string>

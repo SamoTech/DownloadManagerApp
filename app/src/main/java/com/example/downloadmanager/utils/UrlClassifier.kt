@@ -416,6 +416,24 @@ object UrlClassifier {
             )
         }
 
+        // 13b. Bandcamp, Audiomack, Mixcloud, Jamendo, FreeMusicArchive
+        if (matchesAnyDomain(host, "bandcamp.com", "audiomack.com", "mixcloud.com", "jamendo.com", "freemusicarchive.org")) {
+            val provider = when {
+                matchesDomain(host, "bandcamp.com") -> "Bandcamp"
+                matchesDomain(host, "audiomack.com") -> "Audiomack"
+                matchesDomain(host, "mixcloud.com") -> "Mixcloud"
+                matchesDomain(host, "jamendo.com") -> "Jamendo"
+                else -> "Free Music Archive"
+            }
+            return UrlClassification(
+                category = PlatformCategory.SOUNDCLOUD,
+                downloadType = DownloadType.MUSIC,
+                providerName = provider,
+                canonicalHost = host,
+                isSupported = true
+            )
+        }
+
         // 14. HLS Playlist (.m3u8)
         val ext = pathLower.substringAfterLast('.', "")
         if (ext == "m3u8") {

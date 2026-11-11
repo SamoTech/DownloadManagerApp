@@ -63,6 +63,19 @@ class SettingsActivity : AppCompatActivity() {
                 )
                 true
             }
+
+            // Apply app language immediately when changed
+            val languagePref = findPreference<androidx.preference.ListPreference>("language")
+            languagePref?.setOnPreferenceChangeListener { _, newValue ->
+                val langCode = (newValue as? String)?.trim().orEmpty()
+                val locales = if (langCode.isEmpty() || langCode == "system") {
+                    androidx.core.os.LocaleListCompat.getEmptyLocaleList()
+                } else {
+                    androidx.core.os.LocaleListCompat.forLanguageTags(langCode)
+                }
+                AppCompatDelegate.setApplicationLocales(locales)
+                true
+            }
         }
     }
 }

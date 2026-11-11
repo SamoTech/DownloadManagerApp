@@ -85,6 +85,20 @@ class DownloadService : Service() {
         const val EXTRA_FILENAME = "extra_filename"
         const val EXTRA_SAVE_PATH = "extra_save_path"
         const val EXTRA_DOWNLOAD_TYPE = "extra_download_type"
+
+        private val runningInProcessIds = ConcurrentHashMap.newKeySet<Long>()
+
+        fun isDownloadActivelyRunning(id: Long): Boolean {
+            return runningInProcessIds.contains(id)
+        }
+
+        internal fun markDownloadRunningForTest(id: Long, running: Boolean) {
+            if (running) {
+                runningInProcessIds.add(id)
+            } else {
+                runningInProcessIds.remove(id)
+            }
+        }
     }
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -211,7 +225,10 @@ class DownloadService : Service() {
     private suspend fun recoverInterruptedDownloadsOnStart() {
         val allItems = repository.getAllDownloadsList()
         for (item in allItems) {
-            if (item.status == DownloadStatus.DOWNLOADING && !activeDownloadIds.contains(item.id)) {
+            if (item.status == DownloadStatus.DOWNLOADING &&
+                !activeDownloadIds.contains(item.id) &&
+                !isDownloadActivelyRunning(item.id)
+            ) {
                 repository.updateStatus(
                     id = item.id,
                     status = DownloadStatus.QUEUED,
@@ -373,6 +390,7 @@ class DownloadService : Service() {
             for (candidate in queuedItems) {
                 if (activeDownloadIds.size >= maxConcurrent) break
                 if (activeDownloadIds.add(candidate.id)) {
+                    runningInProcessIds.add(candidate.id)
                     ensureForegroundStarted()
                     serviceScope.launch {
                         executeDownload(candidate.id)
@@ -384,6 +402,7 @@ class DownloadService : Service() {
 
     private suspend fun stopManagerForDownload(id: Long, downloadType: DownloadType?) {
         activeDownloadIds.remove(id)
+        runningInProcessIds.remove(id)
         when (downloadType) {
             DownloadType.TORRENT, DownloadType.MAGNET -> torrentDownloadManager.stopAndAwait(id)
             DownloadType.MUSIC -> musicDownloadManager.stopAndAwait(id)
@@ -399,6 +418,7 @@ class DownloadService : Service() {
     }
 
     private suspend fun executeDownload(downloadId: Long) {
+        runningInProcessIds.add(downloadId)
         try {
             val item = repository.getDownloadById(downloadId) ?: return
             if (item.status != DownloadStatus.QUEUED && item.status != DownloadStatus.DOWNLOADING) {
@@ -488,6 +508,7 @@ class DownloadService : Service() {
             handleWorkerFailure(downloadId, e.message ?: "Download failed")
         } finally {
             activeDownloadIds.remove(downloadId)
+            runningInProcessIds.remove(downloadId)
             processQueue()
         }
     }
@@ -545,7 +566,8 @@ class DownloadService : Service() {
             "disabled in settings",
             "tracker unreachable",
             "no peers returned",
-            "empty bittorrent swarm"
+            "empty bittorrent swarm",
+            "please select at least one file"
         )
         if (nonRetryableIndicators.any { lower.contains(it) }) {
             return false
@@ -608,9 +630,22 @@ class DownloadService : Service() {
                 stopManagerForDownload(id, item.downloadType)
                 cleanupStagingFilesForItem(item)
                 if (deleteFile) {
-                    val file = File(item.savePath, item.filename)
-                    if (file.exists()) {
-                        if (file.isDirectory) file.deleteRecursively() else file.delete()
+                    runCatching {
+                        val baseDir = File(item.savePath)
+                        val cleanName = com.example.downloadmanager.utils.TorrentPathSafety.validateComponent(item.filename)
+                        val target = com.example.downloadmanager.utils.TorrentPathSafety.resolveContainedFile(baseDir, cleanName)
+                        if (target.exists()) {
+                            val markerFile = File(target, com.example.downloadmanager.utils.TorrentPathSafety.TORRENT_IDENTITY_MARKER)
+                            val ownedByOtherJob = if (markerFile.exists()) {
+                                val markerText = runCatching { markerFile.readText(Charsets.UTF_8).trim() }.getOrDefault("")
+                                markerText.startsWith("job:") && !markerText.startsWith("job:${item.id}|")
+                            } else {
+                                false
+                            }
+                            if (!ownedByOtherJob) {
+                                if (target.isDirectory) target.deleteRecursively() else target.delete()
+                            }
+                        }
                     }
                 }
             }
@@ -656,6 +691,25 @@ class DownloadService : Service() {
                 if (legacyTemp.exists()) legacyTemp.delete()
                 val torrentStaging = File(dir, ".luca_torrent_staging_${item.id}")
                 if (torrentStaging.exists()) torrentStaging.deleteRecursively()
+                if (item.downloadType == DownloadType.TORRENT || item.downloadType == DownloadType.MAGNET) {
+                    runCatching {
+                        val cleanName = com.example.downloadmanager.utils.TorrentPathSafety.validateComponent(item.filename)
+                        val jobFolder = com.example.downloadmanager.utils.TorrentPathSafety.resolveContainedFile(dir, cleanName)
+                        if (jobFolder.exists() && jobFolder.isDirectory) {
+                            val markerFile = File(jobFolder, com.example.downloadmanager.utils.TorrentPathSafety.TORRENT_IDENTITY_MARKER)
+                            val ownedByOtherJob = if (markerFile.exists()) {
+                                val markerText = runCatching { markerFile.readText(Charsets.UTF_8).trim() }.getOrDefault("")
+                                markerText.startsWith("job:") && !markerText.startsWith("job:${item.id}|")
+                            } else {
+                                false
+                            }
+                            if (!ownedByOtherJob) {
+                                val innerStaging = File(jobFolder, com.example.downloadmanager.utils.TorrentPathSafety.STAGING_DIR_NAME)
+                                if (innerStaging.exists()) innerStaging.deleteRecursively()
+                            }
+                        }
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed cleaning staging files for ${item.id}: ${e.message}")
@@ -771,6 +825,7 @@ class DownloadService : Service() {
     }
 
     override fun onDestroy() {
+        runningInProcessIds.clear()
         try {
             connectivityManager.unregisterNetworkCallback(networkCallback)
         } catch (_: Exception) {}
