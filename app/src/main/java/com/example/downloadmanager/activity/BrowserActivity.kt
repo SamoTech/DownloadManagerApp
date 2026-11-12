@@ -64,7 +64,7 @@ class BrowserActivity : AppCompatActivity() {
     private lateinit var videoDownloadManager: VideoDownloadManager
 
     private val detectedLinks = Collections.synchronizedList(mutableListOf<DetectedLinkItem>())
-    private var currentUrl: String = DEFAULT_SEARCH_HOME
+    private var currentUrl: String = ""
     private var currentPageTitle: String = ""
     private var lastScannedUrl: String = ""
     private var activeScanJob: Job? = null
@@ -87,8 +87,6 @@ class BrowserActivity : AppCompatActivity() {
     )
 
     companion object {
-        private const val DEFAULT_SEARCH_HOME = "https://duckduckgo.com"
-
         private val AUDIO_EXTENSIONS = setOf(
             "mp3", "flac", "m4a", "wav", "ogg", "aac", "opus", "wma"
         )
@@ -346,7 +344,9 @@ class BrowserActivity : AppCompatActivity() {
         musicDownloadManager = MusicDownloadManager(application, repository)
         videoDownloadManager = VideoDownloadManager(application, repository)
 
-        binding.tvSnifferStatus.text = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE}) • Detector Ready"
+        val versionBadge = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
+        binding.tvBrowserHeaderVersion.text = "Smart Browser • $versionBadge"
+        binding.tvSnifferStatus.text = "$versionBadge • Enter a website URL above"
 
         activeWebView = binding.webView
         setupWebView(binding.webView)
@@ -357,7 +357,80 @@ class BrowserActivity : AppCompatActivity() {
         if (!initialUrl.isNullOrBlank()) {
             navigateTo(initialUrl)
         } else {
-            navigateTo(DEFAULT_SEARCH_HOME)
+            showBlankBrowserReadyState()
+        }
+    }
+
+    private fun showBlankBrowserReadyState() {
+        currentUrl = ""
+        currentPageTitle = ""
+        lastScannedUrl = ""
+        detectedLinks.clear()
+        binding.etBrowserUrl.setText("")
+        binding.pageSummaryCard.visibility = View.GONE
+        binding.fabDetectedLinks.text = "Detected (0)"
+        val versionBadge = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
+        binding.tvBrowserHeaderVersion.text = "Smart Browser • $versionBadge"
+        binding.tvSnifferStatus.text = "$versionBadge • Enter a website URL above"
+        val readyHtml = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <style>
+                    body {
+                        margin: 0;
+                        padding: 32px 20px;
+                        background: #0F172A;
+                        color: #F8FAFC;
+                        font-family: sans-serif;
+                        display: flex;
+                        flex-direction: column;
+                        align-items: center;
+                        justify-content: center;
+                        min-height: 75vh;
+                        text-align: center;
+                    }
+                    .badge {
+                        display: inline-block;
+                        padding: 6px 14px;
+                        border-radius: 999px;
+                        background: #1E293B;
+                        color: #38BDF8;
+                        font-size: 13px;
+                        font-weight: bold;
+                        margin-bottom: 14px;
+                        border: 1px solid #334155;
+                    }
+                    h2 {
+                        margin: 0 0 10px 0;
+                        font-size: 20px;
+                        color: #FFFFFF;
+                    }
+                    p {
+                        margin: 0;
+                        max-width: 360px;
+                        font-size: 14px;
+                        line-height: 1.5;
+                        color: #94A3B8;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="badge">$versionBadge</div>
+                <h2>Real Web Browser &amp; Media Detector</h2>
+                <p>Type or paste any website URL in the address bar above to visit the site and detect downloadable audio, video, torrents, or files.</p>
+            </body>
+            </html>
+        """.trimIndent()
+        runCatching {
+            (activeWebView ?: binding.webView).loadDataWithBaseURL(
+                null,
+                readyHtml,
+                "text/html",
+                "UTF-8",
+                null
+            )
         }
     }
 
@@ -480,6 +553,10 @@ class BrowserActivity : AppCompatActivity() {
                 super.onPageStarted(view, url, favicon)
                 injectDrmDisableScript(view)
                 val validUrl = url ?: return
+                if (validUrl.startsWith("about:") || validUrl.startsWith("data:")) {
+                    updateNavButtonStates()
+                    return
+                }
                 if (validUrl != currentUrl) {
                     detectedLinks.clear()
                 }
@@ -493,6 +570,10 @@ class BrowserActivity : AppCompatActivity() {
                 super.doUpdateVisitedHistory(view, url, isReload)
                 injectDrmDisableScript(view)
                 val validUrl = url ?: return
+                if (validUrl.startsWith("about:") || validUrl.startsWith("data:")) {
+                    updateNavButtonStates()
+                    return
+                }
                 val urlChanged = validUrl != currentUrl
                 currentUrl = validUrl
                 binding.etBrowserUrl.setText(validUrl)
@@ -508,6 +589,10 @@ class BrowserActivity : AppCompatActivity() {
                 super.onPageFinished(view, url)
                 injectDrmDisableScript(view)
                 val validUrl = url ?: currentUrl
+                if (validUrl.isBlank() || validUrl.startsWith("about:") || validUrl.startsWith("data:")) {
+                    updateNavButtonStates()
+                    return
+                }
                 currentUrl = validUrl
                 currentPageTitle = view?.title?.trim().orEmpty()
                 binding.etBrowserUrl.setText(validUrl)
@@ -726,8 +811,11 @@ class BrowserActivity : AppCompatActivity() {
         val targetUrl = when {
             trimmed.startsWith("http://", ignoreCase = true) ||
                 trimmed.startsWith("https://", ignoreCase = true) -> trimmed
-            trimmed.contains(".") && !trimmed.contains(" ") -> "https://$trimmed"
-            else -> "https://duckduckgo.com/?q=${URLEncoder.encode(trimmed, "UTF-8")}"
+            !trimmed.contains(" ") && trimmed.contains(".") -> "https://$trimmed"
+            else -> {
+                Toast.makeText(this, R.string.error_invalid_url, Toast.LENGTH_SHORT).show()
+                return
+            }
         }
 
         currentUrl = targetUrl

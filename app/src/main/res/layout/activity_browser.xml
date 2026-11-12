@@ -24,6 +24,17 @@
             android:paddingTop="8dp"
             android:paddingBottom="8dp">
 
+            <TextView
+                android:id="@+id/tvBrowserHeaderVersion"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="4dp"
+                android:paddingHorizontal="4dp"
+                android:text="Smart Browser • Luca v14.0 (Build 14)"
+                android:textColor="#38BDF8"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -244,7 +255,7 @@
                 android:layout_weight="1"
                 android:ellipsize="end"
                 android:maxLines="1"
-                android:text="Link Detector Active"
+                android:text="Luca v14.0 (Build 14) • Ready"
                 android:textColor="#94A3B8"
                 android:textSize="12sp" />
 

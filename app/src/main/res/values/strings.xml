@@ -124,7 +124,6 @@
     <string name="allow_alternate_music_source">Allow Alternate-Source Lookup (YouTube)</string>
     <string name="allow_alternate_music_source_summary">Opt in to search YouTube for a verified title/artist/duration match when a track page (e.g. Spotify) only exposes a 30s preview or metadata</string>
     <string name="supported_music_sites">Supported: SoundCloud, YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify (30s preview or opt-in match), Jamendo, Archive.org, Podcasts &amp; Direct Audio</string>
-    <string name="sample_music_tracks">Example Public Audio Links</string>
     
     <string name="confirm_delete">Are you sure you want to delete this download?</string>
     <string name="confirm_delete_file">Also delete the downloaded file?</string>
@@ -179,7 +178,7 @@
     <string name="completed_cleared">Completed downloads cleared</string>
     <string name="smart_browser">Smart Browser</string>
     <string name="browser_sniff_links">Browse &amp; Detect Downloadable Links</string>
-    <string name="browser_url_hint">Enter website URL or search query...</string>
+    <string name="browser_url_hint">Enter website URL (e.g. https://...)</string>
     <string name="detected_links">Detected Downloadable Links</string>
     <string name="download_all">Download All</string>
     <string name="media_player">Media Player</string>

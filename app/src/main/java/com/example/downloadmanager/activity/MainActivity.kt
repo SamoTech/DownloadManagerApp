@@ -676,14 +676,13 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun syncAppVersionHeader() {
-        val versionTitle = "Luca Download Manager v${BuildConfig.VERSION_NAME}"
-        val buildSubtitle = "Build ${BuildConfig.VERSION_CODE}"
-        val versionBadge = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
+        val versionTitle = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
+        val appSubtitle = getString(R.string.app_name)
         supportActionBar?.title = versionTitle
-        supportActionBar?.subtitle = buildSubtitle
+        supportActionBar?.subtitle = appSubtitle
         binding.toolbar.title = versionTitle
-        binding.toolbar.subtitle = buildSubtitle
-        binding.tvAppVersion.text = versionBadge
+        binding.toolbar.subtitle = appSubtitle
+        binding.tvAppVersion.text = versionTitle
     }
 
     override fun onResume() {

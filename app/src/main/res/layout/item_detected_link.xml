@@ -79,7 +79,7 @@
                 android:layout_marginTop="2dp"
                 android:ellipsize="middle"
                 android:singleLine="true"
-                android:text="https://example.com/audio.mp3"
+                android:text=""
                 android:textColor="@color/gray"
                 android:textSize="11sp" />
         </LinearLayout>
