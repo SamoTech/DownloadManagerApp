@@ -51,34 +51,58 @@ object MediaAssetHelper {
     }
 
     /**
-     * Inspects the first bytes of [file] to determine its true container MIME type,
-     * preventing extension/container mismatches (e.g., DASH M4A or WebM Opus saved with .mp3 extension).
+     * Inspects up to the first 64 KB of [file] to determine its true container MIME type in pure Kotlin,
+     * preventing extension/container mismatches and avoiding native NuMediaExtractor calls on non-media files.
      */
     fun detectActualMimeType(file: File, fallbackIsVideo: Boolean = false): String? {
         if (!file.exists() || !file.isFile || file.length() < 12L) return null
         return try {
-            val header = ByteArray(64)
-            val read = FileInputStream(file).use { it.read(header) }
+            val maxInspect = minOf(file.length(), 65536L).toInt()
+            val header = ByteArray(maxInspect)
+            val read = FileInputStream(file).use { fis ->
+                var total = 0
+                while (total < maxInspect) {
+                    val n = fis.read(header, total, maxInspect - total)
+                    if (n <= 0) break
+                    total += n
+                }
+                total
+            }
             if (read < 12) return null
 
-            // 1. ISO Base Media File Format (MP4 / M4A / 3GP / DASH) -> "ftyp" at offset 4 with valid box size
-            val boxSize = ((header[0].toInt() and 0xFF) shl 24) or
-                ((header[1].toInt() and 0xFF) shl 16) or
-                ((header[2].toInt() and 0xFF) shl 8) or
-                (header[3].toInt() and 0xFF)
-            if (boxSize in 8..4096 &&
-                header[4] == 'f'.code.toByte() &&
-                header[5] == 't'.code.toByte() &&
-                header[6] == 'y'.code.toByte() &&
-                header[7] == 'p'.code.toByte()
+            // Reject HTML, XML, JSON, #EXTM3U text, or bencoded .torrent files immediately
+            val asciiSample = String(header, 0, minOf(read, 512), Charsets.ISO_8859_1)
+                .trimStart('\uFEFF', ' ', '\t', '\r', '\n')
+                .lowercase()
+            if (asciiSample.startsWith("<!doctype html") ||
+                asciiSample.startsWith("<html") ||
+                asciiSample.startsWith("<?xml") ||
+                asciiSample.startsWith("#extm3u") ||
+                asciiSample.startsWith("{\"") ||
+                asciiSample.startsWith("d8:announce") ||
+                asciiSample.startsWith("d13:announce-list") ||
+                asciiSample.startsWith("torrent download completed")
             ) {
-                val brand = String(header, 8, 4, Charsets.US_ASCII)
-                return if (brand.equals("M4A ", ignoreCase = true) ||
-                    brand.equals("M4B ", ignoreCase = true)
-                ) {
-                    "audio/mp4"
+                return null
+            }
+
+            // 1. ISO Base Media File Format (MP4 / M4A / 3GP / DASH / fMP4)
+            val boxType = String(header, 4, 4, Charsets.ISO_8859_1)
+            if (boxType in setOf("ftyp", "moov", "moof", "styp", "sidx", "wide", "free", "skip", "mdat")) {
+                val brand = if (boxType == "ftyp" && read >= 12) {
+                    String(header, 8, 4, Charsets.ISO_8859_1)
                 } else {
-                    if (hasVideoTrack(file)) "video/mp4" else "audio/mp4"
+                    ""
+                }
+                if (brand.equals("M4A ", ignoreCase = true) || brand.equals("M4B ", ignoreCase = true)) {
+                    return "audio/mp4"
+                }
+                // Check within read bytes for "vide" vs "soun" handler box (`hdlr`) before invoking MediaExtractor
+                val rawIsoStr = String(header, 0, read, Charsets.ISO_8859_1)
+                return when {
+                    rawIsoStr.contains("vide") -> "video/mp4"
+                    rawIsoStr.contains("soun") -> "audio/mp4"
+                    else -> if (fallbackIsVideo) "video/mp4" else "audio/mp4"
                 }
             }
 
@@ -88,13 +112,13 @@ object MediaAssetHelper {
                 header[2] == 0xDF.toByte() &&
                 header[3] == 0xA3.toByte()
             ) {
-                val ascii = String(header, 0, read, Charsets.ISO_8859_1).lowercase()
+                val ascii = String(header, 0, minOf(read, 4096), Charsets.ISO_8859_1).lowercase()
                 val isWebm = ascii.contains("webm")
-                val hasVid = hasVideoTrack(file)
+                val hasVid = ascii.contains("v_vp8") || ascii.contains("v_vp9") || ascii.contains("v_av1") || ascii.contains("v_mpeg4")
                 return when {
-                    isWebm && hasVid -> "video/webm"
-                    isWebm && !hasVid -> "audio/webm"
-                    hasVid -> "video/x-matroska"
+                    isWebm && (hasVid || fallbackIsVideo) -> "video/webm"
+                    isWebm -> "audio/webm"
+                    hasVid || fallbackIsVideo -> "video/x-matroska"
                     else -> "audio/x-matroska"
                 }
             }
@@ -131,7 +155,27 @@ object MediaAssetHelper {
                 }
             }
 
-            // 6. ID3v2 MP3 or validated MPEG audio frame sync header
+            // 6. MPEG-2 Transport Stream (.ts segments from HLS) -> 0x47 sync byte every 188 bytes
+            if (read >= 377 &&
+                header[0] == 0x47.toByte() &&
+                header[188] == 0x47.toByte() &&
+                header[376] == 0x47.toByte()
+            ) {
+                return if (fallbackIsVideo) "video/mp2t" else "audio/mp2t"
+            }
+
+            // 7. Skip any leading ID3v2 tag(s) and check for ADTS AAC or MPEG-1/2/2.5 Layer 1/2/3 audio frames
+            val postId3Offset = stripLeadingId3Tags(header, read)
+            if (postId3Offset in 0 until (read - 4)) {
+                if (isValidAdtsFrameSync(header, postId3Offset, read)) {
+                    return "audio/aac"
+                }
+                if (isValidMpegFrameSyncAt(header, postId3Offset)) {
+                    return "audio/mpeg"
+                }
+            }
+
+            // If file starts with a valid ID3v2 header whose size exceeded our 64KB buffer, still recognize as MP3
             if (header[0] == 'I'.code.toByte() &&
                 header[1] == 'D'.code.toByte() &&
                 header[2] == '3'.code.toByte() &&
@@ -139,21 +183,76 @@ object MediaAssetHelper {
             ) {
                 return "audio/mpeg"
             }
-            if (isValidMpegFrameSync(header)) {
+
+            // Scan first 16KB for a 2-frame locked MPEG audio stream
+            val lockedMpegOffset = findFirstValidMpegFrameOffset(header, minOf(read, 16384))
+            if (lockedMpegOffset >= 0) {
                 return "audio/mpeg"
             }
 
-            if (fallbackIsVideo && hasVideoTrack(file)) "video/mp4" else null
+            null
         } catch (_: Exception) {
             null
         }
     }
 
-    private fun isValidMpegFrameSync(header: ByteArray): Boolean {
-        if (header.size < 4) return false
-        val b0 = header[0].toInt() and 0xFF
-        val b1 = header[1].toInt() and 0xFF
-        val b2 = header[2].toInt() and 0xFF
+    /**
+     * Returns the byte offset immediately after one or more leading `ID3v2` tags in [bytes] (up to [limit]).
+     * SoundCloud HLS MP3 segments frequently prepend `ID3v2` PRIV timestamp tags to every segment.
+     */
+    fun stripLeadingId3Tags(bytes: ByteArray, limit: Int = bytes.size): Int {
+        var offset = 0
+        while (offset + 10 <= limit) {
+            if (bytes[offset] == 'I'.code.toByte() &&
+                bytes[offset + 1] == 'D'.code.toByte() &&
+                bytes[offset + 2] == '3'.code.toByte() &&
+                (bytes[offset + 3].toInt() and 0xFF) in 2..4
+            ) {
+                val flags = bytes[offset + 5].toInt() and 0xFF
+                val footerSize = if ((flags and 0x10) != 0) 10 else 0
+                val s0 = bytes[offset + 6].toInt() and 0x7F
+                val s1 = bytes[offset + 7].toInt() and 0x7F
+                val s2 = bytes[offset + 8].toInt() and 0x7F
+                val s3 = bytes[offset + 9].toInt() and 0x7F
+                val tagPayloadSize = (s0 shl 21) or (s1 shl 14) or (s2 shl 7) or s3
+                val nextOffset = offset + 10 + tagPayloadSize + footerSize
+                if (nextOffset <= offset) break
+                offset = nextOffset
+                // Also skip any null padding bytes between consecutive ID3 tags or before the first MPEG frame
+                while (offset < limit && bytes[offset] == 0.toByte()) {
+                    offset++
+                }
+            } else {
+                break
+            }
+        }
+        return offset
+    }
+
+    private fun isValidAdtsFrameSync(buf: ByteArray, offset: Int, limit: Int): Boolean {
+        if (offset + 7 > limit) return false
+        val b0 = buf[offset].toInt() and 0xFF
+        val b1 = buf[offset + 1].toInt() and 0xFF
+        if (b0 != 0xFF || (b1 and 0xF6) != 0xF0) return false
+        val sampleRateIdx = (buf[offset + 2].toInt() ushr 2) and 0x0F
+        if (sampleRateIdx >= 13) return false
+        val frameLen = (((buf[offset + 3].toInt() and 0x03) shl 11) or
+            ((buf[offset + 4].toInt() and 0xFF) shl 3) or
+            ((buf[offset + 5].toInt() ushr 5) and 0x07))
+        if (frameLen < 7) return false
+        if (offset + frameLen + 2 <= limit) {
+            val nextB0 = buf[offset + frameLen].toInt() and 0xFF
+            val nextB1 = buf[offset + frameLen + 1].toInt() and 0xFF
+            return nextB0 == 0xFF && (nextB1 and 0xF6) == 0xF0
+        }
+        return true
+    }
+
+    private fun isValidMpegFrameSyncAt(buf: ByteArray, offset: Int): Boolean {
+        if (offset < 0 || offset + 4 > buf.size) return false
+        val b0 = buf[offset].toInt() and 0xFF
+        val b1 = buf[offset + 1].toInt() and 0xFF
+        val b2 = buf[offset + 2].toInt() and 0xFF
         if (b0 != 0xFF || (b1 and 0xE0) != 0xE0) return false
         val versionBits = (b1 shr 3) and 0x03
         val layerBits = (b1 shr 1) and 0x03
@@ -162,29 +261,155 @@ object MediaAssetHelper {
         return versionBits != 1 && layerBits != 0 && bitrateIdx in 1..14 && sampleRateIdx != 3
     }
 
+    private fun computeMpegFrameSize(buf: ByteArray, offset: Int): Int {
+        if (!isValidMpegFrameSyncAt(buf, offset)) return -1
+        val b1 = buf[offset + 1].toInt() and 0xFF
+        val b2 = buf[offset + 2].toInt() and 0xFF
+        val versionBits = (b1 shr 3) and 0x03
+        val layerBits = (b1 shr 1) and 0x03
+        val bitrateIdx = (b2 shr 4) and 0x0F
+        val sampleRateIdx = (b2 shr 2) and 0x03
+        val padding = (b2 shr 1) and 0x01
+
+        val sampleRate = when (versionBits) {
+            3 -> intArrayOf(44100, 48000, 32000)[sampleRateIdx] // MPEG-1
+            2 -> intArrayOf(22050, 24000, 16000)[sampleRateIdx] // MPEG-2
+            0 -> intArrayOf(11025, 12000, 8000)[sampleRateIdx]  // MPEG-2.5
+            else -> return -1
+        }
+
+        val bitrateKbps = if (versionBits == 3) {
+            when (layerBits) {
+                3 -> intArrayOf(0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448)[bitrateIdx]
+                2 -> intArrayOf(0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384)[bitrateIdx]
+                1 -> intArrayOf(0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320)[bitrateIdx]
+                else -> return -1
+            }
+        } else {
+            when (layerBits) {
+                3 -> intArrayOf(0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256)[bitrateIdx]
+                2, 1 -> intArrayOf(0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160)[bitrateIdx]
+                else -> return -1
+            }
+        }
+        if (bitrateKbps <= 0 || sampleRate <= 0) return -1
+
+        return if (layerBits == 3) {
+            ((12 * bitrateKbps * 1000) / sampleRate + padding) * 4
+        } else if (layerBits == 1 && versionBits != 3) {
+            (72 * bitrateKbps * 1000) / sampleRate + padding
+        } else {
+            (144 * bitrateKbps * 1000) / sampleRate + padding
+        }
+    }
+
+    /**
+     * Scans [buf] up to [limit] for a valid MPEG audio frame header whose calculated frame length leads
+     * directly to another valid MPEG audio frame header (or starts at offset 0).
+     */
+    fun findFirstValidMpegFrameOffset(buf: ByteArray, limit: Int = buf.size): Int {
+        val start = stripLeadingId3Tags(buf, limit).coerceIn(0, limit)
+        if (start + 4 <= limit && isValidMpegFrameSyncAt(buf, start)) {
+            val frameLen = computeMpegFrameSize(buf, start)
+            if (frameLen <= 0 || start + frameLen + 4 > limit || isValidMpegFrameSyncAt(buf, start + frameLen)) {
+                return start
+            }
+        }
+        val maxSearch = minOf(limit - 4, 16384)
+        for (pos in start..maxSearch) {
+            if (!isValidMpegFrameSyncAt(buf, pos)) continue
+            val frameLen = computeMpegFrameSize(buf, pos)
+            if (frameLen in 24..4608 && pos + frameLen + 4 <= limit && isValidMpegFrameSyncAt(buf, pos + frameLen)) {
+                return pos
+            }
+        }
+        return -1
+    }
+
+    /**
+     * If [file] is an MP3 stream with multiple back-to-back ID3v2 headers (such as SoundCloud HLS PRIV tags)
+     * or leading non-frame bytes before the first MPEG audio frame that would cause ExoPlayer's Mp3Extractor
+     * or Android's MediaPlayer to fail, trims the file cleanly to the first valid MPEG audio frame.
+     */
+    fun sanitizeMp3StreamIfNeeded(file: File) {
+        if (!file.exists() || !file.isFile || file.length() < 128L) return
+        try {
+            val maxInspect = minOf(file.length(), 32768L).toInt()
+            val buf = ByteArray(maxInspect)
+            val read = FileInputStream(file).use { it.read(buf) }
+            if (read < 64) return
+
+            // Do not touch MP4, WebM, Ogg, FLAC, or WAV files
+            val boxType = if (read >= 8) String(buf, 4, 4, Charsets.ISO_8859_1) else ""
+            if (boxType in setOf("ftyp", "moov", "moof", "styp", "sidx") ||
+                (buf[0] == 0x1A.toByte() && buf[1] == 0x45.toByte()) ||
+                (buf[0] == 'O'.code.toByte() && buf[1] == 'g'.code.toByte()) ||
+                (buf[0] == 'f'.code.toByte() && buf[1] == 'L'.code.toByte()) ||
+                (buf[0] == 'R'.code.toByte() && buf[1] == 'I'.code.toByte())
+            ) {
+                return
+            }
+
+            // If byte 0 is already a valid MPEG frame sync, no trimming needed
+            if (isValidMpegFrameSyncAt(buf, 0)) return
+
+            val frameOffset = findFirstValidMpegFrameOffset(buf, read)
+            if (frameOffset > 0 && frameOffset < file.length() - 64L) {
+                val tempClean = File(file.parentFile, ".clean_mp3_${file.name}")
+                FileInputStream(file).use { fis ->
+                    var toSkip = frameOffset.toLong()
+                    while (toSkip > 0L) {
+                        val skipped = fis.skip(toSkip)
+                        if (skipped <= 0L) break
+                        toSkip -= skipped
+                    }
+                    tempClean.outputStream().use { fos ->
+                        fis.copyTo(fos, 32 * 1024)
+                        fos.flush()
+                    }
+                }
+                if (tempClean.exists() && tempClean.length() > 64L) {
+                    tempClean.copyTo(file, overwrite = true)
+                }
+                tempClean.delete()
+            }
+        } catch (_: Exception) {
+        }
+    }
+
     fun hasVideoTrack(file: File): Boolean {
         if (!file.exists() || !file.isFile || file.length() < 256L) return false
-        val extractor = MediaExtractor()
+        val detected = detectActualMimeType(file, fallbackIsVideo = true) ?: return false
+        if (detected.startsWith("audio/")) return false
+        if (detected == "video/mp2t" || detected == "video/x-msvideo") return true
         return try {
-            extractor.setDataSource(file.absolutePath)
-            for (i in 0 until extractor.trackCount) {
-                val fmt = extractor.getTrackFormat(i)
-                val mime = fmt.getString(MediaFormat.KEY_MIME).orEmpty()
-                if (mime.startsWith("video/")) return true
-            }
-            false
+            val maxRead = minOf(file.length(), 65536L).toInt()
+            val buf = ByteArray(maxRead)
+            val n = FileInputStream(file).use { it.read(buf) }
+            if (n <= 16) return false
+            val raw = String(buf, 0, n, Charsets.ISO_8859_1)
+            raw.contains("vide") ||
+                raw.contains("avc1") ||
+                raw.contains("avc3") ||
+                raw.contains("hvc1") ||
+                raw.contains("hev1") ||
+                raw.contains("vp09") ||
+                raw.contains("vp08") ||
+                raw.contains("av01") ||
+                raw.contains("mp4v") ||
+                raw.contains("V_VP9") ||
+                raw.contains("V_VP8") ||
+                raw.contains("V_AV1") ||
+                raw.contains("V_MPEG4")
         } catch (_: Exception) {
             false
-        } finally {
-            try {
-                extractor.release()
-            } catch (_: Exception) {
-            }
         }
     }
 
     fun hasVideoAndAudioTracks(file: File): Boolean {
         if (!file.exists() || !file.isFile || file.length() < 512L) return false
+        val detected = detectActualMimeType(file, fallbackIsVideo = true) ?: return false
+        if (!detected.startsWith("video/")) return false
         val extractor = MediaExtractor()
         return try {
             extractor.setDataSource(file.absolutePath)
@@ -372,58 +597,17 @@ object MediaAssetHelper {
     }
 
     /**
-     * Inspects a file on disk to verify it is a valid playable media container and not an HTML error page.
+     * Inspects a file on disk to verify it is a valid playable media container and not an HTML/JSON/playlist page.
+     * Avoids calling native [MediaExtractor] when [detectActualMimeType] returns null so NuMediaExtractor never logs errors.
      */
     fun isValidPlayableMediaFile(file: File, requireVideo: Boolean = false): Boolean {
-        if (!file.exists() || !file.isFile || file.length() < 1024L) return false
+        if (!file.exists() || !file.isFile || file.length() < 256L) return false
 
-        try {
-            FileInputStream(file).use { fis ->
-                val sample = ByteArray(1024)
-                val read = fis.read(sample)
-                if (read < 64) return false
-                val headAscii = String(sample, 0, minOf(read, 512), Charsets.ISO_8859_1).lowercase()
-                if (headAscii.contains("<!doctype html") ||
-                    headAscii.contains("<html") ||
-                    headAscii.startsWith("torrent download completed")
-                ) {
-                    return false
-                }
-            }
-        } catch (_: Exception) {
-            return false
-        }
-
-        val detectedMime = detectActualMimeType(file, requireVideo)
-        if (detectedMime != null) {
-            if (requireVideo) {
-                return detectedMime.startsWith("video/") || hasVideoTrack(file)
-            }
-            return true
-        }
-
-        val extractor = MediaExtractor()
-        return try {
-            extractor.setDataSource(file.absolutePath)
-            val trackCount = extractor.trackCount
-            if (trackCount <= 0) return false
-            var hasVideoTrack = false
-            var hasAudioTrack = false
-            for (i in 0 until trackCount) {
-                val format = extractor.getTrackFormat(i)
-                val mime = format.getString(MediaFormat.KEY_MIME).orEmpty()
-                if (mime.startsWith("video/")) hasVideoTrack = true
-                if (mime.startsWith("audio/")) hasAudioTrack = true
-            }
-            if (requireVideo) hasVideoTrack else (hasAudioTrack || hasVideoTrack)
-        } catch (e: Exception) {
-            Log.w(TAG, "MediaExtractor check for ${file.name}: ${e.message}")
-            false
-        } finally {
-            try {
-                extractor.release()
-            } catch (_: Exception) {
-            }
+        val detectedMime = detectActualMimeType(file, requireVideo) ?: return false
+        return if (requireVideo) {
+            detectedMime.startsWith("video/") || hasVideoTrack(file)
+        } else {
+            detectedMime.startsWith("audio/") || detectedMime.startsWith("video/")
         }
     }
 
@@ -434,6 +618,24 @@ object MediaAssetHelper {
      */
     fun remuxAudioToStandardM4a(inputFile: File, outputFile: File): Boolean {
         if (!inputFile.exists() || inputFile.length() < 512L) return false
+        val detectedMime = detectActualMimeType(inputFile, fallbackIsVideo = false) ?: return false
+        if (detectedMime != "audio/mp4" && detectedMime != "video/mp4") {
+            return false
+        }
+        // Check if inputFile is a multi-segment HLS fMP4 with repeated `styp` boxes; if so, ExoPlayer's
+        // FragmentedMp4Extractor plays it natively without MediaExtractor remuxing.
+        try {
+            val sample = ByteArray(minOf(inputFile.length(), 8192L).toInt())
+            val n = FileInputStream(inputFile).use { it.read(sample) }
+            if (n > 16) {
+                val rawStr = String(sample, 0, n, Charsets.ISO_8859_1)
+                if (rawStr.contains("styp")) {
+                    return false
+                }
+            }
+        } catch (_: Exception) {
+        }
+
         var extractor: MediaExtractor? = null
         var muxer: MediaMuxer? = null
         return try {
@@ -507,6 +709,9 @@ object MediaAssetHelper {
      */
     fun muxMp4VideoAndM4aAudio(videoFile: File, audioFile: File, outputFile: File): Boolean {
         if (!videoFile.exists() || !audioFile.exists()) return false
+        if (detectActualMimeType(videoFile, true) == null || detectActualMimeType(audioFile, false) == null) {
+            return false
+        }
         var videoExtractor: MediaExtractor? = null
         var audioExtractor: MediaExtractor? = null
         var muxer: MediaMuxer? = null
@@ -617,60 +822,91 @@ object MediaAssetHelper {
     }
 
     /**
-     * Extracts real codec description (e.g., "H.264 640x360 • AAC 44.1kHz Stereo") from a media file.
+     * Extracts real codec description (e.g., "H.264 • AAC Audio" or "MP3 44.1kHz Stereo")
+     * in pure Kotlin without invoking native [MediaExtractor] or [DrmHalHidl].
      */
     fun inspectMediaCodecSummary(file: File, isVideo: Boolean): String {
-        if (!file.exists()) {
+        if (!file.exists() || !file.isFile || file.length() < 64L) {
             return if (isVideo) "Video Stream" else "Audio Stream"
         }
-        val extractor = MediaExtractor()
+        val detectedMime = detectActualMimeType(file, isVideo)
+            ?: return "Unsupported or Unrecognized Media"
+
+        when (detectedMime) {
+            "audio/mpeg" -> return inspectMp3HeaderSummary(file)
+            "audio/ogg" -> return "OGG / Opus Audio"
+            "audio/flac" -> return "FLAC Lossless Audio"
+            "audio/wav" -> return "PCM WAV Audio"
+            "audio/aac" -> return "AAC ADTS Audio"
+            "video/mp2t", "audio/mp2t" -> return "MPEG-TS Stream"
+            "video/x-msvideo" -> return "AVI Video Stream"
+        }
+
         return try {
-            extractor.setDataSource(file.absolutePath)
-            var videoCodec = ""
-            var audioCodec = ""
-            for (i in 0 until extractor.trackCount) {
-                val fmt = extractor.getTrackFormat(i)
-                val mime = fmt.getString(MediaFormat.KEY_MIME).orEmpty()
-                if (mime.startsWith("video/") && videoCodec.isEmpty()) {
-                    val w = if (fmt.containsKey(MediaFormat.KEY_WIDTH)) fmt.getInteger(MediaFormat.KEY_WIDTH) else 0
-                    val h = if (fmt.containsKey(MediaFormat.KEY_HEIGHT)) fmt.getInteger(MediaFormat.KEY_HEIGHT) else 0
-                    val codecName = when {
-                        mime.contains("avc") -> "H.264"
-                        mime.contains("hevc") -> "HEVC"
-                        mime.contains("vp9") -> "VP9"
-                        mime.contains("av01") -> "AV1"
-                        else -> mime.substringAfter("video/").uppercase()
-                    }
-                    videoCodec = if (w > 0 && h > 0) "$codecName ${w}x${h}" else codecName
-                } else if (mime.startsWith("audio/") && audioCodec.isEmpty()) {
-                    val sr = if (fmt.containsKey(MediaFormat.KEY_SAMPLE_RATE)) fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE) else 44100
-                    val ch = if (fmt.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT) else 2
-                    val codecName = when {
-                        mime.contains("mp4a") || mime.contains("aac") -> "AAC"
-                        mime.contains("mpeg") -> "MP3"
-                        mime.contains("flac") -> "FLAC"
-                        mime.contains("opus") -> "Opus"
-                        mime.contains("vorbis") || mime.contains("ogg") -> "Vorbis"
-                        mime.contains("raw") -> "PCM WAV"
-                        else -> mime.substringAfter("audio/").uppercase()
-                    }
-                    val chLabel = if (ch >= 2) "Stereo" else "Mono"
-                    audioCodec = "$codecName ${sr / 1000.0}kHz $chLabel"
-                }
+            val maxRead = minOf(file.length(), 65536L).toInt()
+            val buf = ByteArray(maxRead)
+            val n = FileInputStream(file).use { it.read(buf) }
+            if (n <= 16) return detectedMime.uppercase()
+            val raw = String(buf, 0, n, Charsets.ISO_8859_1)
+
+            val videoCodec = when {
+                raw.contains("avc1") || raw.contains("avc3") || raw.contains("V_MPEG4/ISO/AVC") -> "H.264"
+                raw.contains("hvc1") || raw.contains("hev1") || raw.contains("V_MPEGH/ISO/HEVC") -> "HEVC"
+                raw.contains("vp09") || raw.contains("V_VP9") -> "VP9"
+                raw.contains("vp08") || raw.contains("V_VP8") -> "VP8"
+                raw.contains("av01") || raw.contains("V_AV1") -> "AV1"
+                raw.contains("mp4v") -> "MPEG-4 Video"
+                else -> ""
             }
+
+            val audioCodec = when {
+                raw.contains("mp4a") -> "AAC 44.1kHz Stereo"
+                raw.contains("Opus") || raw.contains("A_OPUS") || raw.contains("dOps") -> "Opus Audio"
+                raw.contains("vorb") || raw.contains("A_VORBIS") -> "Vorbis Audio"
+                raw.contains("fLaC") || raw.contains("dfLa") -> "FLAC Audio"
+                raw.contains("ac-3") || raw.contains("ec-3") -> "Dolby Audio"
+                else -> ""
+            }
+
             when {
                 videoCodec.isNotEmpty() && audioCodec.isNotEmpty() -> "$videoCodec • $audioCodec"
                 videoCodec.isNotEmpty() -> videoCodec
                 audioCodec.isNotEmpty() -> audioCodec
-                else -> detectActualMimeType(file, isVideo)?.uppercase() ?: "Media Stream"
+                detectedMime == "audio/mp4" -> "AAC / M4A Audio"
+                detectedMime == "video/mp4" -> if (isVideo) "MP4 Video" else "M4A Audio"
+                detectedMime == "audio/webm" -> "WebM Opus Audio"
+                detectedMime == "video/webm" -> "WebM Video"
+                detectedMime == "video/x-matroska" -> "MKV Video"
+                else -> detectedMime.uppercase()
             }
         } catch (_: Exception) {
-            detectActualMimeType(file, isVideo)?.uppercase() ?: "Media Stream"
-        } finally {
-            try {
-                extractor.release()
-            } catch (_: Exception) {
+            detectedMime.uppercase()
+        }
+    }
+
+    private fun inspectMp3HeaderSummary(file: File): String {
+        return try {
+            val maxRead = minOf(file.length(), 32768L).toInt()
+            val buf = ByteArray(maxRead)
+            val read = FileInputStream(file).use { it.read(buf) }
+            val offset = findFirstValidMpegFrameOffset(buf, read)
+            if (offset < 0 || offset + 4 > read) return "MP3 Audio"
+            val b1 = buf[offset + 1].toInt() and 0xFF
+            val b2 = buf[offset + 2].toInt() and 0xFF
+            val b3 = buf[offset + 3].toInt() and 0xFF
+            val versionBits = (b1 shr 3) and 0x03
+            val sampleRateIdx = (b2 shr 2) and 0x03
+            val channelMode = (b3 shr 6) and 0x03
+            val sampleRate = when (versionBits) {
+                3 -> intArrayOf(44100, 48000, 32000)[sampleRateIdx]
+                2 -> intArrayOf(22050, 24000, 16000)[sampleRateIdx]
+                0 -> intArrayOf(11025, 12000, 8000)[sampleRateIdx]
+                else -> 44100
             }
+            val chLabel = if (channelMode == 3) "Mono" else "Stereo"
+            "MP3 ${sampleRate / 1000.0}kHz $chLabel"
+        } catch (_: Exception) {
+            "MP3 Audio"
         }
     }
 

@@ -188,8 +188,16 @@ object UrlClassifier {
         val pathLower = path.lowercase(Locale.US)
         val nonEmptySegments = httpUrl.pathSegments.filter { it.isNotBlank() }
 
-        // 1. Check .torrent file path (before general file check)
-        if (pathLower.endsWith(".torrent")) {
+        // 1. Check .torrent file path, .torrent query parameter, or known .torrent cache endpoint
+        val hasTorrentQueryParam = httpUrl.queryParameterNames.any { paramName ->
+            httpUrl.queryParameterValues(paramName).any { v ->
+                v?.trim()?.lowercase(Locale.US)?.endsWith(".torrent") == true
+            }
+        }
+        val isKnownTorrentEndpoint =
+            (matchesAnyDomain(host, "itorrents.org", "btcache.me") && pathLower.startsWith("/torrent/")) ||
+                (matchesDomain(host, "torrage.info") && pathLower.endsWith("/torrent.php"))
+        if (pathLower.endsWith(".torrent") || hasTorrentQueryParam || isKnownTorrentEndpoint) {
             return UrlClassification(
                 category = PlatformCategory.TORRENT_FILE,
                 downloadType = DownloadType.TORRENT,

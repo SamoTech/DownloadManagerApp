@@ -78,6 +78,11 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                 else -> VR_USER_AGENT
             }
         }
+
+        internal fun extractClenFromUrl(url: String): Long? {
+            val m = Regex("[?&]clen=(\\d+)").find(url)
+            return m?.groupValues?.getOrNull(1)?.toLongOrNull()
+        }
     }
 
     data class YouTubeVideoInfo(
@@ -247,7 +252,7 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
 
         var extractedVideoInfo: VideoInfo? = null
         val allFormats = mutableListOf<VideoFormat>()
-        var visitorData: String? = null
+        var visitorData: String? = fetchVisitorData(videoId)
 
         for ((index, clientTriple) in clients.withIndex()) {
             val (clientName, clientVersion, userAgent) = clientTriple
@@ -382,10 +387,9 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                             val height = fmtObj.optInt("height", 360)
                             val fps = fmtObj.optInt("fps", 30)
                             val bitrate = fmtObj.optInt("bitrate", 800_000)
-                            val approxDurationMs = fmtObj.optString("approxDurationMs", "0").toLongOrNull() ?: 0L
                             val clen = fmtObj.optString("contentLength").toLongOrNull()
                                 ?: extractClenFromUrl(directUrl)
-                                ?: if (approxDurationMs > 0 && bitrate > 0) (approxDurationMs * bitrate) / 8000L else 0L
+                                ?: 0L
 
                             allFormats.add(
                                 VideoFormat(
@@ -414,10 +418,9 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                             val mime = fmtObj.optString("mimeType", "")
                             val isAudio = mime.startsWith("audio/")
                             val bitrate = fmtObj.optInt("bitrate", 128_000)
-                            val approxDurationMs = fmtObj.optString("approxDurationMs", "0").toLongOrNull() ?: 0L
                             val clen = fmtObj.optString("contentLength").toLongOrNull()
                                 ?: extractClenFromUrl(directUrl)
-                                ?: if (approxDurationMs > 0 && bitrate > 0) (approxDurationMs * bitrate) / 8000L else 0L
+                                ?: 0L
 
                             if (isAudio) {
                                 val isM4a = mime.contains("mp4")
@@ -473,11 +476,6 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
         }
 
         return InnerTubeResult(extractedVideoInfo, allFormats)
-    }
-
-    private fun extractClenFromUrl(url: String): Long? {
-        val m = Regex("[?&]clen=(\\d+)").find(url)
-        return m?.groupValues?.getOrNull(1)?.toLongOrNull()
     }
 
     private fun fetchOEmbedVideoInfo(videoId: String): VideoInfo? {

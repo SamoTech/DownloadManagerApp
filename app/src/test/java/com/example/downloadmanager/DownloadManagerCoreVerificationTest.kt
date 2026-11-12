@@ -1491,9 +1491,9 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun phase7_activeTorrentSelectedFile_compactAndDictTrackers_andDistinctStatuses() = runBlocking {
-        // 0. Verify Luca Version 9.0 (Build 9)
-        assertEquals("9.0", BuildConfig.VERSION_NAME)
-        assertEquals(9, BuildConfig.VERSION_CODE)
+        // 0. Verify Luca Version 13.0 (Build 13)
+        assertEquals("13.0", BuildConfig.VERSION_NAME)
+        assertEquals(13, BuildConfig.VERSION_CODE)
 
         val tempRoot = createTempDirectory("phase7_torrent_trace").toFile()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -2473,6 +2473,229 @@ class DownloadManagerCoreVerificationTest {
             )
             assertNotNull(classifiedPdf)
             assertEquals(DownloadType.DIRECT, classifiedPdf!!.downloadType)
+
+            // 10. Verify v10.0 Torrent Engine upgrades:
+            //     (a) Large announce-list (> 600 bytes before 4:info) is accepted by isValidBencodedTorrent / peekParsedTorrentMetadata
+            val longTrackerList = (1..20).joinToString("") { idx ->
+                val u = "http://tracker$idx.example.org:6969/announce"
+                "l${u.length}:${u}e"
+            }
+            val largeHeaderPayload = "Hello-World-Torrent-Piece-Payload".toByteArray(StandardCharsets.UTF_8)
+            val largeHeaderPieceHash = MessageDigest.getInstance("SHA-1").digest(largeHeaderPayload)
+            val commentStr = "Large announce list test file"
+            val innerFileName = "real_inner_file.mp4"
+            val largeHeaderTorrent = ByteArrayOutputStream().apply {
+                write("d13:announce-listl$longTrackerList".toByteArray(StandardCharsets.UTF_8))
+                write("e7:comment${commentStr.length}:${commentStr}4:infod6:lengthi${largeHeaderPayload.size}e4:name${innerFileName.length}:${innerFileName}12:piece lengthi16384e6:pieces20:".toByteArray(StandardCharsets.UTF_8))
+                write(largeHeaderPieceHash)
+                write("ee".toByteArray(StandardCharsets.UTF_8))
+            }.toByteArray()
+            val largeHeaderTorrentFile = File(tempRoot, "large_header.torrent").apply {
+                writeBytes(largeHeaderTorrent)
+            }
+            val fastParsed = manager.peekParsedTorrentMetadata(largeHeaderTorrentFile.absolutePath)
+            assertNotNull("Large announce-list .torrent (> 600 bytes before 4:info) must parse immediately", fastParsed)
+            assertTrue(fastParsed!!.hasResolvedMetadata)
+            assertEquals("real_inner_file.mp4", fastParsed.name)
+            assertEquals(1, fastParsed.files.size)
+            assertEquals("real_inner_file.mp4", fastParsed.files[0].name)
+
+            //     (b) Unresolved magnet metadata has hasResolvedMetadata = false so UI never binds fake .bin file
+            val unresolvedMagnet = "magnet:?xt=urn:btih:9988776655443322110099887766554433221100&dn=Unresolved+Swarm+Pack"
+            val unresolvedMeta = manager.getTorrentMetadata(unresolvedMagnet)
+            assertNotNull(unresolvedMeta)
+            assertFalse("Unresolved magnet fallback must set hasResolvedMetadata = false", unresolvedMeta!!.hasResolvedMetadata)
+
+            // 11. Verify v11.0 SoundCloud & Download Engine fixes:
+            //     (a) BrowserActivity ignores internal SoundCloud API JSON endpoints and 10s HLS segments
+            assertNull(
+                "Internal SoundCloud API JSON endpoint must not be offered as direct audio file",
+                com.example.downloadmanager.activity.BrowserActivity.classifyDiscoveredResourceUrl(
+                    "https://api-v2.soundcloud.com/media/soundcloud:tracks:123456/stream/hls?client_id=abc"
+                )
+            )
+            assertNull(
+                "10-second SoundCloud HLS segment chunk must not be offered as standalone track",
+                com.example.downloadmanager.activity.BrowserActivity.classifyDiscoveredResourceUrl(
+                    "https://cf-hls-media.sndcdn.com/media/0/159999/track_segment.mp3"
+                )
+            )
+
+            //     (b) Bracket-balanced SoundCloud hydration parser handles missing trailing semicolon & nested strings
+            val hydrationHtml = """
+                <html><head><script>window.__sc_hydration = [{"hydratable":"user","data":{"username":"Artist;[Name]"}},{"hydratable":"sound","data":{"id":998877,"title":"أغنية عربية الأصيلة","duration":185000,"Full_duration":185000,"track_authorization":"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.auth_token","user":{"username":"عمرو دياب"},"media":{"transcodings":[{"url":"http://127.0.0.1:$port/sc/transcode/preview","preset":"mp3_1_0","snipped":true,"format":{"protocol":"progressive","mime_type":"audio/mpeg"}},{"url":"http://127.0.0.1:$port/sc/transcode/full_hls","preset":"mp3_1_0","snipped":false,"format":{"protocol":"hls","mime_type":"audio/mpeg"}}]}}}]</script></head></html>
+            """.trimIndent()
+            val musicManager = com.example.downloadmanager.manager.MusicDownloadManager(null, repo)
+            val parsedHydrationSlice = musicManager.extractSoundCloudHydrationJsonSlice(hydrationHtml)
+            assertNotNull("Hydration JSON array without trailing semicolon must parse", parsedHydrationSlice)
+            assertTrue(parsedHydrationSlice!!.startsWith("[") && parsedHydrationSlice.endsWith("]"))
+            assertTrue(parsedHydrationSlice.contains("أغنية عربية الأصيلة"))
+            assertTrue(parsedHydrationSlice.contains("track_authorization"))
+            assertTrue(
+                "Arabic title and artist must pass verifyAlternateMatch",
+                com.example.downloadmanager.manager.MusicDownloadManager.verifyAlternateMatch(
+                    expectedTitle = "تملي معاك",
+                    expectedArtist = "عمرو دياب",
+                    expectedDurationSec = 240L,
+                    candidateTitle = "عمرو دياب - تملي معاك (Official Audio)",
+                    candidateAuthor = "Amr Diab - عمرو دياب",
+                    candidateDurationSec = 241L
+                )
+            )
+
+            //     (c) End-to-end SoundCloud HLS stream served with Content-Type: application/octet-stream
+            //         and without .m3u8 extension in URL, plus non-matching bitrate-estimated expectedSize
+            val mp3FrameHeader = byteArrayOf(0xFF.toByte(), 0xFB.toByte(), 0x90.toByte(), 0x64.toByte())
+            val scSeg1 = mp3FrameHeader + ByteArray(413) { 0x41 }
+            val scSeg2 = mp3FrameHeader + ByteArray(413) { 0x42 }
+            val expectedConcatenatedAudio = scSeg1 + scSeg2
+            var capturedTranscodeQuery = ""
+
+            server.createContext("/sc/transcode/preview") { ex ->
+                val json = """{"url":"http://127.0.0.1:$port/sc/cdn/preview_30s.mp3"}""".toByteArray(StandardCharsets.UTF_8)
+                ex.sendResponseHeaders(200, json.size.toLong())
+                ex.responseBody.use { it.write(json) }
+            }
+            server.createContext("/sc/transcode/full_hls") { ex ->
+                capturedTranscodeQuery = ex.requestURI.rawQuery.orEmpty()
+                // Note: CDN URL intentionally does NOT end with .m3u8 to test #EXTM3U body auto-detection
+                val json = """{"url":"http://127.0.0.1:$port/sc/cdn/hls_manifest_opaque"}""".toByteArray(StandardCharsets.UTF_8)
+                ex.sendResponseHeaders(200, json.size.toLong())
+                ex.responseBody.use { it.write(json) }
+            }
+            server.createContext("/sc/cdn/hls_manifest_opaque") { ex ->
+                val m3u8 = """
+                    #EXTM3U
+                    #EXT-X-VERSION:3
+                    #EXT-X-TARGETDURATION:2
+                    #EXT-X-MEDIA-SEQUENCE:0
+                    #EXTINF:1.5,
+                    http://127.0.0.1:$port/sc/cdn/seg1.mp3
+                    #EXTINF:1.5,
+                    http://127.0.0.1:$port/sc/cdn/seg2.mp3
+                    #EXT-X-ENDLIST
+                """.trimIndent().toByteArray(StandardCharsets.UTF_8)
+                // Serve with generic application/octet-stream like CloudFront signed SoundCloud URLs
+                ex.responseHeaders.set("Content-Type", "application/octet-stream")
+                ex.sendResponseHeaders(200, m3u8.size.toLong())
+                ex.responseBody.use { it.write(m3u8) }
+            }
+            server.createContext("/sc/cdn/seg1.mp3") { ex ->
+                ex.responseHeaders.set("Content-Type", "audio/mpeg")
+                ex.sendResponseHeaders(200, scSeg1.size.toLong())
+                ex.responseBody.use { it.write(scSeg1) }
+            }
+            server.createContext("/sc/cdn/seg2.mp3") { ex ->
+                ex.responseHeaders.set("Content-Type", "audio/mpeg")
+                ex.sendResponseHeaders(200, scSeg2.size.toLong())
+                ex.responseBody.use { it.write(scSeg2) }
+            }
+
+            val videoManager = com.example.downloadmanager.manager.VideoDownloadManager(null, repo)
+            val hlsAutoDetectDest = File(tempRoot, "sc_auto_hls.mp3")
+            val streamOk = videoManager.streamUrlToFile(
+                downloadId = 999L,
+                streamUrl = "http://127.0.0.1:$port/sc/cdn/hls_manifest_opaque",
+                destFile = hlsAutoDetectDest,
+                expectedSize = 3_700_000L, // Rough bitrate estimate that differs from actual segment bytes
+                onProgress = { _, _, _, _ -> }
+            )
+            assertTrue("HLS playlist served as application/octet-stream must be auto-detected and downloaded", streamOk)
+            assertArrayEquals(
+                "Auto-detected HLS stream must write concatenated audio segments, not raw #EXTM3U text",
+                expectedConcatenatedAudio,
+                hlsAutoDetectDest.readBytes()
+            )
+            assertEquals("audio/mpeg", MediaAssetHelper.detectActualMimeType(hlsAutoDetectDest, fallbackIsVideo = false))
+            assertTrue(MediaAssetHelper.isValidPlayableMediaFile(hlsAutoDetectDest))
+
+            // 12. Verify v12.0 Media Player & Container Guard fixes:
+            //     (a) Pure-Kotlin detectActualMimeType & isValidPlayableMediaFile reject non-media files (#EXTM3U, JSON, HTML, .torrent)
+            //         without calling native MediaExtractor
+            val fakeM3u8Mp3 = File(tempRoot, "corrupt_manifest.mp3").apply {
+                writeText("#EXTM3U\n#EXT-X-VERSION:3\nhttp://127.0.0.1:$port/sc/cdn/seg1.mp3\n")
+            }
+            assertNull("Raw #EXTM3U text saved as .mp3 must be rejected by detectActualMimeType", MediaAssetHelper.detectActualMimeType(fakeM3u8Mp3))
+            assertFalse("Raw #EXTM3U text saved as .mp3 must not be marked playable", MediaAssetHelper.isValidPlayableMediaFile(fakeM3u8Mp3))
+
+            val fakeJsonMp3 = File(tempRoot, "corrupt_transcode.mp3").apply {
+                writeText("""{"url":"http://127.0.0.1:$port/sc/cdn/hls_manifest_opaque"}""")
+            }
+            assertNull("JSON transcoding object saved as .mp3 must be rejected by detectActualMimeType", MediaAssetHelper.detectActualMimeType(fakeJsonMp3))
+            assertFalse("JSON transcoding object saved as .mp3 must not be marked playable", MediaAssetHelper.isValidPlayableMediaFile(fakeJsonMp3))
+
+            //     (b) streamUrlToFile automatically unwraps a SoundCloud JSON transcoding response {"url":"..."}
+            val unwrappedJsonDest = File(tempRoot, "sc_unwrapped_from_json.mp3")
+            val unwrappedOk = videoManager.streamUrlToFile(
+                downloadId = 1000L,
+                streamUrl = "http://127.0.0.1:$port/sc/transcode/full_hls",
+                destFile = unwrappedJsonDest,
+                expectedSize = 0L,
+                onProgress = { _, _, _, _ -> }
+            )
+            assertTrue("streamUrlToFile must unwrap JSON transcoding endpoint and download underlying HLS audio", unwrappedOk)
+            assertArrayEquals(expectedConcatenatedAudio, unwrappedJsonDest.readBytes())
+            assertEquals("audio/mpeg", MediaAssetHelper.detectActualMimeType(unwrappedJsonDest, fallbackIsVideo = false))
+
+            //     (c) Chained ID3v2 PRIV headers (prepended to HLS MP3 segments by SoundCloud) are stripped cleanly
+            val id3PrivTag = byteArrayOf(
+                'I'.code.toByte(), 'D'.code.toByte(), '3'.code.toByte(), 0x04, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x0A, // 10-byte synchsafe payload
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9
+            )
+            val id3PrefixedMp3File = File(tempRoot, "sc_id3_priv_segments.mp3").apply {
+                writeBytes(id3PrivTag + id3PrivTag + expectedConcatenatedAudio)
+            }
+            MediaAssetHelper.sanitizeMp3StreamIfNeeded(id3PrefixedMp3File)
+            assertArrayEquals(
+                "sanitizeMp3StreamIfNeeded must strip leading ID3v2 PRIV tags so file starts at 0xFF 0xFB MPEG sync",
+                expectedConcatenatedAudio,
+                id3PrefixedMp3File.readBytes()
+            )
+            assertEquals("audio/mpeg", MediaAssetHelper.detectActualMimeType(id3PrefixedMp3File, fallbackIsVideo = false))
+
+            //     (d) verifyAlternateMatch normalizes YouTubeExtractor millisecond durations (241_000L) against seconds (240L)
+            assertTrue(
+                "verifyAlternateMatch must accept candidateDurationSec in milliseconds from YouTubeExtractor",
+                com.example.downloadmanager.manager.MusicDownloadManager.verifyAlternateMatch(
+                    expectedTitle = "تملي معاك",
+                    expectedArtist = "عمرو دياب",
+                    expectedDurationSec = 240L,
+                    candidateTitle = "عمرو دياب - تملي معاك (Official Audio)",
+                    candidateAuthor = "Amr Diab - عمرو دياب",
+                    candidateDurationSec = 241_000L
+                )
+            )
+
+            //     (e) Pure-Kotlin inspectMediaCodecSummary and hasVideoTrack on MP4/M4A without native MediaExtractor/DrmHalHidl
+            val mp4WithAvcAndAac = File(tempRoot, "sample_avc_aac.mp4").apply {
+                val boxHeader = byteArrayOf(
+                    0x00, 0x00, 0x00, 0x18,
+                    'f'.code.toByte(), 't'.code.toByte(), 'y'.code.toByte(), 'p'.code.toByte(),
+                    'i'.code.toByte(), 's'.code.toByte(), 'o'.code.toByte(), 'm'.code.toByte()
+                )
+                val body = "moov trak mdia minf stbl stsd avc1 vide mp4a soun".toByteArray(StandardCharsets.ISO_8859_1)
+                val pad = ByteArray(512)
+                writeBytes(boxHeader + body + pad)
+            }
+            assertTrue("hasVideoTrack must detect avc1/vide in pure Kotlin", MediaAssetHelper.hasVideoTrack(mp4WithAvcAndAac))
+            assertEquals("H.264 • AAC 44.1kHz Stereo", MediaAssetHelper.inspectMediaCodecSummary(mp4WithAvcAndAac, isVideo = true))
+
+            //     (f) BrowserActivity.classifyDiscoveredResourceUrl fast-skips static web assets (.js, .css, .woff2, .png)
+            assertNull(
+                "Static JS bundle must be ignored by classifyDiscoveredResourceUrl",
+                com.example.downloadmanager.activity.BrowserActivity.classifyDiscoveredResourceUrl(
+                    "https://open.spotifycdn.com/cdn/build/mobile-web-player/vendor.a1b2c3.js",
+                    "Spotify"
+                )
+            )
+            assertNull(
+                "Static WOFF2 font must be ignored by classifyDiscoveredResourceUrl",
+                com.example.downloadmanager.activity.BrowserActivity.classifyDiscoveredResourceUrl(
+                    "https://a-v2.sndcdn.com/assets/fonts/inter-bold.woff2",
+                    "SoundCloud"
+                )
+            )
         } finally {
             try { peerServer.close() } catch (_: Exception) {}
             server.stop(0)

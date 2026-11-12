@@ -70,9 +70,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
         
         setSupportActionBar(binding.toolbar)
-        val versionLabel = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
-        supportActionBar?.subtitle = "v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
-        binding.tvAppVersion.text = versionLabel
+        syncAppVersionHeader()
         
         val database = DownloadDatabase.getDatabase(application)
         val repository = DownloadRepository(database.downloadDao())
@@ -677,6 +675,23 @@ class MainActivity : AppCompatActivity() {
         }
     }
     
+    private fun syncAppVersionHeader() {
+        val versionTitle = "Luca Download Manager v${BuildConfig.VERSION_NAME}"
+        val buildSubtitle = "Build ${BuildConfig.VERSION_CODE}"
+        val versionBadge = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
+        supportActionBar?.title = versionTitle
+        supportActionBar?.subtitle = buildSubtitle
+        binding.toolbar.title = versionTitle
+        binding.toolbar.subtitle = buildSubtitle
+        binding.tvAppVersion.text = versionBadge
+    }
+
+    override fun onResume() {
+        super.onResume()
+        syncAppVersionHeader()
+        updateStorageStat()
+    }
+
     override fun onStart() {
         super.onStart()
         bindService(

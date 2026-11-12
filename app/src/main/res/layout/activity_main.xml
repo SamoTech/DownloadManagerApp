@@ -19,7 +19,8 @@
             android:layout_width="match_parent"
             android:layout_height="?attr/actionBarSize"
             android:background="@color/colorHeaderBg"
-            app:title="@string/app_name"
+            app:title="Luca Download Manager v13.0"
+            app:subtitle="Build 13"
             app:titleTextColor="@android:color/white"
             app:subtitleTextColor="#CBD5E1"
             app:menu="@menu/menu_main" />
@@ -201,7 +202,7 @@
                     android:id="@+id/tvAppVersion"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Luca v6.0"
+                    android:text="Luca v13.0 (Build 13)"
                     android:textColor="#CBD5E1"
                     android:textSize="11sp"
                     android:textStyle="bold" />

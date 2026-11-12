@@ -414,7 +414,6 @@ class AddDownloadActivity : AppCompatActivity() {
             isSettingFilenameProgrammatically = true
             binding.etFilename.setText(cleanPreset)
             isSettingFilenameProgrammatically = false
-            userManuallyEditedFilename = true
         }
 
         val incomingUrl = intent.getStringExtra("preset_url")
@@ -515,7 +514,17 @@ class AddDownloadActivity : AppCompatActivity() {
                 DownloadType.VIDEO -> extractVideoInfo(valid, token)
                 DownloadType.MUSIC -> extractMusicInfo(valid, token)
                 DownloadType.DIRECT -> {
-                    if (isProbeStillCurrent(token, valid) && binding.etFilename.text.isNullOrBlank()) {
+                    val fastTorrentMeta = runCatching {
+                        torrentDownloadManager.peekParsedTorrentMetadata(valid)
+                    }.getOrNull()
+                    if (isProbeStillCurrent(token, valid) &&
+                        fastTorrentMeta != null &&
+                        fastTorrentMeta.hasResolvedMetadata &&
+                        fastTorrentMeta.files.isNotEmpty()
+                    ) {
+                        switchDownloadType(DownloadType.TORRENT)
+                        extractMagnetInfo(valid, token)
+                    } else if (isProbeStillCurrent(token, valid) && binding.etFilename.text.isNullOrBlank()) {
                         setSuggestedFilenameIfNotEdited(downloadManager.getFilenameFromUrl(valid))
                     }
                 }
@@ -533,6 +542,26 @@ class AddDownloadActivity : AppCompatActivity() {
                 if (isProbeStillCurrent(token, url) && binding.etFilename.text.isNullOrBlank()) {
                     setSuggestedFilenameIfNotEdited(magnetInfo.displayName)
                 }
+            }
+
+            // Fast-path: for .torrent files (local content://, file://, or HTTP .torrent),
+            // display the real file list immediately (< 50ms) before waiting for tracker announces.
+            val fastMeta = runCatching {
+                torrentDownloadManager.peekParsedTorrentMetadata(url)
+            }.getOrNull()
+            if (isProbeStillCurrent(token, url) &&
+                fastMeta != null &&
+                fastMeta.hasResolvedMetadata &&
+                fastMeta.files.isNotEmpty()
+            ) {
+                setSuggestedFilenameIfNotEdited(fastMeta.name)
+                val fastSizeLabel = formatBytes(fastMeta.totalSize)
+                binding.tvTorrentMetaSummary.text =
+                    "${fastMeta.name} • ${fastMeta.files.size} files ($fastSizeLabel) • Contacting trackers..."
+                bindTorrentFilesToPicker(
+                    torrentIdentity = fastMeta.hash.ifBlank { url.lowercase(Locale.US) },
+                    files = fastMeta.files
+                )
             }
 
             val metadata = try {
@@ -556,20 +585,21 @@ class AddDownloadActivity : AppCompatActivity() {
             if (!isProbeStillCurrent(token, url)) return@launch
             binding.progressBarTorrentFetch.visibility = View.GONE
 
-            if (metadata != null && metadata.files.isNotEmpty()) {
+            val seedsLabel = if (metadata != null && metadata.seeds >= 0) {
+                getString(R.string.seeds, metadata.seeds)
+            } else {
+                getString(R.string.seeds_unavailable)
+            }
+            val peersLabel = if (metadata != null && metadata.peers >= 0) {
+                getString(R.string.peers, metadata.peers)
+            } else {
+                getString(R.string.peers_unavailable)
+            }
+            val trackerNote = metadata?.trackerStatus?.takeIf { it.isNotBlank() }?.let { " • $it" }.orEmpty()
+
+            if (metadata != null && metadata.hasResolvedMetadata && metadata.files.isNotEmpty()) {
                 setSuggestedFilenameIfNotEdited(metadata.name)
                 val sizeLabel = formatBytes(metadata.totalSize)
-                val seedsLabel = if (metadata.seeds >= 0) {
-                    getString(R.string.seeds, metadata.seeds)
-                } else {
-                    getString(R.string.seeds_unavailable)
-                }
-                val peersLabel = if (metadata.peers >= 0) {
-                    getString(R.string.peers, metadata.peers)
-                } else {
-                    getString(R.string.peers_unavailable)
-                }
-                val trackerNote = metadata.trackerStatus?.takeIf { it.isNotBlank() }?.let { " • $it" }.orEmpty()
                 binding.tvTorrentMetaSummary.text =
                     "${metadata.name} • ${metadata.files.size} files ($sizeLabel) • $seedsLabel • $peersLabel$trackerNote"
 
@@ -578,10 +608,18 @@ class AddDownloadActivity : AppCompatActivity() {
                     files = metadata.files
                 )
             } else {
-                val trackerNote = metadata?.trackerStatus?.takeIf { it.isNotBlank() }
-                    ?: "${getString(R.string.seeds_unavailable)} • ${getString(R.string.peers_unavailable)}"
+                // Unresolved magnet metadata: never bind the placeholder .bin file into rvTorrentFiles
+                val fallbackName = metadata?.name?.takeIf { it.isNotBlank() }
+                    ?: torrentDownloadManager.parseMagnetLink(url)?.displayName
+                    ?: "Magnet link"
+                setSuggestedFilenameIfNotEdited(fallbackName)
+                torrentFilesAdapter = null
+                binding.rvTorrentFiles.adapter = null
+                binding.rvTorrentFiles.visibility = View.GONE
+                binding.tvSelectedFilesCount.text =
+                    "All files will be downloaded when metadata resolves (or tap Fetch Files to retry)"
                 binding.tvTorrentMetaSummary.text =
-                    "Magnet link ready • $trackerNote"
+                    "$fallbackName • $seedsLabel • $peersLabel$trackerNote"
             }
         }
     }
@@ -793,6 +831,18 @@ class AddDownloadActivity : AppCompatActivity() {
             binding.etUrl.error = reason
             Toast.makeText(this, reason, Toast.LENGTH_LONG).show()
             return
+        }
+
+        if (downloadType == DownloadType.DIRECT) {
+            when (classification.kind) {
+                UrlClassifier.SourceKind.MUSIC_PLATFORM,
+                UrlClassifier.SourceKind.DIRECT_AUDIO -> downloadType = DownloadType.MUSIC
+                UrlClassifier.SourceKind.VIDEO_PLATFORM,
+                UrlClassifier.SourceKind.HLS_PLAYLIST -> downloadType = DownloadType.VIDEO
+                UrlClassifier.SourceKind.MAGNET -> downloadType = DownloadType.MAGNET
+                UrlClassifier.SourceKind.TORRENT_FILE -> downloadType = DownloadType.TORRENT
+                else -> {}
+            }
         }
 
         probeRequestToken.incrementAndGet()

@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.LayoutInflater
@@ -11,6 +12,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.webkit.CookieManager
+import android.webkit.PermissionRequest
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -63,7 +66,9 @@ class BrowserActivity : AppCompatActivity() {
     private val detectedLinks = Collections.synchronizedList(mutableListOf<DetectedLinkItem>())
     private var currentUrl: String = DEFAULT_SEARCH_HOME
     private var currentPageTitle: String = ""
+    private var lastScannedUrl: String = ""
     private var activeScanJob: Job? = null
+    private var activeWebView: WebView? = null
 
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -94,6 +99,10 @@ class BrowserActivity : AppCompatActivity() {
             "zip", "rar", "7z", "tar", "gz", "bz2", "xz",
             "apk", "pdf", "iso", "epub", "dmg", "exe", "msi",
             "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "txt"
+        )
+        private val STATIC_IGNORED_EXTENSIONS = setOf(
+            "js", "mjs", "cjs", "css", "png", "jpg", "jpeg", "gif", "webp", "svg", "ico",
+            "woff", "woff2", "ttf", "otf", "eot", "json", "xml", "map", "wasm"
         )
 
         /**
@@ -243,6 +252,20 @@ class BrowserActivity : AppCompatActivity() {
             val cleanPath = httpUrl.encodedPath.lowercase(Locale.US)
             val ext = cleanPath.substringAfterLast('.', "")
 
+            if (ext in STATIC_IGNORED_EXTENSIONS) {
+                return null
+            }
+            if (host.endsWith("google-analytics.com") ||
+                host.endsWith("googletagmanager.com") ||
+                host.endsWith("doubleclick.net") ||
+                host.endsWith("sentry.io") ||
+                host.endsWith("scorecardresearch.com") ||
+                host.endsWith("facebook.net") ||
+                host.endsWith("cloudflareinsights.com")
+            ) {
+                return null
+            }
+
             // Check Spotify / SoundCloud CDN audio streams observed in network traffic
             if (host.endsWith("scdn.co") && cleanPath.contains("/mp3-preview/")) {
                 val title = fallbackTitle.ifBlank { "Spotify Audio Stream" }
@@ -253,19 +276,30 @@ class BrowserActivity : AppCompatActivity() {
                     badgeLabel = "AUDIO • MP3"
                 )
             }
-            if ((host.endsWith("sndcdn.com") || host.contains("soundcloud")) &&
-                (ext in setOf("mp3", "m4a", "opus") || cleanPath.contains("/stream"))
+            // Ignore internal SoundCloud API JSON endpoints and 10-second HLS byte-range chunks
+            if (host == "api-v2.soundcloud.com" ||
+                host == "api.soundcloud.com" ||
+                host == "api-widget.soundcloud.com" ||
+                host == "api-mobi.soundcloud.com" ||
+                host.startsWith("cf-hls-media.sndcdn.com")
             ) {
-                if (!cleanPath.endsWith(".js") && !cleanPath.endsWith(".css") && !cleanPath.endsWith(".png") && !cleanPath.endsWith(".jpg")) {
-                    val title = fallbackTitle.ifBlank { "SoundCloud Audio Stream" }
-                    val streamExt = if (ext in AUDIO_EXTENSIONS) ext.uppercase(Locale.US) else "MP3"
-                    return DetectedLinkItem(
-                        title = title,
-                        url = trimmed,
-                        downloadType = DownloadType.MUSIC,
-                        badgeLabel = "AUDIO • $streamExt"
-                    )
-                }
+                return null
+            }
+            if (host.endsWith("sndcdn.com") && cleanPath.contains("/media/")) {
+                // Byte-range HLS chunk (e.g., /media/0/159999/...) — not a full track
+                return null
+            }
+            if (host.endsWith("sndcdn.com") && ext in setOf("mp3", "m4a", "opus") &&
+                !cleanPath.endsWith(".js") && !cleanPath.endsWith(".css") && !cleanPath.endsWith(".png") && !cleanPath.endsWith(".jpg")
+            ) {
+                val title = fallbackTitle.ifBlank { "SoundCloud Audio Stream" }
+                val streamExt = if (ext in AUDIO_EXTENSIONS) ext.uppercase(Locale.US) else "MP3"
+                return DetectedLinkItem(
+                    title = title,
+                    url = trimmed,
+                    downloadType = DownloadType.MUSIC,
+                    badgeLabel = "AUDIO • $streamExt"
+                )
             }
 
             // Check known audio/video platform track/watch links on the page
@@ -314,7 +348,8 @@ class BrowserActivity : AppCompatActivity() {
 
         binding.tvSnifferStatus.text = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE}) • Detector Ready"
 
-        setupWebView()
+        activeWebView = binding.webView
+        setupWebView(binding.webView)
         setupListeners()
         setupBackNavigation()
 
@@ -326,16 +361,36 @@ class BrowserActivity : AppCompatActivity() {
         }
     }
 
+    private fun injectDrmDisableScript(view: WebView?) {
+        val wv = view ?: return
+        val script = """
+            (function() {
+                try {
+                    if (navigator && navigator.requestMediaKeySystemAccess) {
+                        navigator.requestMediaKeySystemAccess = function() {
+                            return Promise.reject(new DOMException('NotSupportedError', 'NotSupportedError'));
+                        };
+                    }
+                    if (window.MediaKeys) {
+                        window.MediaKeys = undefined;
+                    }
+                } catch (e) {}
+            })();
+        """.trimIndent()
+        runCatching { wv.evaluateJavascript(script, null) }
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
-    private fun setupWebView() {
-        val webSettings = binding.webView.settings
+    private fun setupWebView(webView: WebView = activeWebView ?: binding.webView) {
+        activeWebView = webView
+        val webSettings = webView.settings
         webSettings.javaScriptEnabled = true
         webSettings.domStorageEnabled = true
         webSettings.databaseEnabled = true
         webSettings.loadsImagesAutomatically = true
         webSettings.useWideViewPort = true
         webSettings.loadWithOverviewMode = true
-        webSettings.mediaPlaybackRequiresUserGesture = false
+        webSettings.mediaPlaybackRequiresUserGesture = true
         webSettings.setSupportZoom(true)
         webSettings.builtInZoomControls = true
         webSettings.displayZoomControls = false
@@ -343,14 +398,20 @@ class BrowserActivity : AppCompatActivity() {
         webSettings.userAgentString =
             "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            runCatching {
+                webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
+            }
+        }
+
         runCatching {
             val cookieManager = CookieManager.getInstance()
             cookieManager.setAcceptCookie(true)
-            cookieManager.setAcceptThirdPartyCookies(binding.webView, true)
+            cookieManager.setAcceptThirdPartyCookies(webView, true)
         }
 
         // Handle standard browser file downloads triggered by clicking download links on any website
-        binding.webView.setDownloadListener { url, _, contentDisposition, mimeType, _ ->
+        webView.setDownloadListener { url, _, contentDisposition, mimeType, _ ->
             if (url.isNullOrBlank()) return@setDownloadListener
             val cleanMime = (mimeType ?: "").lowercase(Locale.US)
             val dispositionName = FilenameResolver.parseContentDisposition(contentDisposition)
@@ -378,7 +439,7 @@ class BrowserActivity : AppCompatActivity() {
             openInAddDownload(item)
         }
 
-        binding.webView.webChromeClient = object : WebChromeClient() {
+        webView.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                 if (newProgress in 1..99) {
                     binding.progressBarWeb.visibility = View.VISIBLE
@@ -396,9 +457,14 @@ class BrowserActivity : AppCompatActivity() {
                     refreshOfferForCurrentPage(pageUrl, cleanTitle)
                 }
             }
+
+            override fun onPermissionRequest(request: PermissionRequest?) {
+                // Deny PROTECTED_MEDIA_ID / EME hardware DRM requests so WebView never probes DrmHalHidl
+                runCatching { request?.deny() }
+            }
         }
 
-        binding.webView.webViewClient = object : WebViewClient() {
+        webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val targetUri = request?.url ?: return false
                 return handleInterceptedNavigationUri(targetUri)
@@ -412,6 +478,7 @@ class BrowserActivity : AppCompatActivity() {
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
+                injectDrmDisableScript(view)
                 val validUrl = url ?: return
                 if (validUrl != currentUrl) {
                     detectedLinks.clear()
@@ -424,6 +491,7 @@ class BrowserActivity : AppCompatActivity() {
 
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 super.doUpdateVisitedHistory(view, url, isReload)
+                injectDrmDisableScript(view)
                 val validUrl = url ?: return
                 val urlChanged = validUrl != currentUrl
                 currentUrl = validUrl
@@ -432,35 +500,79 @@ class BrowserActivity : AppCompatActivity() {
                 if (urlChanged) {
                     // Single-Page App route change (Spotify, SoundCloud, YouTube, TikTok, X, Instagram, etc.)
                     refreshOfferForCurrentPage(validUrl, view?.title ?: currentPageTitle)
-                    scanCurrentPageAsync(validUrl)
+                    scanCurrentPageAsync(validUrl, force = false)
                 }
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
+                injectDrmDisableScript(view)
                 val validUrl = url ?: currentUrl
                 currentUrl = validUrl
                 currentPageTitle = view?.title?.trim().orEmpty()
                 binding.etBrowserUrl.setText(validUrl)
                 updateNavButtonStates()
                 extractDomMediaAndLinksFromWebView()
-                scanCurrentPageAsync(validUrl)
+                scanCurrentPageAsync(validUrl, force = false)
             }
 
             override fun shouldInterceptRequest(
                 view: WebView?,
                 request: WebResourceRequest?
             ): WebResourceResponse? {
-                val reqUrl = request?.url?.toString()
+                val reqUri = request?.url
+                val reqUrl = reqUri?.toString()
                 if (!reqUrl.isNullOrBlank()) {
-                    val item = classifyDiscoveredResourceUrl(reqUrl, currentPageTitle)
-                    if (item != null) {
-                        runOnUiThread {
-                            addDetectedItemIfNew(item)
+                    val host = reqUri.host?.lowercase(Locale.US).orEmpty()
+                    if (host.contains("soundcloud.com") || host.contains("sndcdn.com")) {
+                        val cid = reqUri.getQueryParameter("client_id")
+                        if (!cid.isNullOrBlank()) {
+                            MusicDownloadManager.updateSoundCloudClientId(cid)
+                        }
+                    }
+                    val pathExt = reqUri.path?.substringAfterLast('.', "")?.lowercase(Locale.US).orEmpty()
+                    if (pathExt !in STATIC_IGNORED_EXTENSIONS) {
+                        val item = classifyDiscoveredResourceUrl(reqUrl, currentPageTitle)
+                        if (item != null) {
+                            val alreadyPresent = synchronized(detectedLinks) {
+                                detectedLinks.any { it.url == item.url && it.downloadType == item.downloadType }
+                            }
+                            if (!alreadyPresent) {
+                                runOnUiThread {
+                                    addDetectedItemIfNew(item)
+                                }
+                            }
                         }
                     }
                 }
                 return super.shouldInterceptRequest(view, request)
+            }
+
+            override fun onRenderProcessGone(
+                view: WebView?,
+                detail: RenderProcessGoneDetail?
+            ): Boolean {
+                // Returning true prevents Chromium aw_browser_terminator.cc from crashing the host app
+                runCatching {
+                    val deadView = view ?: activeWebView
+                    val parentGroup = deadView?.parent as? ViewGroup
+                    val layoutParams = deadView?.layoutParams
+                    if (deadView != null && parentGroup != null) {
+                        parentGroup.removeView(deadView)
+                        runCatching { deadView.destroy() }
+                        val replacement = WebView(this@BrowserActivity)
+                        if (layoutParams != null) {
+                            replacement.layoutParams = layoutParams
+                        }
+                        parentGroup.addView(replacement, 0)
+                        activeWebView = replacement
+                        setupWebView(replacement)
+                    }
+                    binding.progressBarWeb.visibility = View.GONE
+                    binding.tvSnifferStatus.text =
+                        "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE}) • Browser recovered (tap Reload)"
+                }
+                return true
             }
         }
     }
@@ -508,8 +620,9 @@ class BrowserActivity : AppCompatActivity() {
     private fun setupBackNavigation() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (binding.webView.canGoBack()) {
-                    binding.webView.goBack()
+                val wv = activeWebView ?: binding.webView
+                if (wv.canGoBack()) {
+                    wv.goBack()
                 } else {
                     finish()
                 }
@@ -545,13 +658,18 @@ class BrowserActivity : AppCompatActivity() {
         }
 
         binding.btnBrowserReload.setOnClickListener {
-            binding.webView.reload()
-            scanCurrentPageAsync(currentUrl)
+            val wv = activeWebView ?: binding.webView
+            if (wv.url.isNullOrBlank() && currentUrl.isNotBlank()) {
+                wv.loadUrl(currentUrl)
+            } else {
+                wv.reload()
+            }
+            scanCurrentPageAsync(currentUrl, force = true)
         }
 
         binding.btnScanPage.setOnClickListener {
             extractDomMediaAndLinksFromWebView()
-            scanCurrentPageAsync(currentUrl)
+            scanCurrentPageAsync(currentUrl, force = true)
             if (detectedLinks.isNotEmpty()) {
                 showDetectedLinksBottomSheet()
             } else {
@@ -560,16 +678,18 @@ class BrowserActivity : AppCompatActivity() {
         }
 
         binding.btnNavBack.setOnClickListener {
-            if (binding.webView.canGoBack()) {
-                binding.webView.goBack()
+            val wv = activeWebView ?: binding.webView
+            if (wv.canGoBack()) {
+                wv.goBack()
             } else {
                 finish()
             }
         }
 
         binding.btnNavForward.setOnClickListener {
-            if (binding.webView.canGoForward()) {
-                binding.webView.goForward()
+            val wv = activeWebView ?: binding.webView
+            if (wv.canGoForward()) {
+                wv.goForward()
             }
         }
 
@@ -579,8 +699,9 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     private fun updateNavButtonStates() {
-        binding.btnNavBack.alpha = if (binding.webView.canGoBack()) 1.0f else 0.45f
-        binding.btnNavForward.alpha = if (binding.webView.canGoForward()) 1.0f else 0.45f
+        val wv = activeWebView ?: binding.webView
+        binding.btnNavBack.alpha = if (wv.canGoBack()) 1.0f else 0.45f
+        binding.btnNavForward.alpha = if (wv.canGoForward()) 1.0f else 0.45f
     }
 
     private fun navigateTo(rawInput: String) {
@@ -610,11 +731,11 @@ class BrowserActivity : AppCompatActivity() {
         }
 
         currentUrl = targetUrl
+        lastScannedUrl = ""
         binding.etBrowserUrl.setText(targetUrl)
         detectedLinks.clear()
         refreshOfferForCurrentPage(targetUrl, "")
-        binding.webView.loadUrl(targetUrl)
-        scanCurrentPageAsync(targetUrl)
+        (activeWebView ?: binding.webView).loadUrl(targetUrl)
     }
 
     /**
@@ -654,7 +775,8 @@ class BrowserActivity : AppCompatActivity() {
             })();
         """.trimIndent()
 
-        binding.webView.evaluateJavascript(js) { rawJson ->
+        val wv = activeWebView ?: binding.webView
+        wv.evaluateJavascript(js) { rawJson ->
             if (rawJson.isNullOrBlank() || rawJson == "null") return@evaluateJavascript
             runCatching {
                 val decodedJson = if (rawJson.startsWith("\"") && rawJson.endsWith("\"")) {
@@ -682,12 +804,19 @@ class BrowserActivity : AppCompatActivity() {
         }
     }
 
-    private fun scanCurrentPageAsync(targetUrl: String) {
+    private fun scanCurrentPageAsync(targetUrl: String, force: Boolean = false) {
         if (!targetUrl.startsWith("http://", ignoreCase = true) &&
             !targetUrl.startsWith("https://", ignoreCase = true)
         ) {
             return
         }
+        if (!force && targetUrl == lastScannedUrl && activeScanJob?.isActive == true) {
+            return
+        }
+        if (!force && targetUrl == lastScannedUrl && detectedLinks.isNotEmpty()) {
+            return
+        }
+        lastScannedUrl = targetUrl
         activeScanJob?.cancel()
         activeScanJob = lifecycleScope.launch {
             val sniffed = withContext(Dispatchers.IO) {
@@ -1159,8 +1288,10 @@ class BrowserActivity : AppCompatActivity() {
     override fun onDestroy() {
         activeScanJob?.cancel()
         runCatching {
-            binding.webView.stopLoading()
-            binding.webView.destroy()
+            val wv = activeWebView ?: binding.webView
+            wv.stopLoading()
+            wv.destroy()
+            activeWebView = null
         }
         super.onDestroy()
     }

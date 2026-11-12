@@ -332,7 +332,22 @@ class DownloadService : Service() {
 
     fun startNewDownload(item: DownloadItem, onIdCreated: ((Long) -> Unit)? = null) {
         serviceScope.launch {
+            val resolvedType = if (item.downloadType == DownloadType.DIRECT) {
+                when (com.example.downloadmanager.utils.UrlClassifier.classify(item.url).kind) {
+                    com.example.downloadmanager.utils.UrlClassifier.SourceKind.MUSIC_PLATFORM,
+                    com.example.downloadmanager.utils.UrlClassifier.SourceKind.DIRECT_AUDIO -> DownloadType.MUSIC
+                    com.example.downloadmanager.utils.UrlClassifier.SourceKind.VIDEO_PLATFORM,
+                    com.example.downloadmanager.utils.UrlClassifier.SourceKind.HLS_PLAYLIST -> DownloadType.VIDEO
+                    com.example.downloadmanager.utils.UrlClassifier.SourceKind.MAGNET -> DownloadType.MAGNET
+                    com.example.downloadmanager.utils.UrlClassifier.SourceKind.TORRENT_FILE -> DownloadType.TORRENT
+                    else -> DownloadType.DIRECT
+                }
+            } else {
+                item.downloadType
+            }
             val queuedItem = item.copy(
+                downloadType = resolvedType,
+                isAudioOnly = item.isAudioOnly || resolvedType == DownloadType.MUSIC,
                 status = DownloadStatus.QUEUED,
                 errorMessage = null
             )

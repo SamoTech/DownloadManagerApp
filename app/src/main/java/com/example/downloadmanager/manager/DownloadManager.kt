@@ -3,6 +3,7 @@ package com.example.downloadmanager.manager
 import android.app.Application
 import android.os.Environment
 import android.util.Log
+import android.webkit.CookieManager
 import android.webkit.MimeTypeMap
 import androidx.preference.PreferenceManager
 import com.example.downloadmanager.model.DownloadItem
@@ -25,6 +26,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -107,16 +109,30 @@ class DownloadManager(
         val sha256Header: String?
     )
 
+    private fun applyDirectRequestHeaders(reqBuilder: Request.Builder, url: String) {
+        reqBuilder.header("User-Agent", DEFAULT_USER_AGENT)
+        reqBuilder.header("Accept", "*/*")
+        reqBuilder.header("Accept-Encoding", "identity")
+        val parsed = url.toHttpUrlOrNull()
+        if (parsed != null) {
+            reqBuilder.header("Referer", "${parsed.scheme}://${parsed.host}/")
+        }
+        runCatching {
+            val cookie = CookieManager.getInstance()?.getCookie(url)
+            if (!cookie.isNullOrBlank()) {
+                reqBuilder.header("Cookie", cookie)
+            }
+        }
+    }
+
     internal fun probeHttpResource(url: String): HttpProbeResult {
         try {
-            val rangeReq = Request.Builder()
+            val rangeReqBuilder = Request.Builder()
                 .url(url)
                 .get()
-                .header("User-Agent", DEFAULT_USER_AGENT)
                 .header("Range", "bytes=0-0")
-                .header("Accept", "*/*")
-                .header("Accept-Encoding", "identity")
-                .build()
+            applyDirectRequestHeaders(rangeReqBuilder, url)
+            val rangeReq = rangeReqBuilder.build()
             okHttpClient.newCall(rangeReq).execute().use { response ->
                 val isPartial = response.code == 206
                 val contentRangeHeader = response.header("Content-Range")
@@ -153,13 +169,11 @@ class DownloadManager(
         }
 
         return try {
-            val headReq = Request.Builder()
+            val headReqBuilder = Request.Builder()
                 .url(url)
                 .head()
-                .header("User-Agent", DEFAULT_USER_AGENT)
-                .header("Accept", "*/*")
-                .header("Accept-Encoding", "identity")
-                .build()
+            applyDirectRequestHeaders(headReqBuilder, url)
+            val headReq = headReqBuilder.build()
             okHttpClient.newCall(headReq).execute().use { response ->
                 if (!response.isSuccessful) {
                     return HttpProbeResult(-1L, false, null, null, null, null, null)
@@ -522,9 +536,7 @@ class DownloadManager(
         val reqBuilder = Request.Builder()
             .url(item.url)
             .get()
-            .header("User-Agent", DEFAULT_USER_AGENT)
-            .header("Accept", "*/*")
-            .header("Accept-Encoding", "identity")
+        applyDirectRequestHeaders(reqBuilder, item.url)
 
         if (existingLen > 0L) {
             reqBuilder.header("Range", "bytes=$existingLen-")
@@ -787,10 +799,8 @@ class DownloadManager(
                     val reqBuilder = Request.Builder()
                         .url(item.url)
                         .get()
-                        .header("User-Agent", DEFAULT_USER_AGENT)
                         .header("Range", "bytes=$startByte-$endByte")
-                        .header("Accept", "*/*")
-                        .header("Accept-Encoding", "identity")
+                    applyDirectRequestHeaders(reqBuilder, item.url)
 
                     val ifRange = HttpRangeValidator.selectIfRangeHeaderValue(item.etag, item.lastModified)
                     if (ifRange != null) {

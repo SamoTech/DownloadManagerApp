@@ -40,7 +40,8 @@ data class TorrentMetadata(
     val swarmMeasured: Boolean = false,
     val swarmTimestampMs: Long = 0L,
     val hasPieceHashes: Boolean = false,
-    val trackerStatus: String? = null
+    val trackerStatus: String? = null,
+    val hasResolvedMetadata: Boolean = true
 )
 
 data class MagnetInfo(
