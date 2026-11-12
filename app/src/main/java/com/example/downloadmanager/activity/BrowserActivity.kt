@@ -14,6 +14,7 @@ import android.view.inputmethod.EditorInfo
 import android.webkit.CookieManager
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.ServiceWorkerController
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -23,6 +24,7 @@ import android.webkit.WebViewClient
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
+import java.io.ByteArrayInputStream
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
@@ -463,6 +465,20 @@ class BrowserActivity : AppCompatActivity() {
                     if (window.MediaKeys) {
                         window.MediaKeys = undefined;
                     }
+                    if (navigator && navigator.serviceWorker) {
+                        navigator.serviceWorker.register = function() {
+                            return Promise.reject(new DOMException('SecurityError', 'ServiceWorker disabled'));
+                        };
+                    }
+                    if (window.HTMLCanvasElement && HTMLCanvasElement.prototype.getContext) {
+                        var origGetContext = HTMLCanvasElement.prototype.getContext;
+                        HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+                            if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') {
+                                return null;
+                            }
+                            return origGetContext.call(this, type, attrs);
+                        };
+                    }
                 } catch (e) {}
             })();
         """.trimIndent()
@@ -472,14 +488,30 @@ class BrowserActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView(webView: WebView = activeWebView ?: binding.webView) {
         activeWebView = webView
+        // Use software layer rendering to prevent emulator GPU / WebGL renderer crashes (aw_browser_terminator code -1)
+        runCatching {
+            webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+        }
+        runCatching {
+            val swSettings = ServiceWorkerController.getInstance().serviceWorkerWebSettings
+            swSettings.allowContentAccess = false
+            swSettings.allowFileAccess = false
+            swSettings.blockNetworkLoads = true
+        }
+
         val webSettings = webView.settings
         webSettings.javaScriptEnabled = true
         webSettings.domStorageEnabled = true
-        webSettings.databaseEnabled = true
+        webSettings.databaseEnabled = false
+        webSettings.cacheMode = WebSettings.LOAD_NO_CACHE
         webSettings.loadsImagesAutomatically = true
         webSettings.useWideViewPort = true
         webSettings.loadWithOverviewMode = true
         webSettings.mediaPlaybackRequiresUserGesture = true
+        webSettings.setSupportMultipleWindows(false)
+        webSettings.javaScriptCanOpenWindowsAutomatically = false
+        webSettings.allowFileAccess = false
+        webSettings.allowContentAccess = false
         webSettings.setSupportZoom(true)
         webSettings.builtInZoomControls = true
         webSettings.displayZoomControls = false
@@ -489,7 +521,8 @@ class BrowserActivity : AppCompatActivity() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             runCatching {
-                webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
+                // Keep renderer priority important and do NOT waive priority when covered by AddDownloadActivity
+                webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
             }
         }
 
@@ -627,6 +660,28 @@ class BrowserActivity : AppCompatActivity() {
                 val reqUrl = reqUri?.toString()
                 if (!reqUrl.isNullOrBlank()) {
                     val host = reqUri.host?.lowercase(Locale.US).orEmpty()
+                    // Block heavy third-party ad/telemetry/tracker scripts to prevent WebView renderer OOM crashes
+                    if (host.endsWith("google-analytics.com") ||
+                        host.endsWith("googletagmanager.com") ||
+                        host.endsWith("doubleclick.net") ||
+                        host.endsWith("googlesyndication.com") ||
+                        host.endsWith("adservice.google.com") ||
+                        host.endsWith("sentry.io") ||
+                        host.endsWith("scorecardresearch.com") ||
+                        host.endsWith("facebook.net") ||
+                        host.endsWith("cloudflareinsights.com") ||
+                        host.endsWith("onetrust.com") ||
+                        host.endsWith("cookielaw.org")
+                    ) {
+                        return WebResourceResponse(
+                            "text/plain",
+                            "UTF-8",
+                            204,
+                            "No Content",
+                            emptyMap(),
+                            ByteArrayInputStream(ByteArray(0))
+                        )
+                    }
                     if (host.contains("soundcloud.com") || host.contains("sndcdn.com")) {
                         val cid = reqUri.getQueryParameter("client_id")
                         if (!cid.isNullOrBlank()) {
@@ -664,17 +719,18 @@ class BrowserActivity : AppCompatActivity() {
                     if (deadView != null && parentGroup != null) {
                         parentGroup.removeView(deadView)
                         runCatching { deadView.destroy() }
-                        val replacement = WebView(this@BrowserActivity)
+                        val replacement = WebView(applicationContext)
                         if (layoutParams != null) {
                             replacement.layoutParams = layoutParams
                         }
                         parentGroup.addView(replacement, 0)
                         activeWebView = replacement
                         setupWebView(replacement)
+                        showBlankBrowserReadyState()
                     }
                     binding.progressBarWeb.visibility = View.GONE
                     binding.tvSnifferStatus.text =
-                        "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE}) • Browser recovered (tap Reload)"
+                        "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE}) • Browser recovered"
                 }
                 return true
             }
@@ -1393,6 +1449,14 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     private fun openInAddDownload(item: DetectedLinkItem) {
+        // Pause active WebView loading and timers before transitioning to AddDownloadActivity
+        // so heavy page scripts do not crash the backgrounded Chromium renderer process
+        runCatching {
+            val wv = activeWebView ?: binding.webView
+            wv.stopLoading()
+            wv.onPause()
+            wv.pauseTimers()
+        }
         val intent = Intent(this, AddDownloadActivity::class.java).apply {
             putExtra("download_type", item.downloadType.name)
             putExtra("preset_url", item.url)
@@ -1401,11 +1465,52 @@ class BrowserActivity : AppCompatActivity() {
         startActivity(intent)
     }
 
+    override fun onResume() {
+        super.onResume()
+        runCatching {
+            val wv = activeWebView ?: binding.webView
+            wv.onResume()
+            wv.resumeTimers()
+        }
+    }
+
+    override fun onPause() {
+        runCatching {
+            val wv = activeWebView ?: binding.webView
+            wv.stopLoading()
+            wv.onPause()
+            wv.pauseTimers()
+        }
+        super.onPause()
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        runCatching {
+            val wv = activeWebView
+            wv?.clearCache(false)
+            wv?.freeMemory()
+        }
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        runCatching {
+            val wv = activeWebView
+            wv?.clearCache(false)
+            wv?.freeMemory()
+        }
+    }
+
     override fun onDestroy() {
         activeScanJob?.cancel()
         runCatching {
             val wv = activeWebView ?: binding.webView
             wv.stopLoading()
+            wv.onPause()
+            wv.webChromeClient = null
+            (wv.parent as? ViewGroup)?.removeView(wv)
+            wv.removeAllViews()
             wv.destroy()
             activeWebView = null
         }

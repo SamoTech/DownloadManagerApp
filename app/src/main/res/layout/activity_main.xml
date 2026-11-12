@@ -19,7 +19,7 @@
             android:layout_width="match_parent"
             android:layout_height="?attr/actionBarSize"
             android:background="@color/colorHeaderBg"
-            app:title="Luca v17.0 (Build 17)"
+            app:title="Luca v18.0 (Build 18)"
             app:subtitle="@string/app_name"
             app:titleTextColor="@android:color/white"
             app:subtitleTextColor="#38BDF8"

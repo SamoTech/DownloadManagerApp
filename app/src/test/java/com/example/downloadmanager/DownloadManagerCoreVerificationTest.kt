@@ -1491,9 +1491,9 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun phase7_activeTorrentSelectedFile_compactAndDictTrackers_andDistinctStatuses() = runBlocking {
-        // 0. Verify Luca Version 17.0 (Build 17)
-        assertEquals("17.0", BuildConfig.VERSION_NAME)
-        assertEquals(17, BuildConfig.VERSION_CODE)
+        // 0. Verify Luca Version 18.0 (Build 18)
+        assertEquals("18.0", BuildConfig.VERSION_NAME)
+        assertEquals(18, BuildConfig.VERSION_CODE)
 
         val tempRoot = createTempDirectory("phase7_torrent_trace").toFile()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -2748,8 +2748,8 @@ class DownloadManagerCoreVerificationTest {
             assertTrue(MediaAssetHelper.hasVideoTrack(tailMoovMp4))
             assertEquals("H.264 • AAC 44.1kHz Stereo", MediaAssetHelper.inspectMediaCodecSummary(tailMoovMp4, isVideo = true))
 
-            assertEquals(17, BuildConfig.VERSION_CODE)
-            assertEquals("17.0", BuildConfig.VERSION_NAME)
+            assertEquals(18, BuildConfig.VERSION_CODE)
+            assertEquals("18.0", BuildConfig.VERSION_NAME)
         } finally {
             try { peerServer.close() } catch (_: Exception) {}
             server.stop(0)
