@@ -447,15 +447,22 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                                 ?: 0L
 
                             if (isAudio) {
-                                val isM4a = mime.contains("mp4")
+                                val isM4a = mime.contains("mp4") || mime.contains("mp4a") || mime.contains("aac")
+                                val audioCodec = when {
+                                    isM4a -> "AAC"
+                                    mime.contains("opus") -> "Opus"
+                                    mime.contains("vorbis") -> "Vorbis"
+                                    mime.contains("ac-3") || mime.contains("ec-3") -> "AC-3"
+                                    else -> "Audio"
+                                }
                                 val audioKbps = (bitrate / 1000).coerceAtLeast(48)
                                 val sampleRate = fmtObj.optString("audioSampleRate", "44100").toIntOrNull() ?: 44100
                                 allFormats.add(
                                     VideoFormat(
                                         formatId = "audio_$itag",
                                         url = directUrl,
-                                        quality = "${audioKbps}kbps ${if (isM4a) "M4A/AAC" else "WebM/Opus"}",
-                                        codec = if (isM4a) "AAC" else "Opus",
+                                        quality = "${audioKbps}kbps ${if (isM4a) "M4A/AAC" else "WebM/$audioCodec"}",
+                                        codec = audioCodec,
                                         container = if (isM4a) "m4a" else "webm",
                                         fileSize = clen,
                                         isAudioOnly = true,
@@ -464,9 +471,17 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                                     )
                                 )
                             } else if (mime.startsWith("video/")) {
-                                val isAvcMp4 = mime.contains("mp4") && mime.contains("avc1")
+                                val isMp4 = mime.contains("mp4")
                                 val isWebm = mime.contains("webm")
-                                if (isAvcMp4 || isWebm) {
+                                if (isMp4 || isWebm) {
+                                    val videoCodec = when {
+                                        mime.contains("avc1") || mime.contains("avc3") -> "H.264"
+                                        mime.contains("hev1") || mime.contains("hvc1") -> "HEVC"
+                                        mime.contains("vp09") || mime.contains("vp9") -> "VP9"
+                                        mime.contains("vp08") || mime.contains("vp8") -> "VP8"
+                                        mime.contains("av01") -> "AV1"
+                                        else -> if (isMp4) "H.264" else "VP9"
+                                    }
                                     val qualityLabel = fmtObj.optString("qualityLabel").ifBlank { "720p" }
                                     val width = fmtObj.optInt("width", 1280)
                                     val height = fmtObj.optInt("height", 720)
@@ -479,8 +494,8 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                                             resolution = "${width}x${height}",
                                             fps = fps,
                                             bitrate = bitrate,
-                                            codec = if (isAvcMp4) "H.264" else "VP9",
-                                            container = if (isAvcMp4) "mp4" else "webm",
+                                            codec = videoCodec,
+                                            container = if (isMp4) "mp4" else "webm",
                                             fileSize = clen,
                                             isAudioOnly = false
                                         )
@@ -488,6 +503,25 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                                 }
                             }
                         }
+                    }
+
+                    // 3. HLS manifest fallback (contains combined Video + Audio stream)
+                    val hlsManifestUrl = streamingData.optString("hlsManifestUrl").takeIf { it.startsWith("http") }
+                    if (hlsManifestUrl != null && allFormats.none { it.url == hlsManifestUrl }) {
+                        allFormats.add(
+                            VideoFormat(
+                                formatId = "muxed_hls",
+                                url = hlsManifestUrl,
+                                quality = "720p HLS (Video+Audio)",
+                                resolution = "1280x720",
+                                fps = 30,
+                                bitrate = 1_500_000,
+                                codec = "H.264+AAC",
+                                container = "mp4",
+                                fileSize = 0L,
+                                isAudioOnly = false
+                            )
+                        )
                     }
                 }
 

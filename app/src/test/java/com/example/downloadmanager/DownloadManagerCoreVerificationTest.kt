@@ -1491,9 +1491,9 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun phase7_activeTorrentSelectedFile_compactAndDictTrackers_andDistinctStatuses() = runBlocking {
-        // 0. Verify Luca Version 15.0 (Build 15)
-        assertEquals("15.0", BuildConfig.VERSION_NAME)
-        assertEquals(15, BuildConfig.VERSION_CODE)
+        // 0. Verify Luca Version 17.0 (Build 17)
+        assertEquals("17.0", BuildConfig.VERSION_NAME)
+        assertEquals(17, BuildConfig.VERSION_CODE)
 
         val tempRoot = createTempDirectory("phase7_torrent_trace").toFile()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -2697,7 +2697,7 @@ class DownloadManagerCoreVerificationTest {
                 )
             )
 
-            //     (g) SoundCloud v15.0: non-track SoundCloud hub URLs (/discover/sets, /search/sounds, /you/likes) are rejected,
+            //     (g) SoundCloud & v16.0 Audit: non-track SoundCloud hub URLs (/discover/sets, /search/sounds, /you/likes) are rejected,
             //         while real track pages and signed cf-hls-media.sndcdn.com/playlist/*.m3u8 manifests are supported
             assertFalse(
                 "SoundCloud /discover/sets hub must not be classified as a downloadable track",
@@ -2725,6 +2725,31 @@ class DownloadManagerCoreVerificationTest {
                 "Generic placeholder filename 'SoundCloud (Audio Download).m4a' must be recognized as generic",
                 com.example.downloadmanager.manager.MusicDownloadManager.isGenericPlaceholderFilename("SoundCloud (Audio Download).m4a")
             )
+
+            // (h) Verify MP4 video file with `moov` atom at the END of the file (past 64KB, as produced by MediaMuxer)
+            //     is accurately recognized as video/mp4 with H.264 + AAC tracks.
+            val tailMoovMp4 = File(tempRoot, "muxed_tail_moov.mp4")
+            java.io.FileOutputStream(tailMoovMp4).use { fos ->
+                // Write ftyp + 80KB mdat payload + tail moov box containing vide/avc1 and soun/mp4a
+                val ftyp = byteArrayOf(
+                    0x00, 0x00, 0x00, 0x18,
+                    'f'.code.toByte(), 't'.code.toByte(), 'y'.code.toByte(), 'p'.code.toByte(),
+                    'i'.code.toByte(), 's'.code.toByte(), 'o'.code.toByte(), 'm'.code.toByte(),
+                    0x00, 0x00, 0x02, 0x00,
+                    'i'.code.toByte(), 's'.code.toByte(), 'o'.code.toByte(), 'm'.code.toByte(),
+                    'm'.code.toByte(), 'p'.code.toByte(), '4'.code.toByte(), '2'.code.toByte()
+                )
+                fos.write(ftyp)
+                fos.write(ByteArray(80_000))
+                fos.write("moovtrakmdiahdlrvideavc1traksounmp4a".toByteArray(StandardCharsets.ISO_8859_1))
+            }
+            assertEquals("video/mp4", MediaAssetHelper.detectActualMimeType(tailMoovMp4, fallbackIsVideo = false))
+            assertEquals("video/mp4", MediaAssetHelper.getMimeTypeForAnyFile(tailMoovMp4))
+            assertTrue(MediaAssetHelper.hasVideoTrack(tailMoovMp4))
+            assertEquals("H.264 • AAC 44.1kHz Stereo", MediaAssetHelper.inspectMediaCodecSummary(tailMoovMp4, isVideo = true))
+
+            assertEquals(17, BuildConfig.VERSION_CODE)
+            assertEquals("17.0", BuildConfig.VERSION_NAME)
         } finally {
             try { peerServer.close() } catch (_: Exception) {}
             server.stop(0)

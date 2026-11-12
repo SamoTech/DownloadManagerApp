@@ -36,8 +36,18 @@
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:visibility="gone"
+                app:keep_content_on_player_reset="true"
                 app:resize_mode="fit"
+                app:shutter_background_color="@android:color/transparent"
+                app:surface_type="texture_view"
                 app:use_controller="true" />
+
+            <VideoView
+                android:id="@+id/platformVideoView"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:layout_gravity="center"
+                android:visibility="gone" />
 
             <LinearLayout
                 android:id="@+id/audioContainer"
@@ -108,6 +118,29 @@
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:padding="14dp">
+
+            <TextView
+                android:id="@+id/tvNowPlayingTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="Select a track or video to play"
+                android:textColor="@color/colorOnSurface"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tvNowPlayingCodec"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:layout_marginBottom="4dp"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="Ready"
+                android:textColor="@color/gray"
+                android:textSize="12sp" />
 
             <com.google.android.material.slider.Slider
                 android:id="@+id/seekSlider"

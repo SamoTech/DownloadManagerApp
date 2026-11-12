@@ -235,14 +235,24 @@ class DownloadDetailActivity : AppCompatActivity() {
         lastRenderedTorrentKey = key
 
         lifecycleScope.launch {
-            val files = torrentDownloadManager.listFilesForTorrentItem(downloadItem)
+            val (files, resolvedFilesMap) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val list = torrentDownloadManager.listFilesForTorrentItem(downloadItem)
+                val baseDir = File(downloadItem.savePath)
+                val torrentDir = runCatching {
+                    val cleanFolder = com.example.downloadmanager.utils.TorrentPathSafety.validateComponent(downloadItem.filename)
+                    com.example.downloadmanager.utils.TorrentPathSafety.resolveContainedFile(baseDir, cleanFolder)
+                }.getOrNull()
+                val fileMap = HashMap<Int, File?>()
+                if (torrentDir != null) {
+                    for ((i, fInfo) in list.withIndex()) {
+                        fileMap[i] = runCatching {
+                            com.example.downloadmanager.utils.TorrentPathSafety.resolveContainedFile(torrentDir, fInfo.path)
+                        }.getOrNull()
+                    }
+                }
+                list to fileMap
+            }
             binding.tvTorrentFilesHeader.text = "Torrent Files (${files.size})"
-
-            val baseDir = File(downloadItem.savePath)
-            val torrentDir = runCatching {
-                val cleanFolder = com.example.downloadmanager.utils.TorrentPathSafety.validateComponent(downloadItem.filename)
-                com.example.downloadmanager.utils.TorrentPathSafety.resolveContainedFile(baseDir, cleanFolder)
-            }.getOrNull()
             val density = resources.displayMetrics.density
 
             val reuseExistingRows = binding.llTorrentFilesList.childCount == files.size && files.isNotEmpty()
@@ -251,13 +261,7 @@ class DownloadDetailActivity : AppCompatActivity() {
             }
 
             for ((idx, fileInfo) in files.withIndex()) {
-                val safeContainedFile = if (torrentDir != null) {
-                    runCatching {
-                        com.example.downloadmanager.utils.TorrentPathSafety.resolveContainedFile(torrentDir, fileInfo.path)
-                    }.getOrNull()
-                } else {
-                    null
-                }
+                val safeContainedFile = resolvedFilesMap[idx]
 
                 val stateLabel = when (fileInfo.state) {
                     com.example.downloadmanager.model.TorrentFileState.VERIFIED -> "✓ Verified"
@@ -473,6 +477,12 @@ class DownloadDetailActivity : AppCompatActivity() {
         if (isVideo || isAudio) {
             startActivity(Intent(this, MediaPlayerActivity::class.java).apply {
                 putExtra("download_id", downloadItem.id)
+                putExtra(MediaPlayerActivity.EXTRA_FILE_PATH, file.absolutePath)
+                putExtra(
+                    MediaPlayerActivity.EXTRA_TITLE,
+                    downloadItem.videoTitle?.takeIf { it.isNotBlank() } ?: file.name
+                )
+                putExtra(MediaPlayerActivity.EXTRA_IS_VIDEO, isVideo)
             })
             return
         }
@@ -546,15 +556,11 @@ class DownloadDetailActivity : AppCompatActivity() {
     }
     
     private fun startDownloadService() {
-        Intent(this, DownloadService::class.java).apply {
-            startService(this)
+        runCatching {
+            Intent(this, DownloadService::class.java).apply {
+                startService(this)
+            }
         }
-        
-        bindService(
-            Intent(this, DownloadService::class.java),
-            serviceConnection,
-            Context.BIND_AUTO_CREATE
-        )
     }
     
     private fun formatFileSize(bytes: Long): String {
@@ -645,17 +651,21 @@ class DownloadDetailActivity : AppCompatActivity() {
     
     override fun onStart() {
         super.onStart()
-        bindService(
-            Intent(this, DownloadService::class.java),
-            serviceConnection,
-            Context.BIND_AUTO_CREATE
-        )
+        if (!isBound) {
+            runCatching {
+                bindService(
+                    Intent(this, DownloadService::class.java),
+                    serviceConnection,
+                    Context.BIND_AUTO_CREATE
+                )
+            }
+        }
     }
     
     override fun onStop() {
         super.onStop()
         if (isBound) {
-            unbindService(serviceConnection)
+            runCatching { unbindService(serviceConnection) }
             isBound = false
         }
     }
@@ -669,7 +679,7 @@ class DownloadDetailViewModel(
     val download: androidx.lifecycle.LiveData<DownloadItem?> = repository.observeDownloadById(downloadId)
     
     fun deleteDownload(downloadId: Long) {
-        viewModelScope.launch {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             repository.delete(downloadId)
         }
     }

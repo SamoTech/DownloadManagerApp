@@ -11,18 +11,19 @@ import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadType
 import java.io.File
 import java.io.FileInputStream
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 
 /**
- * Media inspection, container magic-byte detection, MP4+M4A muxing, DASH audio normalization,
+ * Media inspection, container magic-byte detection, MP4+M4A / WebM muxing, DASH audio normalization,
  * and playable file resolution.
  */
 object MediaAssetHelper {
 
     private const val TAG = "MediaAssetHelper"
 
-    val VIDEO_EXTENSIONS = setOf("mp4", "m4v", "webm", "mkv", "mov", "avi", "flv", "wmv", "ts", "3gp")
-    val AUDIO_EXTENSIONS = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "wma", "weba")
+    val VIDEO_EXTENSIONS = setOf("mp4", "m4v", "webm", "mkv", "mov", "avi", "flv", "wmv", "ts", "3gp", "mpeg", "mpg")
+    val AUDIO_EXTENSIONS = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "wma", "weba", "amr", "ac3", "eac3")
 
     fun isVideoFileOrType(
         filename: String,
@@ -51,11 +52,46 @@ object MediaAssetHelper {
     }
 
     /**
-     * Inspects up to the first 64 KB of [file] to determine its true container MIME type in pure Kotlin,
-     * preventing extension/container mismatches and avoiding native NuMediaExtractor calls on non-media files.
+     * Reads up to [headBytes] from the beginning of [file] AND up to [tailBytes] from the end of [file]
+     * as an ISO-8859-1 string so MP4/MOV/M4A `moov` atoms located at the end of the file (e.g. written
+     * by Android's `MediaMuxer` or progressive web encoders) are always inspected.
+     */
+    private fun readHeadAndTailIsoString(
+        file: File,
+        headBytes: Int = 65536,
+        tailBytes: Int = 131072
+    ): String {
+        val len = file.length()
+        if (len <= 0L) return ""
+        return try {
+            RandomAccessFile(file, "r").use { raf ->
+                val headLen = minOf(len, headBytes.toLong()).toInt()
+                val headBuf = ByteArray(headLen)
+                raf.readFully(headBuf)
+                if (len <= headBytes.toLong()) {
+                    return String(headBuf, Charsets.ISO_8859_1)
+                }
+                val tailStart = maxOf(headBytes.toLong(), len - tailBytes.toLong())
+                val tailLen = (len - tailStart).toInt()
+                val tailBuf = ByteArray(tailLen)
+                raf.seek(tailStart)
+                raf.readFully(tailBuf)
+                String(headBuf, Charsets.ISO_8859_1) + "\u0000" + String(tailBuf, Charsets.ISO_8859_1)
+            }
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    /**
+     * Inspects the header (and tail for ISO-BMFF containers) of [file] to determine its true container
+     * MIME type in pure Kotlin, preventing extension/container mismatches and avoiding native
+     * NuMediaExtractor calls on non-media files.
      */
     fun detectActualMimeType(file: File, fallbackIsVideo: Boolean = false): String? {
         if (!file.exists() || !file.isFile || file.length() < 12L) return null
+        val ext = file.extension.lowercase()
+        val effectiveFallbackIsVideo = fallbackIsVideo || (ext in VIDEO_EXTENSIONS && ext !in AUDIO_EXTENSIONS)
         return try {
             val maxInspect = minOf(file.length(), 65536L).toInt()
             val header = ByteArray(maxInspect)
@@ -86,9 +122,9 @@ object MediaAssetHelper {
                 return null
             }
 
-            // 1. ISO Base Media File Format (MP4 / M4A / 3GP / DASH / fMP4)
+            // 1. ISO Base Media File Format (MP4 / M4A / MOV / 3GP / DASH / fMP4)
             val boxType = String(header, 4, 4, Charsets.ISO_8859_1)
-            if (boxType in setOf("ftyp", "moov", "moof", "styp", "sidx", "wide", "free", "skip", "mdat")) {
+            if (boxType in setOf("ftyp", "moov", "moof", "styp", "sidx", "wide", "free", "skip", "mdat", "pdin", "uuid")) {
                 val brand = if (boxType == "ftyp" && read >= 12) {
                     String(header, 8, 4, Charsets.ISO_8859_1)
                 } else {
@@ -97,12 +133,36 @@ object MediaAssetHelper {
                 if (brand.equals("M4A ", ignoreCase = true) || brand.equals("M4B ", ignoreCase = true)) {
                     return "audio/mp4"
                 }
-                // Check within read bytes for "vide" vs "soun" handler box (`hdlr`) before invoking MediaExtractor
-                val rawIsoStr = String(header, 0, read, Charsets.ISO_8859_1)
+                if (brand.equals("qt  ", ignoreCase = true)) {
+                    return "video/mp4"
+                }
+                // Check both head AND tail (where MediaMuxer places `moov`) for video/audio handler & sample boxes
+                val rawIsoStr = readHeadAndTailIsoString(file)
+                val hasVideoMarker = rawIsoStr.contains("vide") ||
+                    rawIsoStr.contains("avc1") ||
+                    rawIsoStr.contains("avc3") ||
+                    rawIsoStr.contains("hvc1") ||
+                    rawIsoStr.contains("hev1") ||
+                    rawIsoStr.contains("vp09") ||
+                    rawIsoStr.contains("vp08") ||
+                    rawIsoStr.contains("av01") ||
+                    rawIsoStr.contains("mp4v") ||
+                    rawIsoStr.contains("s263") ||
+                    rawIsoStr.contains("encv")
+                val hasAudioMarker = rawIsoStr.contains("soun") ||
+                    rawIsoStr.contains("mp4a") ||
+                    rawIsoStr.contains("alac") ||
+                    rawIsoStr.contains("Opus") ||
+                    rawIsoStr.contains("dOps") ||
+                    rawIsoStr.contains("ac-3") ||
+                    rawIsoStr.contains("ec-3") ||
+                    rawIsoStr.contains("samr") ||
+                    rawIsoStr.contains("sawb")
                 return when {
-                    rawIsoStr.contains("vide") -> "video/mp4"
-                    rawIsoStr.contains("soun") -> "audio/mp4"
-                    else -> if (fallbackIsVideo) "video/mp4" else "audio/mp4"
+                    hasVideoMarker -> "video/mp4"
+                    hasAudioMarker && !effectiveFallbackIsVideo -> "audio/mp4"
+                    effectiveFallbackIsVideo -> "video/mp4"
+                    else -> "audio/mp4"
                 }
             }
 
@@ -112,18 +172,23 @@ object MediaAssetHelper {
                 header[2] == 0xDF.toByte() &&
                 header[3] == 0xA3.toByte()
             ) {
-                val ascii = String(header, 0, minOf(read, 4096), Charsets.ISO_8859_1).lowercase()
+                val ascii = String(header, 0, minOf(read, 16384), Charsets.ISO_8859_1).lowercase()
                 val isWebm = ascii.contains("webm")
-                val hasVid = ascii.contains("v_vp8") || ascii.contains("v_vp9") || ascii.contains("v_av1") || ascii.contains("v_mpeg4")
+                val hasVid = ascii.contains("v_vp8") ||
+                    ascii.contains("v_vp9") ||
+                    ascii.contains("v_av1") ||
+                    ascii.contains("v_mpeg4") ||
+                    ascii.contains("v_mpegh") ||
+                    ascii.contains("v_ms/vfw")
                 return when {
-                    isWebm && (hasVid || fallbackIsVideo) -> "video/webm"
+                    isWebm && (hasVid || effectiveFallbackIsVideo) -> "video/webm"
                     isWebm -> "audio/webm"
-                    hasVid || fallbackIsVideo -> "video/x-matroska"
+                    hasVid || effectiveFallbackIsVideo -> "video/x-matroska"
                     else -> "audio/x-matroska"
                 }
             }
 
-            // 3. Ogg (Vorbis / Opus) -> "OggS"
+            // 3. Ogg (Vorbis / Opus / FLAC) -> "OggS"
             if (header[0] == 'O'.code.toByte() &&
                 header[1] == 'g'.code.toByte() &&
                 header[2] == 'g'.code.toByte() &&
@@ -155,16 +220,49 @@ object MediaAssetHelper {
                 }
             }
 
-            // 6. MPEG-2 Transport Stream (.ts segments from HLS) -> 0x47 sync byte every 188 bytes
+            // 6. Flash Video (FLV) -> "FLV\x01"
+            if (header[0] == 'F'.code.toByte() &&
+                header[1] == 'L'.code.toByte() &&
+                header[2] == 'V'.code.toByte() &&
+                header[3] == 0x01.toByte()
+            ) {
+                return "video/x-flv"
+            }
+
+            // 7. Adaptive Multi-Rate (AMR-NB / AMR-WB) -> "#!AMR"
+            if (header[0] == '#'.code.toByte() &&
+                header[1] == '!'.code.toByte() &&
+                header[2] == 'A'.code.toByte() &&
+                header[3] == 'M'.code.toByte() &&
+                header[4] == 'R'.code.toByte()
+            ) {
+                return "audio/amr"
+            }
+
+            // 8. Dolby AC-3 / E-AC-3 raw syncword -> 0x0B 0x77
+            if (header[0] == 0x0B.toByte() && header[1] == 0x77.toByte()) {
+                return "audio/ac3"
+            }
+
+            // 9. MPEG Program Stream (.mpg / .mpeg) -> 0x00 0x00 0x01 0xBA
+            if (header[0] == 0x00.toByte() &&
+                header[1] == 0x00.toByte() &&
+                header[2] == 0x01.toByte() &&
+                header[3] == 0xBA.toByte()
+            ) {
+                return "video/mpeg"
+            }
+
+            // 10. MPEG-2 Transport Stream (.ts segments from HLS) -> 0x47 sync byte every 188 bytes
             if (read >= 377 &&
                 header[0] == 0x47.toByte() &&
                 header[188] == 0x47.toByte() &&
                 header[376] == 0x47.toByte()
             ) {
-                return if (fallbackIsVideo) "video/mp2t" else "audio/mp2t"
+                return if (effectiveFallbackIsVideo) "video/mp2t" else "audio/mp2t"
             }
 
-            // 7. Skip any leading ID3v2 tag(s) and check for ADTS AAC or MPEG-1/2/2.5 Layer 1/2/3 audio frames
+            // 11. Skip any leading ID3v2 tag(s) and check for ADTS AAC or MPEG-1/2/2.5 Layer 1/2/3 audio frames
             val postId3Offset = stripLeadingId3Tags(header, read)
             if (postId3Offset in 0 until (read - 4)) {
                 if (isValidAdtsFrameSync(header, postId3Offset, read)) {
@@ -381,13 +479,12 @@ object MediaAssetHelper {
         if (!file.exists() || !file.isFile || file.length() < 256L) return false
         val detected = detectActualMimeType(file, fallbackIsVideo = true) ?: return false
         if (detected.startsWith("audio/")) return false
-        if (detected == "video/mp2t" || detected == "video/x-msvideo") return true
+        if (detected == "video/mp2t" || detected == "video/x-msvideo" || detected == "video/x-flv" || detected == "video/mpeg") {
+            return true
+        }
         return try {
-            val maxRead = minOf(file.length(), 65536L).toInt()
-            val buf = ByteArray(maxRead)
-            val n = FileInputStream(file).use { it.read(buf) }
-            if (n <= 16) return false
-            val raw = String(buf, 0, n, Charsets.ISO_8859_1)
+            val raw = readHeadAndTailIsoString(file)
+            if (raw.length <= 16) return false
             raw.contains("vide") ||
                 raw.contains("avc1") ||
                 raw.contains("avc3") ||
@@ -397,10 +494,12 @@ object MediaAssetHelper {
                 raw.contains("vp08") ||
                 raw.contains("av01") ||
                 raw.contains("mp4v") ||
+                raw.contains("s263") ||
                 raw.contains("V_VP9") ||
                 raw.contains("V_VP8") ||
                 raw.contains("V_AV1") ||
-                raw.contains("V_MPEG4")
+                raw.contains("V_MPEG4") ||
+                raw.contains("V_MPEGH")
         } catch (_: Exception) {
             false
         }
@@ -704,14 +803,23 @@ object MediaAssetHelper {
     }
 
     /**
-     * Muxes an adaptive H.264/MP4 video-only file and an AAC/M4A audio-only file into a single
-     * hardware-playable MP4 file with both video and audio tracks using Android's [MediaMuxer].
+     * Muxes an adaptive video-only file (MP4/H.264/HEVC/AV1 or WebM/VP8/VP9) and an audio-only file
+     * (M4A/AAC or WebM/Opus/Vorbis) into a single playable media container with both video and audio
+     * tracks using Android's [MediaMuxer].
      */
     fun muxMp4VideoAndM4aAudio(videoFile: File, audioFile: File, outputFile: File): Boolean {
         if (!videoFile.exists() || !audioFile.exists()) return false
         if (detectActualMimeType(videoFile, true) == null || detectActualMimeType(audioFile, false) == null) {
             return false
         }
+        // If the video file already contains both video and audio tracks, copy directly
+        if (hasVideoAndAudioTracks(videoFile)) {
+            return runCatching {
+                videoFile.copyTo(outputFile, overwrite = true)
+                outputFile.exists() && outputFile.length() > 1024L
+            }.getOrDefault(false)
+        }
+
         var videoExtractor: MediaExtractor? = null
         var audioExtractor: MediaExtractor? = null
         var muxer: MediaMuxer? = null
@@ -724,24 +832,28 @@ object MediaAssetHelper {
 
             var videoTrackIndexInExtractor = -1
             var videoFormat: MediaFormat? = null
+            var videoMime = ""
             for (i in 0 until videoExtractor.trackCount) {
                 val fmt = videoExtractor.getTrackFormat(i)
                 val mime = fmt.getString(MediaFormat.KEY_MIME).orEmpty()
                 if (mime.startsWith("video/")) {
                     videoTrackIndexInExtractor = i
                     videoFormat = fmt
+                    videoMime = mime
                     break
                 }
             }
 
             var audioTrackIndexInExtractor = -1
             var audioFormat: MediaFormat? = null
+            var audioMime = ""
             for (i in 0 until audioExtractor.trackCount) {
                 val fmt = audioExtractor.getTrackFormat(i)
                 val mime = fmt.getString(MediaFormat.KEY_MIME).orEmpty()
                 if (mime.startsWith("audio/")) {
                     audioTrackIndexInExtractor = i
                     audioFormat = fmt
+                    audioMime = mime
                     break
                 }
             }
@@ -752,12 +864,20 @@ object MediaAssetHelper {
                 return false
             }
 
-            muxer = MediaMuxer(tempOut.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            val useWebmMuxer = (videoMime.contains("vp8") || videoMime.contains("vp9") || videoMime.contains("x-vnd.on2")) &&
+                (audioMime.contains("opus") || audioMime.contains("vorbis"))
+            val muxerOutputFormat = if (useWebmMuxer) {
+                MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM
+            } else {
+                MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+            }
+
+            muxer = MediaMuxer(tempOut.absolutePath, muxerOutputFormat)
             val muxerVideoTrack = muxer.addTrack(videoFormat)
             val muxerAudioTrack = muxer.addTrack(audioFormat)
             muxer.start()
 
-            val bufferSize = 512 * 1024
+            val bufferSize = 1024 * 1024
             val buffer = ByteBuffer.allocate(bufferSize)
             val bufferInfo = MediaCodec.BufferInfo()
 
@@ -838,16 +958,17 @@ object MediaAssetHelper {
             "audio/flac" -> return "FLAC Lossless Audio"
             "audio/wav" -> return "PCM WAV Audio"
             "audio/aac" -> return "AAC ADTS Audio"
+            "audio/amr" -> return "AMR Voice Audio"
+            "audio/ac3" -> return "Dolby AC-3 Audio"
             "video/mp2t", "audio/mp2t" -> return "MPEG-TS Stream"
             "video/x-msvideo" -> return "AVI Video Stream"
+            "video/x-flv" -> return "FLV Video Stream"
+            "video/mpeg" -> return "MPEG-2 Video Stream"
         }
 
         return try {
-            val maxRead = minOf(file.length(), 65536L).toInt()
-            val buf = ByteArray(maxRead)
-            val n = FileInputStream(file).use { it.read(buf) }
-            if (n <= 16) return detectedMime.uppercase()
-            val raw = String(buf, 0, n, Charsets.ISO_8859_1)
+            val raw = readHeadAndTailIsoString(file)
+            if (raw.length <= 16) return detectedMime.uppercase()
 
             val videoCodec = when {
                 raw.contains("avc1") || raw.contains("avc3") || raw.contains("V_MPEG4/ISO/AVC") -> "H.264"
@@ -855,7 +976,8 @@ object MediaAssetHelper {
                 raw.contains("vp09") || raw.contains("V_VP9") -> "VP9"
                 raw.contains("vp08") || raw.contains("V_VP8") -> "VP8"
                 raw.contains("av01") || raw.contains("V_AV1") -> "AV1"
-                raw.contains("mp4v") -> "MPEG-4 Video"
+                raw.contains("mp4v") || raw.contains("V_MPEG4") -> "MPEG-4 Video"
+                raw.contains("s263") -> "H.263 Video"
                 else -> ""
             }
 
@@ -863,8 +985,9 @@ object MediaAssetHelper {
                 raw.contains("mp4a") -> "AAC 44.1kHz Stereo"
                 raw.contains("Opus") || raw.contains("A_OPUS") || raw.contains("dOps") -> "Opus Audio"
                 raw.contains("vorb") || raw.contains("A_VORBIS") -> "Vorbis Audio"
-                raw.contains("fLaC") || raw.contains("dfLa") -> "FLAC Audio"
-                raw.contains("ac-3") || raw.contains("ec-3") -> "Dolby Audio"
+                raw.contains("fLaC") || raw.contains("dfLa") || raw.contains("A_FLAC") -> "FLAC Audio"
+                raw.contains("alac") -> "ALAC Lossless Audio"
+                raw.contains("ac-3") || raw.contains("ec-3") || raw.contains("A_AC3") || raw.contains("A_EAC3") -> "Dolby Audio"
                 else -> ""
             }
 

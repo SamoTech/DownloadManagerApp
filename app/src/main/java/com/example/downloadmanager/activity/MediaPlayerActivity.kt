@@ -23,9 +23,15 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
+import androidx.media3.common.VideoSize
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.extractor.mp3.Mp3Extractor
+import androidx.media3.extractor.ts.AdtsExtractor
+import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.example.downloadmanager.R
@@ -53,6 +59,7 @@ class MediaPlayerActivity : AppCompatActivity() {
     private var exoPlayer: ExoPlayer? = null
     private var platformAudioPlayer: MediaPlayer? = null
     private var isUsingPlatformAudioPlayer = false
+    private var isUsingPlatformVideoPlayer = false
 
     private val handler = Handler(Looper.getMainLooper())
     private var isUserSeeking = false
@@ -65,27 +72,43 @@ class MediaPlayerActivity : AppCompatActivity() {
 
     private val updateProgressTask = object : Runnable {
         override fun run() {
-            if (isUsingPlatformAudioPlayer) {
-                val mp = platformAudioPlayer
-                if (mp != null && !isUserSeeking) {
-                    runCatching {
-                        val duration = mp.duration.toLong().coerceAtLeast(1L)
-                        val position = mp.currentPosition.toLong().coerceIn(0L, duration)
+            when {
+                isUsingPlatformVideoPlayer -> {
+                    val vv = binding.platformVideoView
+                    if (!isUserSeeking) {
+                        runCatching {
+                            val duration = vv.duration.toLong().coerceAtLeast(1L)
+                            val position = vv.currentPosition.toLong().coerceIn(0L, duration)
+                            val pct = ((position * 100f) / duration).coerceIn(0f, 100f)
+                            binding.seekSlider.value = pct
+                            binding.tvCurrentTime.text = formatTime(position)
+                            binding.tvTotalTime.text = formatTime(duration)
+                        }
+                    }
+                }
+                isUsingPlatformAudioPlayer -> {
+                    val mp = platformAudioPlayer
+                    if (mp != null && !isUserSeeking) {
+                        runCatching {
+                            val duration = mp.duration.toLong().coerceAtLeast(1L)
+                            val position = mp.currentPosition.toLong().coerceIn(0L, duration)
+                            val pct = ((position * 100f) / duration).coerceIn(0f, 100f)
+                            binding.seekSlider.value = pct
+                            binding.tvCurrentTime.text = formatTime(position)
+                            binding.tvTotalTime.text = formatTime(duration)
+                        }
+                    }
+                }
+                else -> {
+                    val player = exoPlayer
+                    if (player != null && !isUserSeeking && player.duration > 0) {
+                        val duration = player.duration.coerceAtLeast(1L)
+                        val position = player.currentPosition.coerceIn(0L, duration)
                         val pct = ((position * 100f) / duration).coerceIn(0f, 100f)
                         binding.seekSlider.value = pct
                         binding.tvCurrentTime.text = formatTime(position)
                         binding.tvTotalTime.text = formatTime(duration)
                     }
-                }
-            } else {
-                val player = exoPlayer
-                if (player != null && !isUserSeeking && player.duration > 0) {
-                    val duration = player.duration.coerceAtLeast(1L)
-                    val position = player.currentPosition.coerceIn(0L, duration)
-                    val pct = ((position * 100f) / duration).coerceIn(0f, 100f)
-                    binding.seekSlider.value = pct
-                    binding.tvCurrentTime.text = formatTime(position)
-                    binding.tvTotalTime.text = formatTime(duration)
                 }
             }
             handler.postDelayed(this, 250)
@@ -123,22 +146,41 @@ class MediaPlayerActivity : AppCompatActivity() {
         loadQueueAndInitialMedia()
     }
 
+    private fun updateMediaTitles(title: String, subtitle: String) {
+        binding.tvMediaTitle.text = title
+        binding.tvNowPlayingTitle.text = title
+        binding.tvMediaSubtitle.text = subtitle
+        binding.tvNowPlayingCodec.text = subtitle
+    }
+
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     private fun initExoPlayerInstance() {
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
+        val renderersFactory = DefaultRenderersFactory(this)
+            .setEnableDecoderFallback(true)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+            .setEnableAudioTrackPlaybackParams(true)
+
         val extractorsFactory = DefaultExtractorsFactory()
             .setConstantBitrateSeekingEnabled(true)
             .setConstantBitrateSeekingAlwaysEnabled(true)
+            .setAdtsExtractorFlags(AdtsExtractor.FLAG_ENABLE_CONSTANT_BITRATE_SEEKING)
+            .setMp3ExtractorFlags(Mp3Extractor.FLAG_ENABLE_CONSTANT_BITRATE_SEEKING)
+            .setTsExtractorFlags(
+                DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
+                    DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS
+            )
 
         val mediaSourceFactory = DefaultMediaSourceFactory(this, extractorsFactory)
             .setDrmSessionManagerProvider {
                 androidx.media3.exoplayer.drm.DrmSessionManager.DRM_UNSUPPORTED
             }
 
-        exoPlayer = ExoPlayer.Builder(this)
+        exoPlayer = ExoPlayer.Builder(this, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
@@ -151,6 +193,32 @@ class MediaPlayerActivity : AppCompatActivity() {
                         binding.btnPlayPause.setImageResource(
                             if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play
                         )
+                    }
+
+                    override fun onVideoSizeChanged(videoSize: VideoSize) {
+                        if (videoSize.width > 0 && videoSize.height > 0 && !isUsingPlatformVideoPlayer) {
+                            currentIsVideo = true
+                            binding.playerView.visibility = View.VISIBLE
+                            binding.platformVideoView.visibility = View.GONE
+                            binding.audioContainer.visibility = View.GONE
+                        }
+                    }
+
+                    override fun onTracksChanged(tracks: Tracks) {
+                        if (tracks.groups.isEmpty() || isUsingPlatformVideoPlayer || isUsingPlatformAudioPlayer) return
+                        val hasVideo = tracks.containsType(C.TRACK_TYPE_VIDEO)
+                        val hasAudio = tracks.containsType(C.TRACK_TYPE_AUDIO)
+                        if (hasVideo) {
+                            currentIsVideo = true
+                            binding.playerView.visibility = View.VISIBLE
+                            binding.platformVideoView.visibility = View.GONE
+                            binding.audioContainer.visibility = View.GONE
+                        } else if (hasAudio && !hasVideo) {
+                            currentIsVideo = false
+                            binding.playerView.visibility = View.GONE
+                            binding.platformVideoView.visibility = View.GONE
+                            binding.audioContainer.visibility = View.VISIBLE
+                        }
                     }
 
                     override fun onPlaybackStateChanged(playbackState: Int) {
@@ -205,6 +273,25 @@ class MediaPlayerActivity : AppCompatActivity() {
             queueAdapter.submitList(playableItems)
 
             when {
+                !explicitFilePath.isNullOrBlank() -> {
+                    val file = File(explicitFilePath)
+                    if (requestedDownloadId != -1L) {
+                        currentDownloadItem = withContext(Dispatchers.IO) {
+                            repository.getDownloadById(requestedDownloadId)
+                        }
+                    } else {
+                        currentDownloadItem = null
+                    }
+                    val title = intent.getStringExtra(EXTRA_TITLE)
+                        ?: currentDownloadItem?.videoTitle?.takeIf { it.isNotBlank() }
+                        ?: file.name
+                    val isVid = intent.getBooleanExtra(
+                        EXTRA_IS_VIDEO,
+                        file.extension.lowercase(Locale.US) in MediaAssetHelper.VIDEO_EXTENSIONS ||
+                            withContext(Dispatchers.IO) { MediaAssetHelper.hasVideoTrack(file) }
+                    )
+                    playFile(file, title, isVid)
+                }
                 requestedDownloadId != -1L -> {
                     val item = withContext(Dispatchers.IO) {
                         repository.getDownloadById(requestedDownloadId)
@@ -215,23 +302,16 @@ class MediaPlayerActivity : AppCompatActivity() {
                         playDownloadItem(preferredInitialItem)
                     }
                 }
-                !explicitFilePath.isNullOrBlank() -> {
-                    val file = File(explicitFilePath)
-                    val title = intent.getStringExtra(EXTRA_TITLE) ?: file.name
-                    val isVid = intent.getBooleanExtra(
-                        EXTRA_IS_VIDEO,
-                        file.extension.lowercase(Locale.US) in MediaAssetHelper.VIDEO_EXTENSIONS
-                    )
-                    currentDownloadItem = null
-                    playFile(file, title, isVid)
-                }
                 preferredInitialItem != null -> {
                     playDownloadItem(preferredInitialItem)
                 }
                 else -> {
-                    binding.tvMediaTitle.text = "No Completed Media"
-                    binding.tvMediaSubtitle.text = "Download a video or audio track first to play it here"
+                    updateMediaTitles(
+                        "No Completed Media",
+                        "Download a video or audio track first to play it here"
+                    )
                     binding.playerView.visibility = View.GONE
+                    binding.platformVideoView.visibility = View.GONE
                     binding.audioContainer.visibility = View.VISIBLE
                 }
             }
@@ -245,12 +325,21 @@ class MediaPlayerActivity : AppCompatActivity() {
                 val candidate = MediaAssetHelper.resolvePlayableFile(item)
                     ?: File(item.savePath, item.filename)
                 val nameForType = candidate.name.ifBlank { item.filename }
-                val isVid = MediaAssetHelper.isVideoFileOrType(
-                    nameForType,
-                    item.downloadType,
-                    item.isAudioOnly,
-                    item.mimeType
-                )
+                val detectedMime = if (candidate.exists()) {
+                    MediaAssetHelper.detectActualMimeType(
+                        candidate,
+                        fallbackIsVideo = item.downloadType == com.example.downloadmanager.model.DownloadType.VIDEO && !item.isAudioOnly
+                    )
+                } else {
+                    null
+                }
+                val isVid = detectedMime?.startsWith("video/") == true ||
+                    MediaAssetHelper.isVideoFileOrType(
+                        nameForType,
+                        item.downloadType,
+                        item.isAudioOnly,
+                        detectedMime ?: item.mimeType
+                    )
                 if (!isVid && candidate.exists()) {
                     MediaAssetHelper.sanitizeMp3StreamIfNeeded(candidate)
                 }
@@ -276,13 +365,22 @@ class MediaPlayerActivity : AppCompatActivity() {
         currentTitle = title
 
         supportActionBar?.title = title
-        binding.tvMediaTitle.text = title
+        updateMediaTitles(title, subtitle ?: "Loading media...")
 
         if (!file.exists() || !file.isFile || file.length() == 0L) {
-            binding.tvMediaSubtitle.text = getString(R.string.error_file_not_found)
+            updateMediaTitles(title, getString(R.string.error_file_not_found))
             Toast.makeText(this, R.string.error_file_not_found, Toast.LENGTH_SHORT).show()
             return
         }
+
+        // Stop any platform players before starting ExoPlayer
+        runCatching { platformAudioPlayer?.release() }
+        platformAudioPlayer = null
+        isUsingPlatformAudioPlayer = false
+        runCatching { binding.platformVideoView.stopPlayback() }
+        binding.platformVideoView.visibility = View.GONE
+        isUsingPlatformVideoPlayer = false
+        exoPlayer?.stop()
 
         if (isVideo) {
             binding.playerView.visibility = View.VISIBLE
@@ -291,12 +389,6 @@ class MediaPlayerActivity : AppCompatActivity() {
             binding.playerView.visibility = View.GONE
             binding.audioContainer.visibility = View.VISIBLE
         }
-
-        // Stop any platform audio player before starting ExoPlayer
-        runCatching { platformAudioPlayer?.release() }
-        platformAudioPlayer = null
-        isUsingPlatformAudioPlayer = false
-        exoPlayer?.stop()
 
         lifecycleScope.launch {
             val validated = withContext(Dispatchers.IO) {
@@ -316,25 +408,29 @@ class MediaPlayerActivity : AppCompatActivity() {
             if (detectedMime == null) {
                 // Never pass an unrecognized/corrupt file to ExoPlayer or MediaPlayer!
                 // Attempt automatic recovery on IO dispatcher if this file came from a known download item or contains a manifest/JSON link.
-                binding.tvMediaSubtitle.text = "Repairing media stream..."
+                updateMediaTitles(title, "Repairing media stream...")
                 val repaired = withContext(Dispatchers.IO) {
                     recoverUnrecognizedMediaFile(currentDownloadItem, file, isVideo)
                 }
                 if (repaired != null && repaired.first.exists()) {
                     val (repairedFile, repairedMime) = repaired
                     currentMediaFile = repairedFile
+                    val repairedIsVideo = repairedMime.startsWith("video/") || isVideo
+                    currentIsVideo = repairedIsVideo
                     val repairedSummary = withContext(Dispatchers.IO) {
-                        MediaAssetHelper.inspectMediaCodecSummary(repairedFile, isVideo)
+                        MediaAssetHelper.inspectMediaCodecSummary(repairedFile, repairedIsVideo)
                     }
-                    startValidatedExoPlayer(repairedFile, repairedMime, isVideo, repairedSummary)
+                    startValidatedExoPlayer(repairedFile, repairedMime, repairedIsVideo, repairedSummary)
                 } else {
-                    binding.tvMediaSubtitle.text = "Media file is incomplete or unsupported — tap Retry in Downloads"
+                    updateMediaTitles(title, "Media file is incomplete or unsupported — tap Retry in Downloads")
                     Toast.makeText(this@MediaPlayerActivity, R.string.error_open_file, Toast.LENGTH_SHORT).show()
                 }
                 return@launch
             }
 
-            startValidatedExoPlayer(file, detectedMime, isVideo, resolvedSummary)
+            val effectiveIsVideo = detectedMime.startsWith("video/") || (isVideo && !detectedMime.startsWith("audio/"))
+            currentIsVideo = effectiveIsVideo
+            startValidatedExoPlayer(file, detectedMime, effectiveIsVideo, resolvedSummary)
         }
     }
 
@@ -345,17 +441,27 @@ class MediaPlayerActivity : AppCompatActivity() {
         subtitle: String?
     ) {
         val sizeStr = formatBytes(file.length())
-        binding.tvMediaSubtitle.text = listOfNotNull(
+        val infoLine = listOfNotNull(
             subtitle ?: if (isVideo) "HD Video" else "Studio Audio",
             sizeStr.takeIf { it.isNotEmpty() }
         ).joinToString(" • ")
+        updateMediaTitles(currentTitle, infoLine)
+
+        if (isVideo) {
+            binding.playerView.visibility = View.VISIBLE
+            binding.platformVideoView.visibility = View.GONE
+            binding.audioContainer.visibility = View.GONE
+        } else {
+            binding.playerView.visibility = View.GONE
+            binding.platformVideoView.visibility = View.GONE
+            binding.audioContainer.visibility = View.VISIBLE
+        }
 
         val player = exoPlayer ?: return
         binding.playerView.player = player
-        val mediaItem = MediaItem.Builder()
-            .setUri(Uri.fromFile(file))
-            .setMimeType(detectedMime)
-            .build()
+        // Build MediaItem from file:// URI without forcing a restrictive container MIME hint
+        // so DefaultExtractorsFactory sniffs the exact header bytes (MP4, fMP4, MPEG-TS, WebM, MKV, MP3, ADTS, FLAC, OGG, WAV)
+        val mediaItem = MediaItem.fromUri(Uri.fromFile(file))
         player.setMediaItem(mediaItem)
         player.prepare()
         player.playWhenReady = true
@@ -461,32 +567,41 @@ class MediaPlayerActivity : AppCompatActivity() {
             if (detectedMime == null) {
                 if (!hasRepairedCurrentFile) {
                     hasRepairedCurrentFile = true
-                    binding.tvMediaSubtitle.text = "Repairing media stream..."
+                    updateMediaTitles(currentTitle, "Repairing media stream...")
                     val repaired = withContext(Dispatchers.IO) {
                         recoverUnrecognizedMediaFile(currentDownloadItem, file, currentIsVideo)
                     }
                     if (repaired != null && repaired.first.exists()) {
                         val (repairedFile, repairedMime) = repaired
                         currentMediaFile = repairedFile
+                        val repairedIsVideo = repairedMime.startsWith("video/") || currentIsVideo
+                        currentIsVideo = repairedIsVideo
                         val repairedSummary = withContext(Dispatchers.IO) {
-                            MediaAssetHelper.inspectMediaCodecSummary(repairedFile, currentIsVideo)
+                            MediaAssetHelper.inspectMediaCodecSummary(repairedFile, repairedIsVideo)
                         }
-                        startValidatedExoPlayer(repairedFile, repairedMime, currentIsVideo, repairedSummary)
+                        startValidatedExoPlayer(repairedFile, repairedMime, repairedIsVideo, repairedSummary)
                         return@launch
                     }
                 }
-                binding.tvMediaSubtitle.text = "Media file is incomplete or unsupported — tap Retry in Downloads"
+                updateMediaTitles(currentTitle, "Media file is incomplete or unsupported — tap Retry in Downloads")
                 Toast.makeText(this@MediaPlayerActivity, R.string.error_open_file, Toast.LENGTH_SHORT).show()
                 return@launch
             }
 
+            // If video file has a recognized video container, try Android's platform VideoView fallback
+            if (currentIsVideo && detectedMime.startsWith("video/") && file.exists()) {
+                if (startPlatformVideoPlayer(file)) {
+                    return@launch
+                }
+            }
+
             // If audio file has a recognized container, try Android's platform MediaPlayer as a secondary hardware decoder
-            if (!currentIsVideo && file.exists() && startPlatformAudioPlayer(file)) {
+            if (file.exists() && startPlatformAudioPlayer(file)) {
                 return@launch
             }
 
             // If DASH M4A container needs remuxing, try non-destructive remux of the real file once
-            if (!currentIsVideo && !hasRepairedCurrentFile && file.exists() &&
+            if (!hasRepairedCurrentFile && file.exists() &&
                 (detectedMime == "audio/mp4" || detectedMime == "video/mp4")
             ) {
                 hasRepairedCurrentFile = true
@@ -496,19 +611,59 @@ class MediaPlayerActivity : AppCompatActivity() {
                 }
                 if (remuxedFile != null && remuxedFile.exists()) {
                     currentMediaFile = remuxedFile
+                    currentIsVideo = false
                     startValidatedExoPlayer(remuxedFile, "audio/mp4", isVideo = false, subtitle = "AAC Audio (Remuxed)")
                     return@launch
                 }
             }
 
-            binding.tvMediaSubtitle.text = "Playback error: unsupported or corrupted media stream"
+            updateMediaTitles(currentTitle, "Playback error: unsupported or corrupted media stream")
             Toast.makeText(this@MediaPlayerActivity, R.string.error_open_file, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun startPlatformVideoPlayer(file: File): Boolean {
+        return try {
+            exoPlayer?.stop()
+            platformAudioPlayer?.release()
+            platformAudioPlayer = null
+            isUsingPlatformAudioPlayer = false
+
+            val vv = binding.platformVideoView
+            binding.playerView.visibility = View.GONE
+            binding.audioContainer.visibility = View.GONE
+            vv.visibility = View.VISIBLE
+
+            vv.setOnPreparedListener { mp ->
+                isUsingPlatformVideoPlayer = true
+                binding.tvTotalTime.text = formatTime(mp.duration.toLong().coerceAtLeast(1L))
+                binding.btnPlayPause.setImageResource(R.drawable.ic_pause)
+                vv.start()
+            }
+            vv.setOnCompletionListener {
+                binding.btnPlayPause.setImageResource(R.drawable.ic_play)
+                binding.seekSlider.value = 100f
+            }
+            vv.setOnErrorListener { _, _, _ ->
+                isUsingPlatformVideoPlayer = false
+                vv.visibility = View.GONE
+                true
+            }
+            vv.setVideoURI(Uri.fromFile(file))
+            isUsingPlatformVideoPlayer = true
+            true
+        } catch (_: Exception) {
+            isUsingPlatformVideoPlayer = false
+            false
         }
     }
 
     private fun startPlatformAudioPlayer(file: File): Boolean {
         return try {
             exoPlayer?.stop()
+            runCatching { binding.platformVideoView.stopPlayback() }
+            binding.platformVideoView.visibility = View.GONE
+            isUsingPlatformVideoPlayer = false
             platformAudioPlayer?.release()
             val mp = MediaPlayer()
             mp.setAudioAttributes(
@@ -526,6 +681,8 @@ class MediaPlayerActivity : AppCompatActivity() {
             }
             platformAudioPlayer = mp
             isUsingPlatformAudioPlayer = true
+            binding.playerView.visibility = View.GONE
+            binding.audioContainer.visibility = View.VISIBLE
             binding.tvTotalTime.text = formatTime(mp.duration.toLong().coerceAtLeast(1L))
             binding.btnPlayPause.setImageResource(R.drawable.ic_pause)
             true
@@ -536,6 +693,18 @@ class MediaPlayerActivity : AppCompatActivity() {
 
     private fun setupControls() {
         binding.btnPlayPause.setOnClickListener {
+            if (isUsingPlatformVideoPlayer) {
+                val vv = binding.platformVideoView
+                if (vv.isPlaying) {
+                    vv.pause()
+                    binding.btnPlayPause.setImageResource(R.drawable.ic_play)
+                } else {
+                    vv.start()
+                    binding.btnPlayPause.setImageResource(R.drawable.ic_pause)
+                }
+                return@setOnClickListener
+            }
+
             if (isUsingPlatformAudioPlayer) {
                 val mp = platformAudioPlayer ?: return@setOnClickListener
                 if (mp.isPlaying) {
@@ -560,6 +729,11 @@ class MediaPlayerActivity : AppCompatActivity() {
         }
 
         binding.btnRewind.setOnClickListener {
+            if (isUsingPlatformVideoPlayer) {
+                val vv = binding.platformVideoView
+                vv.seekTo((vv.currentPosition - 10_000).coerceAtLeast(0))
+                return@setOnClickListener
+            }
             if (isUsingPlatformAudioPlayer) {
                 val mp = platformAudioPlayer ?: return@setOnClickListener
                 mp.seekTo((mp.currentPosition - 10_000).coerceAtLeast(0))
@@ -570,6 +744,11 @@ class MediaPlayerActivity : AppCompatActivity() {
         }
 
         binding.btnForward.setOnClickListener {
+            if (isUsingPlatformVideoPlayer) {
+                val vv = binding.platformVideoView
+                vv.seekTo((vv.currentPosition + 10_000).coerceAtMost(vv.duration.coerceAtLeast(0)))
+                return@setOnClickListener
+            }
             if (isUsingPlatformAudioPlayer) {
                 val mp = platformAudioPlayer ?: return@setOnClickListener
                 mp.seekTo((mp.currentPosition + 10_000).coerceAtMost(mp.duration))
@@ -583,19 +762,30 @@ class MediaPlayerActivity : AppCompatActivity() {
         binding.seekSlider.addOnChangeListener { _, value, fromUser ->
             if (fromUser) {
                 isUserSeeking = true
-                if (isUsingPlatformAudioPlayer) {
-                    val mp = platformAudioPlayer
-                    if (mp != null && mp.duration > 0) {
-                        val target = ((value / 100f) * mp.duration).toInt()
-                        mp.seekTo(target)
-                        binding.tvCurrentTime.text = formatTime(target.toLong())
+                when {
+                    isUsingPlatformVideoPlayer -> {
+                        val vv = binding.platformVideoView
+                        if (vv.duration > 0) {
+                            val target = ((value / 100f) * vv.duration).toInt()
+                            vv.seekTo(target)
+                            binding.tvCurrentTime.text = formatTime(target.toLong())
+                        }
                     }
-                } else {
-                    val player = exoPlayer
-                    if (player != null && player.duration > 0) {
-                        val target = ((value / 100f) * player.duration).toLong()
-                        player.seekTo(target)
-                        binding.tvCurrentTime.text = formatTime(target)
+                    isUsingPlatformAudioPlayer -> {
+                        val mp = platformAudioPlayer
+                        if (mp != null && mp.duration > 0) {
+                            val target = ((value / 100f) * mp.duration).toInt()
+                            mp.seekTo(target)
+                            binding.tvCurrentTime.text = formatTime(target.toLong())
+                        }
+                    }
+                    else -> {
+                        val player = exoPlayer
+                        if (player != null && player.duration > 0) {
+                            val target = ((value / 100f) * player.duration).toLong()
+                            player.seekTo(target)
+                            binding.tvCurrentTime.text = formatTime(target)
+                        }
                     }
                 }
                 isUserSeeking = false
@@ -609,7 +799,16 @@ class MediaPlayerActivity : AppCompatActivity() {
                 1.5f -> 2.0f
                 else -> 1.0f
             }
-            exoPlayer?.setPlaybackSpeed(currentSpeed)
+            if (isUsingPlatformAudioPlayer) {
+                runCatching {
+                    val mp = platformAudioPlayer
+                    if (mp != null) {
+                        mp.playbackParams = mp.playbackParams.setSpeed(currentSpeed)
+                    }
+                }
+            } else if (!isUsingPlatformVideoPlayer) {
+                exoPlayer?.setPlaybackSpeed(currentSpeed)
+            }
             binding.btnSpeed.text = String.format(Locale.US, "Speed: %.2fx", currentSpeed)
         }
 
@@ -621,10 +820,11 @@ class MediaPlayerActivity : AppCompatActivity() {
             }
             try {
                 val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
-                val mime = MediaAssetHelper.getMimeTypeForFilename(file.name, currentIsVideo)
+                val mime = MediaAssetHelper.getMimeTypeForAnyFile(file, currentDownloadItem?.mimeType)
                 val shareIntent = Intent(Intent.ACTION_SEND).apply {
                     type = mime
                     putExtra(Intent.EXTRA_STREAM, uri)
+                    clipData = android.content.ClipData.newRawUri("", uri)
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
                 startActivity(Intent.createChooser(shareIntent, getString(R.string.share)))
@@ -656,6 +856,11 @@ class MediaPlayerActivity : AppCompatActivity() {
         super.onStop()
         exoPlayer?.pause()
         runCatching {
+            if (isUsingPlatformVideoPlayer && binding.platformVideoView.isPlaying) {
+                binding.platformVideoView.pause()
+            }
+        }
+        runCatching {
             if (platformAudioPlayer?.isPlaying == true) {
                 platformAudioPlayer?.pause()
             }
@@ -667,6 +872,7 @@ class MediaPlayerActivity : AppCompatActivity() {
         handler.removeCallbacksAndMessages(null)
         exoPlayer?.release()
         exoPlayer = null
+        runCatching { binding.platformVideoView.stopPlayback() }
         runCatching { platformAudioPlayer?.release() }
         platformAudioPlayer = null
     }

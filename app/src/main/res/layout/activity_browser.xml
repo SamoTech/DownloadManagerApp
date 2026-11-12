@@ -30,7 +30,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="4dp"
                 android:paddingHorizontal="4dp"
-                android:text="Smart Browser • Luca v15.0 (Build 15)"
+                android:text="Smart Browser • Luca v17.0 (Build 17)"
                 android:textColor="#38BDF8"
                 android:textSize="11sp"
                 android:textStyle="bold" />

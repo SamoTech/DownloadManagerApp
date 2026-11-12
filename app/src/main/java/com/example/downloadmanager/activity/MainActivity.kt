@@ -116,6 +116,14 @@ class MainActivity : AppCompatActivity() {
         updateStorageStat()
         startDownloadService()
         checkPermissions()
+        if (savedInstanceState == null) {
+            handleIntent(intent)
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
         handleIntent(intent)
     }
 
@@ -437,15 +445,11 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun startDownloadService() {
-        Intent(this, DownloadService::class.java).apply {
-            startService(this)
+        runCatching {
+            Intent(this, DownloadService::class.java).apply {
+                startService(this)
+            }
         }
-        
-        bindService(
-            Intent(this, DownloadService::class.java),
-            serviceConnection,
-            Context.BIND_AUTO_CREATE
-        )
     }
     
     private fun checkPermissions() {
@@ -693,17 +697,21 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        bindService(
-            Intent(this, DownloadService::class.java),
-            serviceConnection,
-            Context.BIND_AUTO_CREATE
-        )
+        if (!isBound) {
+            runCatching {
+                bindService(
+                    Intent(this, DownloadService::class.java),
+                    serviceConnection,
+                    Context.BIND_AUTO_CREATE
+                )
+            }
+        }
     }
     
     override fun onStop() {
         super.onStop()
         if (isBound) {
-            unbindService(serviceConnection)
+            runCatching { unbindService(serviceConnection) }
             isBound = false
         }
     }

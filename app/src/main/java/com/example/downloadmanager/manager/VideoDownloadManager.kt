@@ -1799,16 +1799,26 @@ class VideoDownloadManager(
 
                         val isAdaptiveVideoOnly = chosenFormat?.formatId?.startsWith("adaptive_") == true
                         val companionAudioFormat = if (isAdaptiveVideoOnly && streamInfo != null) {
+                            val wantWebmAudio = chosenFormat?.container == "webm"
                             streamInfo?.formats
-                                ?.filter { it.isAudioOnly && (it.container == "m4a" || it.container == "mp4") }
+                                ?.filter {
+                                    it.isAudioOnly && if (wantWebmAudio) {
+                                        it.container == "webm" || it.container == "ogg"
+                                    } else {
+                                        it.container == "m4a" || it.container == "mp4"
+                                    }
+                                }
                                 ?.maxByOrNull { it.audioBitrate ?: 0 }
+                                ?: streamInfo?.formats
+                                    ?.filter { it.isAudioOnly && (it.container == "m4a" || it.container == "mp4") }
+                                    ?.maxByOrNull { it.audioBitrate ?: 0 }
                         } else {
                             null
                         }
 
                         if (isAdaptiveVideoOnly && companionAudioFormat != null) {
-                            val tempVideoFile = File(dir, ".tmp_vid_${downloadItem.id}.mp4")
-                            val tempAudioFile = File(dir, ".tmp_aud_${downloadItem.id}.m4a")
+                            val tempVideoFile = File(dir, ".tmp_vid_${downloadItem.id}.${chosenFormat?.container ?: "mp4"}")
+                            val tempAudioFile = File(dir, ".tmp_aud_${downloadItem.id}.${companionAudioFormat.container}")
                             try {
                                 val vSize = chosenFormat?.fileSize ?: 0L
                                 val aSize = companionAudioFormat.fileSize ?: 0L
@@ -1861,8 +1871,12 @@ class VideoDownloadManager(
                                 return
                             }
 
+                            // Prioritize muxed/progressive/HLS formats (which already have BOTH video and audio)
+                            // before adaptive video-only formats so video playback never lacks audio.
                             val candidateFormats = buildList {
-                                streamInfo?.formats?.filter { !it.isAudioOnly }?.let { addAll(it) }
+                                val nonAudioFormats = streamInfo?.formats?.filter { !it.isAudioOnly }.orEmpty()
+                                addAll(nonAudioFormats.filter { !it.formatId.startsWith("adaptive_") })
+                                addAll(nonAudioFormats.filter { it.formatId.startsWith("adaptive_") })
                                 if (isEmpty() && !isWatchPageUrl(videoStreamUrl)) {
                                     add(
                                         VideoFormat(
@@ -1881,11 +1895,45 @@ class VideoDownloadManager(
                                 continue
                             }
 
+                            val fallbackAudio = streamInfo?.formats
+                                ?.filter { it.isAudioOnly && (it.container == "m4a" || it.container == "mp4") }
+                                ?.maxByOrNull { it.audioBitrate ?: 0 }
+                                ?: streamInfo?.formats?.filter { it.isAudioOnly }?.maxByOrNull { it.audioBitrate ?: 0 }
+
                             for (cand in candidateFormats) {
                                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
                                 if (isWatchPageUrl(cand.url)) continue
                                 try {
                                     if (stagingTarget.exists()) stagingTarget.delete()
+                                    val isCandAdaptiveOnly = cand.formatId.startsWith("adaptive_")
+                                    if (isCandAdaptiveOnly && fallbackAudio != null) {
+                                        val tmpVid = File(dir, ".tmp_fb_vid_${downloadItem.id}.${cand.container}")
+                                        val tmpAud = File(dir, ".tmp_fb_aud_${downloadItem.id}.${fallbackAudio.container}")
+                                        try {
+                                            val vOk = streamUrlToFile(
+                                                downloadId = downloadItem.id,
+                                                streamUrl = cand.url,
+                                                destFile = tmpVid,
+                                                expectedSize = cand.fileSize ?: 0L,
+                                                onProgress = onProgress
+                                            )
+                                            val aOk = vOk && streamUrlToFile(
+                                                downloadId = downloadItem.id,
+                                                streamUrl = fallbackAudio.url,
+                                                destFile = tmpAud,
+                                                expectedSize = fallbackAudio.fileSize ?: 0L
+                                            ) { _, _, _, _ -> }
+                                            if (aOk && MediaAssetHelper.muxMp4VideoAndM4aAudio(tmpVid, tmpAud, stagingTarget)) {
+                                                videoSuccess = true
+                                                break
+                                            }
+                                        } finally {
+                                            tmpVid.delete()
+                                            tmpAud.delete()
+                                        }
+                                        continue
+                                    }
+
                                     val streamOk = streamUrlToFile(
                                         downloadId = downloadItem.id,
                                         streamUrl = cand.url,

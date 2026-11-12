@@ -123,12 +123,26 @@ class MainViewModel(val repository: DownloadRepository) : ViewModel() {
     }
 
     fun deleteDownload(downloadId: Long) {
-        viewModelScope.launch {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val item = repository.getDownloadById(downloadId)
             item?.let {
-                val file = java.io.File(it.savePath, it.filename)
-                if (file.exists()) {
-                    if (file.isDirectory) file.deleteRecursively() else file.delete()
+                runCatching {
+                    val baseDir = java.io.File(it.savePath)
+                    val cleanName = com.example.downloadmanager.utils.TorrentPathSafety.validateComponent(it.filename)
+                    val target = com.example.downloadmanager.utils.TorrentPathSafety.resolveContainedFile(baseDir, cleanName)
+                    if (target.exists()) {
+                        if (target.isDirectory) {
+                            val marker = java.io.File(target, com.example.downloadmanager.utils.TorrentPathSafety.TORRENT_IDENTITY_MARKER)
+                            val ownedByJob = !marker.exists() ||
+                                runCatching { marker.readText(Charsets.UTF_8).trim().startsWith("job:${it.id}|") }.getOrDefault(false)
+                            if (ownedByJob) {
+                                target.deleteRecursively()
+                            }
+                        } else {
+                            target.delete()
+                        }
+                    }
+                    java.io.File(baseDir, ".${cleanName}.part.${it.id}").delete()
                 }
             }
             repository.delete(downloadId)
@@ -136,7 +150,7 @@ class MainViewModel(val repository: DownloadRepository) : ViewModel() {
     }
 
     fun clearCompletedDownloads() {
-        viewModelScope.launch {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             repository.deleteCompletedDownloads()
         }
     }
