@@ -25,6 +25,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -289,13 +290,13 @@ class VideoDownloadManager(
         return activeJobs[downloadId]?.isActive == true
     }
 
-    suspend fun extractVideoInfo(url: String): VideoStreamInfo? {
-        val validUrl = normalizeHttpUrl(url) ?: return null
+    suspend fun extractVideoInfo(url: String): VideoStreamInfo? = withContext(Dispatchers.IO) {
+        val validUrl = normalizeHttpUrl(url) ?: return@withContext null
         if (isTwitchUrl(validUrl)) {
-            return null
+            return@withContext null
         }
-        streamInfoCache[validUrl]?.let { return it }
-        return try {
+        streamInfoCache[validUrl]?.let { return@withContext it }
+        try {
             val info = when {
                 isYouTubeUrl(validUrl) -> extractYouTubeInfo(validUrl)
                 isArchiveDetailsUrl(validUrl) -> extractArchiveOrgVideoInfo(validUrl)
@@ -2028,6 +2029,7 @@ class VideoDownloadManager(
         val initialHost = parsedInitial?.host?.lowercase(Locale.US).orEmpty()
         if ((initialHost == "api-v2.soundcloud.com" ||
                 initialHost == "api.soundcloud.com" ||
+                initialHost == "api-mobi.soundcloud.com" ||
                 initialHost == "api-widget.soundcloud.com") &&
             !effectiveUrl.contains("client_id=")
         ) {

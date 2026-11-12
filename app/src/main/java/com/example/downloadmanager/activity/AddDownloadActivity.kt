@@ -36,9 +36,11 @@ import com.example.downloadmanager.utils.FilenameResolver
 import com.example.downloadmanager.utils.UrlClassifier
 import com.google.android.material.checkbox.MaterialCheckBox
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
@@ -514,9 +516,11 @@ class AddDownloadActivity : AppCompatActivity() {
                 DownloadType.VIDEO -> extractVideoInfo(valid, token)
                 DownloadType.MUSIC -> extractMusicInfo(valid, token)
                 DownloadType.DIRECT -> {
-                    val fastTorrentMeta = runCatching {
-                        torrentDownloadManager.peekParsedTorrentMetadata(valid)
-                    }.getOrNull()
+                    val fastTorrentMeta = withContext(Dispatchers.IO) {
+                        runCatching {
+                            torrentDownloadManager.peekParsedTorrentMetadata(valid)
+                        }.getOrNull()
+                    }
                     if (isProbeStillCurrent(token, valid) &&
                         fastTorrentMeta != null &&
                         fastTorrentMeta.hasResolvedMetadata &&
@@ -546,9 +550,11 @@ class AddDownloadActivity : AppCompatActivity() {
 
             // Fast-path: for .torrent files (local content://, file://, or HTTP .torrent),
             // display the real file list immediately (< 50ms) before waiting for tracker announces.
-            val fastMeta = runCatching {
-                torrentDownloadManager.peekParsedTorrentMetadata(url)
-            }.getOrNull()
+            val fastMeta = withContext(Dispatchers.IO) {
+                runCatching {
+                    torrentDownloadManager.peekParsedTorrentMetadata(url)
+                }.getOrNull()
+            }
             if (isProbeStillCurrent(token, url) &&
                 fastMeta != null &&
                 fastMeta.hasResolvedMetadata &&
@@ -565,7 +571,9 @@ class AddDownloadActivity : AppCompatActivity() {
             }
 
             val metadata = try {
-                torrentDownloadManager.getTorrentMetadata(url)
+                withContext(Dispatchers.IO) {
+                    torrentDownloadManager.getTorrentMetadata(url)
+                }
             } catch (se: SecurityException) {
                 if (isProbeStillCurrent(token, url)) {
                     binding.progressBarTorrentFetch.visibility = View.GONE
@@ -741,6 +749,8 @@ class AddDownloadActivity : AppCompatActivity() {
                 if (platform == "Spotify" && !allowAlt) {
                     binding.tvDetectedMusicPlatform.text =
                         "Spotify: No public 30s preview on this track. Enable 'Allow Alternate-Source Lookup (YouTube)' below to search for a full-track match."
+                } else if (platform != null) {
+                    binding.tvDetectedMusicPlatform.text = "Detected: $platform (will resolve stream on start)"
                 }
                 return@launch
             }
@@ -750,13 +760,28 @@ class AddDownloadActivity : AppCompatActivity() {
                 trackInfo.sourceProvider != trackInfo.mediaSource -> " [via ${trackInfo.mediaSource}]"
                 else -> ""
             }
-            binding.tvDetectedMusicPlatform.text =
+            binding.tvDetectedMusicPlatform.text = if (!trackInfo.statusNotice.isNullOrBlank() && trackInfo.directAudioUrl == null) {
+                trackInfo.statusNotice
+            } else {
                 "Detected: ${trackInfo.platform}$provenanceNote • ${trackInfo.title}"
+            }
 
             val ext = trackInfo.containerExt ?: MusicDownloadManager.extensionForFormat(getSelectedMusicFormatCode())
-            val safeTitle = FilenameResolver.sanitizeSingleFilename(trackInfo.title, fallback = "").trim()
-            if (safeTitle.isNotEmpty()) {
+            val combinedTitle = if (trackInfo.artist.isNotBlank() &&
+                !trackInfo.artist.equals(trackInfo.platform, ignoreCase = true) &&
+                !trackInfo.title.contains(trackInfo.artist, ignoreCase = true)
+            ) {
+                "${trackInfo.artist} - ${trackInfo.title}"
+            } else {
+                trackInfo.title
+            }
+            val safeTitle = FilenameResolver.sanitizeSingleFilename(combinedTitle, fallback = "").trim()
+            if (safeTitle.isNotEmpty() && !safeTitle.equals("SoundCloud Track", ignoreCase = true)) {
                 val suggested = if (safeTitle.lowercase(Locale.US).endsWith(ext)) safeTitle else "$safeTitle$ext"
+                val currentFilenameText = binding.etFilename.text?.toString()?.trim().orEmpty()
+                if (MusicDownloadManager.isGenericPlaceholderFilename(currentFilenameText)) {
+                    userManuallyEditedFilename = false
+                }
                 setSuggestedFilenameIfNotEdited(suggested)
             }
             if (binding.etArtist.text.isNullOrBlank() && trackInfo.artist.isNotBlank()) {

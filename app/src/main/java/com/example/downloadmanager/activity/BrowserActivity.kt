@@ -278,8 +278,7 @@ class BrowserActivity : AppCompatActivity() {
             if (host == "api-v2.soundcloud.com" ||
                 host == "api.soundcloud.com" ||
                 host == "api-widget.soundcloud.com" ||
-                host == "api-mobi.soundcloud.com" ||
-                host.startsWith("cf-hls-media.sndcdn.com")
+                host == "api-mobi.soundcloud.com"
             ) {
                 return null
             }
@@ -287,13 +286,30 @@ class BrowserActivity : AppCompatActivity() {
                 // Byte-range HLS chunk (e.g., /media/0/159999/...) — not a full track
                 return null
             }
+            if (host.endsWith("sndcdn.com") && cleanPath.contains("/playlist/") && ext == "m3u8") {
+                val cleanTitle = fallbackTitle
+                    .replace(" | Free Listening on SoundCloud", "")
+                    .replace(" | Listen online for free on SoundCloud", "")
+                    .trim()
+                    .ifBlank { "SoundCloud Audio Stream" }
+                return DetectedLinkItem(
+                    title = cleanTitle,
+                    url = trimmed,
+                    downloadType = DownloadType.MUSIC,
+                    badgeLabel = "AUDIO • HLS STREAM"
+                )
+            }
             if (host.endsWith("sndcdn.com") && ext in setOf("mp3", "m4a", "opus") &&
                 !cleanPath.endsWith(".js") && !cleanPath.endsWith(".css") && !cleanPath.endsWith(".png") && !cleanPath.endsWith(".jpg")
             ) {
-                val title = fallbackTitle.ifBlank { "SoundCloud Audio Stream" }
+                val cleanTitle = fallbackTitle
+                    .replace(" | Free Listening on SoundCloud", "")
+                    .replace(" | Listen online for free on SoundCloud", "")
+                    .trim()
+                    .ifBlank { "SoundCloud Audio Stream" }
                 val streamExt = if (ext in AUDIO_EXTENSIONS) ext.uppercase(Locale.US) else "MP3"
                 return DetectedLinkItem(
-                    title = title,
+                    title = cleanTitle,
                     url = trimmed,
                     downloadType = DownloadType.MUSIC,
                     badgeLabel = "AUDIO • $streamExt"
@@ -580,8 +596,10 @@ class BrowserActivity : AppCompatActivity() {
                 updateNavButtonStates()
                 if (urlChanged) {
                     // Single-Page App route change (Spotify, SoundCloud, YouTube, TikTok, X, Instagram, etc.)
-                    refreshOfferForCurrentPage(validUrl, view?.title ?: currentPageTitle)
-                    scanCurrentPageAsync(validUrl, force = false)
+                    detectedLinks.clear()
+                    currentPageTitle = view?.title?.trim().orEmpty()
+                    refreshOfferForCurrentPage(validUrl, currentPageTitle)
+                    scanCurrentPageAsync(validUrl, force = true)
                 }
             }
 
@@ -614,6 +632,7 @@ class BrowserActivity : AppCompatActivity() {
                         if (!cid.isNullOrBlank()) {
                             MusicDownloadManager.updateSoundCloudClientId(cid)
                         }
+                        MusicDownloadManager.recordInterceptedSoundCloudStream(currentUrl, reqUrl)
                     }
                     val pathExt = reqUri.path?.substringAfterLast('.', "")?.lowercase(Locale.US).orEmpty()
                     if (pathExt !in STATIC_IGNORED_EXTENSIONS) {
@@ -1001,10 +1020,19 @@ class BrowserActivity : AppCompatActivity() {
                 it.url == item.url && it.downloadType == item.downloadType
             }
             if (existingIdx >= 0) {
-                // Upgrade title/badge if the new item has richer metadata
                 val existing = detectedLinks[existingIdx]
-                if (item.title.length > existing.title.length || item.badgeLabel.length > existing.badgeLabel.length) {
-                    detectedLinks[existingIdx] = item
+                val existingIsPlaceholder = MusicDownloadManager.isGenericPlaceholderFilename(existing.title)
+                val newIsSpecific = !MusicDownloadManager.isGenericPlaceholderFilename(item.title)
+                if ((existingIsPlaceholder && newIsSpecific) ||
+                    item.title.length > existing.title.length ||
+                    item.badgeLabel.length > existing.badgeLabel.length
+                ) {
+                    if (insertAtFront && existingIdx > 0) {
+                        detectedLinks.removeAt(existingIdx)
+                        detectedLinks.add(0, item)
+                    } else {
+                        detectedLinks[existingIdx] = item
+                    }
                     return true
                 }
                 return false

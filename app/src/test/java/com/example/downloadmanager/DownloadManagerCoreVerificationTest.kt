@@ -1491,9 +1491,9 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun phase7_activeTorrentSelectedFile_compactAndDictTrackers_andDistinctStatuses() = runBlocking {
-        // 0. Verify Luca Version 14.0 (Build 14)
-        assertEquals("14.0", BuildConfig.VERSION_NAME)
-        assertEquals(14, BuildConfig.VERSION_CODE)
+        // 0. Verify Luca Version 15.0 (Build 15)
+        assertEquals("15.0", BuildConfig.VERSION_NAME)
+        assertEquals(15, BuildConfig.VERSION_CODE)
 
         val tempRoot = createTempDirectory("phase7_torrent_trace").toFile()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -2695,6 +2695,35 @@ class DownloadManagerCoreVerificationTest {
                     "https://a-v2.sndcdn.com/assets/fonts/inter-bold.woff2",
                     "SoundCloud"
                 )
+            )
+
+            //     (g) SoundCloud v15.0: non-track SoundCloud hub URLs (/discover/sets, /search/sounds, /you/likes) are rejected,
+            //         while real track pages and signed cf-hls-media.sndcdn.com/playlist/*.m3u8 manifests are supported
+            assertFalse(
+                "SoundCloud /discover/sets hub must not be classified as a downloadable track",
+                UrlClassifier.classify("https://soundcloud.com/discover/sets").isSupported
+            )
+            assertFalse(
+                "SoundCloud /search/sounds page must not be classified as a downloadable track",
+                UrlClassifier.classify("https://m.soundcloud.com/search/sounds?q=faded").isSupported
+            )
+            assertTrue(
+                "Real SoundCloud track URL must be supported",
+                UrlClassifier.classify("https://soundcloud.com/alanwalker/faded").isSupported
+            )
+            assertTrue(
+                "Signed SoundCloud HLS playlist URL on cf-hls-media.sndcdn.com must be supported",
+                UrlClassifier.classify("https://cf-hls-media.sndcdn.com/playlist/abc123.128.mp3/playlist.m3u8?Policy=xyz").isSupported
+            )
+            val scHlsDetected = com.example.downloadmanager.activity.BrowserActivity.classifyDiscoveredResourceUrl(
+                "https://cf-hls-media.sndcdn.com/playlist/abc123.128.mp3/playlist.m3u8?Policy=xyz",
+                "Alan Walker - Faded | Free Listening on SoundCloud"
+            )
+            assertNotNull("SoundCloud HLS playlist must be detected by BrowserActivity", scHlsDetected)
+            assertEquals("Alan Walker - Faded", scHlsDetected!!.title)
+            assertTrue(
+                "Generic placeholder filename 'SoundCloud (Audio Download).m4a' must be recognized as generic",
+                com.example.downloadmanager.manager.MusicDownloadManager.isGenericPlaceholderFilename("SoundCloud (Audio Download).m4a")
             )
         } finally {
             try { peerServer.close() } catch (_: Exception) {}

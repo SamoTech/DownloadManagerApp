@@ -156,7 +156,7 @@
         <Preference
             android:key="pref_app_version"
             android:title="App Version"
-            android:summary="Luca Download Manager v14.0 (Build 14)"
+            android:summary="Luca Download Manager v15.0 (Build 15)"
             android:selectable="false" />
     </PreferenceCategory>
 

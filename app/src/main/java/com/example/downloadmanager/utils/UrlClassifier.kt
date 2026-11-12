@@ -394,9 +394,37 @@ object UrlClassifier {
         }
 
         // 12. SoundCloud
-        if (matchesAnyDomain(host, "soundcloud.com", "snd.sc")) {
+        if (matchesAnyDomain(host, "soundcloud.com", "snd.sc", "sndcdn.com")) {
             val isShort = matchesDomain(host, "on.soundcloud.com") || matchesDomain(host, "snd.sc")
-            val hasTrack = isShort || nonEmptySegments.size >= 2
+            val isCdnStream = matchesDomain(host, "sndcdn.com") &&
+                (pathLower.contains("/playlist/") ||
+                    pathLower.endsWith(".mp3") ||
+                    pathLower.endsWith(".m4a") ||
+                    pathLower.endsWith(".opus") ||
+                    pathLower.endsWith(".m3u8")) &&
+                !pathLower.contains("/assets/")
+            val isApiTrack = (host == "api-v2.soundcloud.com" ||
+                host == "api.soundcloud.com" ||
+                host == "api-mobi.soundcloud.com" ||
+                host == "api-widget.soundcloud.com") &&
+                (pathLower.contains("/tracks/") || pathLower.contains("soundcloud:tracks:"))
+            val reservedFirstSegments = setOf(
+                "search", "discover", "stream", "you", "pages", "terms-of-use", "imprint",
+                "charts", "messages", "notifications", "settings", "upload", "pro", "go",
+                "creators", "jobs", "press", "blog", "mobile", "popular", "tags", "stations",
+                "people", "signin", "signup", "logout"
+            )
+            val reservedSecondSegments = setOf(
+                "followers", "following", "likes", "reposts", "comments", "tracks", "albums", "recommended"
+            )
+            val firstSeg = nonEmptySegments.getOrNull(0)?.lowercase(Locale.US).orEmpty()
+            val secondSeg = nonEmptySegments.getOrNull(1)?.lowercase(Locale.US).orEmpty()
+            val isUserTrackOrSet = !matchesDomain(host, "sndcdn.com") &&
+                nonEmptySegments.size >= 2 &&
+                firstSeg !in reservedFirstSegments &&
+                (nonEmptySegments.size > 2 || secondSeg !in reservedSecondSegments)
+            val hasTrack = isShort || isCdnStream || isApiTrack || isUserTrackOrSet ||
+                (host.equals("w.soundcloud.com", ignoreCase = true) && !httpUrl.queryParameter("url").isNullOrBlank())
             return UrlClassification(
                 category = PlatformCategory.SOUNDCLOUD,
                 downloadType = DownloadType.MUSIC,
@@ -404,7 +432,7 @@ object UrlClassifier {
                 canonicalHost = "soundcloud.com",
                 isSupported = hasTrack,
                 isShortLink = isShort,
-                unsupportedReason = if (hasTrack) null else "SoundCloud URL must point to a specific track"
+                unsupportedReason = if (hasTrack) null else "Open a specific SoundCloud track or playlist to download audio"
             )
         }
 

@@ -21,6 +21,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -86,6 +87,11 @@ class MusicDownloadManager(
             "LBCcHmRB8XSStWL6wKH2HPACspQlXg2P"
         )
 
+        private val interceptedSoundCloudStreams = ConcurrentHashMap<String, String>()
+
+        @Volatile
+        private var latestInterceptedSoundCloudStream: Pair<String, Long>? = null
+
         fun updateSoundCloudClientId(clientId: String?) {
             val clean = clientId?.trim().orEmpty()
             if (clean.length == 32 && clean.all { it.isLetterOrDigit() }) {
@@ -94,6 +100,76 @@ class MusicDownloadManager(
         }
 
         internal fun getActiveSoundCloudClientId(): String = cachedSoundCloudClientId
+
+        internal fun getAllCandidateSoundCloudClientIds(): List<String> {
+            val set = LinkedHashSet<String>()
+            set.add(cachedSoundCloudClientId)
+            set.addAll(fallbackSoundCloudClientIds)
+            return set.toList()
+        }
+
+        fun recordInterceptedSoundCloudStream(pageUrl: String?, streamUrl: String) {
+            val trimmedStream = streamUrl.trim()
+            if (!trimmedStream.startsWith("http", ignoreCase = true)) return
+            val lower = trimmedStream.lowercase(Locale.US)
+            // Ignore 10-second byte-range HLS segment chunks (/media/0/159999/...)
+            if (lower.contains("sndcdn.com") && lower.contains("/media/") && !lower.contains("/playlist/")) {
+                return
+            }
+            val isPlayableStreamOrTranscoding =
+                (lower.contains("sndcdn.com") && (lower.contains("/playlist/") || lower.contains(".m3u8") || lower.contains(".mp3") || lower.contains(".m4a") || lower.contains(".opus"))) ||
+                    ((lower.contains("api-v2.soundcloud.com") || lower.contains("api-mobi.soundcloud.com")) && lower.contains("/media/soundcloud:tracks:"))
+            if (!isPlayableStreamOrTranscoding) return
+
+            latestInterceptedSoundCloudStream = trimmedStream to System.currentTimeMillis()
+            val normKey = normalizeSoundCloudPageKey(pageUrl)
+            if (normKey != null) {
+                interceptedSoundCloudStreams[normKey] = trimmedStream
+            }
+        }
+
+        fun getInterceptedSoundCloudStream(pageUrl: String?): String? {
+            val normKey = normalizeSoundCloudPageKey(pageUrl)
+            if (normKey != null) {
+                interceptedSoundCloudStreams[normKey]?.let { return it }
+            }
+            val latest = latestInterceptedSoundCloudStream
+            if (latest != null && System.currentTimeMillis() - latest.second < 10 * 60 * 1000L) {
+                return latest.first
+            }
+            return null
+        }
+
+        private fun normalizeSoundCloudPageKey(url: String?): String? {
+            val raw = url?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            val http = raw.toHttpUrlOrNull() ?: return null
+            if (!UrlClassifier.matchesDomain(http.host, "soundcloud.com")) return null
+            val cleanPath = http.encodedPath.trimEnd('/').lowercase(Locale.US)
+            if (cleanPath.isBlank() || cleanPath == "/") return null
+            return "https://soundcloud.com$cleanPath"
+        }
+
+        internal fun isGenericPlaceholderFilename(name: String): Boolean {
+            val trimmed = name.trim()
+            if (trimmed.isBlank()) return true
+            val base = trimmed.substringBeforeLast(".").trim()
+            val lower = base.lowercase(Locale.US)
+            return base.isBlank() ||
+                lower == "watch" ||
+                lower == "soundcloud" ||
+                lower == "spotify" ||
+                lower == "playlist" ||
+                lower == "stream" ||
+                lower == "hls" ||
+                lower.startsWith("download_") ||
+                lower.startsWith("audio_track") ||
+                lower.startsWith("soundcloud_track") ||
+                lower.contains("(audio download)") ||
+                lower.contains("(audio extraction)") ||
+                lower.contains("(direct audio stream)") ||
+                lower.contains("soundcloud audio stream") ||
+                base.length == 22 && base.all { it.isLetterOrDigit() }
+        }
 
         private val trackInfoCache = ConcurrentHashMap<String, MusicTrackInfo>()
 
@@ -106,6 +182,7 @@ class MusicDownloadManager(
             "soundcloud.com" to "SoundCloud",
             "on.soundcloud.com" to "SoundCloud",
             "snd.sc" to "SoundCloud",
+            "sndcdn.com" to "SoundCloud",
             "open.spotify.com" to "Spotify",
             "spotify.com" to "Spotify",
             "spotify.link" to "Spotify",
@@ -149,12 +226,21 @@ class MusicDownloadManager(
         fun isSoundCloudUrl(url: String): Boolean {
             val httpUrl = VideoDownloadManager.normalizeHttpUrl(url)?.toHttpUrlOrNull() ?: return false
             val host = httpUrl.host.lowercase(Locale.US)
+            val pathLower = httpUrl.encodedPath.lowercase(Locale.US)
             if (host == "api.soundcloud.com" ||
                 host == "api-v2.soundcloud.com" ||
                 host == "api-mobi.soundcloud.com" ||
                 host == "api-widget.soundcloud.com"
             ) {
-                return httpUrl.encodedPath.contains("/tracks/") || httpUrl.encodedPath.contains("soundcloud:tracks:")
+                return pathLower.contains("/tracks/") || pathLower.contains("soundcloud:tracks:")
+            }
+            if (UrlClassifier.matchesDomain(host, "sndcdn.com")) {
+                return (pathLower.contains("/playlist/") ||
+                    pathLower.endsWith(".mp3") ||
+                    pathLower.endsWith(".m4a") ||
+                    pathLower.endsWith(".opus") ||
+                    pathLower.endsWith(".m3u8")) &&
+                    !pathLower.contains("/assets/")
             }
             return UrlClassifier.matchesAnyDomain(host, "soundcloud.com", "snd.sc")
         }
@@ -248,21 +334,23 @@ class MusicDownloadManager(
             val titleTokens = cleanExpectedTitle.split(" ").filter { it.length >= 2 }
             if (titleTokens.isEmpty()) return false
             val matchedTitleTokens = titleTokens.count { token ->
-                cleanCandTitle.contains(token)
+                cleanCandTitle.contains(token) || cleanCandAuthor.contains(token)
             }
             val titleRatio = matchedTitleTokens.toDouble() / titleTokens.size.toDouble()
-            if (titleRatio < 0.65) return false
+            if (titleRatio < 0.60) return false
 
-            // Artist token check (if expectedArtist is meaningful)
-            if (cleanExpectedArtist.isNotEmpty() &&
-                cleanExpectedArtist !in setOf("spotify", "soundcloud", "artist", "unknown")
-            ) {
+            // Artist token check (if expectedArtist is meaningful and not a SoundCloud user handle or already embedded in expectedTitle)
+            val titleAlreadyHasArtistSeparator = expectedTitle.contains(" - ") || expectedTitle.contains(" – ")
+            val isGenericHandle = cleanExpectedArtist.startsWith("user ") ||
+                cleanExpectedArtist.startsWith("user") ||
+                cleanExpectedArtist in setOf("spotify", "soundcloud", "artist", "unknown", "soundcloud track")
+            if (cleanExpectedArtist.isNotEmpty() && !isGenericHandle && !titleAlreadyHasArtistSeparator) {
                 val artistTokens = cleanExpectedArtist.split(" ").filter { it.length >= 2 }
                 if (artistTokens.isNotEmpty()) {
                     val artistPresent = artistTokens.any { token ->
                         cleanCandTitle.contains(token) || cleanCandAuthor.contains(token)
                     }
-                    if (!artistPresent) return false
+                    if (!artistPresent && titleRatio < 0.85) return false
                 }
             }
 
@@ -311,28 +399,32 @@ class MusicDownloadManager(
         rawUrl: String,
         preferredFormatCode: String? = null,
         allowAlternateSource: Boolean? = null
-    ): MusicTrackInfo? {
-        val validUrl = VideoDownloadManager.normalizeHttpUrl(rawUrl) ?: return null
+    ): MusicTrackInfo? = withContext(Dispatchers.IO) {
+        val validUrl = VideoDownloadManager.normalizeHttpUrl(rawUrl) ?: return@withContext null
         val useAlternate = allowAlternateSource ?: isAlternateSourceAllowedByPrefs()
         val cacheKey = "$validUrl|${preferredFormatCode ?: "default"}|alt=$useAlternate"
-        trackInfoCache[cacheKey]?.let { return it }
+        trackInfoCache[cacheKey]?.let { return@withContext it }
 
         // 1. SoundCloud URL
         if (isSoundCloudUrl(validUrl)) {
             extractSoundCloudAudio(validUrl, useAlternate)?.let { info ->
-                trackInfoCache[cacheKey] = info
-                return info
+                if (info.directAudioUrl != null) {
+                    trackInfoCache[cacheKey] = info
+                }
+                return@withContext info
             }
-            return null
+            return@withContext null
         }
 
         // 2. Spotify URL
         if (isSpotifyUrl(validUrl)) {
             extractSpotifyAudio(validUrl, preferredFormatCode, useAlternate)?.let { info ->
-                trackInfoCache[cacheKey] = info
-                return info
+                if (info.directAudioUrl != null) {
+                    trackInfoCache[cacheKey] = info
+                }
+                return@withContext info
             }
-            return null
+            return@withContext null
         }
 
         // 3. YouTube or YouTube Music URL
@@ -373,7 +465,7 @@ class MusicDownloadManager(
                     durationSeconds = ytInfo.duration
                 )
                 trackInfoCache[cacheKey] = info
-                return info
+                return@withContext info
             }
         }
 
@@ -385,7 +477,7 @@ class MusicDownloadManager(
                 val itemId = archiveItemMatch.groupValues[1]
                 extractArchiveOrgAudio(itemId, validUrl, preferredFormatCode)?.let { info ->
                     trackInfoCache[cacheKey] = info
-                    return info
+                    return@withContext info
                 }
             }
         }
@@ -416,7 +508,7 @@ class MusicDownloadManager(
                         durationSeconds = streamInfo.video.duration / 1000L
                     )
                     trackInfoCache[cacheKey] = info
-                    return info
+                    return@withContext info
                 }
             }
         }
@@ -437,7 +529,7 @@ class MusicDownloadManager(
             .trim()
             .ifBlank { "$platform Track" }
 
-        return try {
+        try {
             val request = Request.Builder()
                 .url(validUrl)
                 .header("User-Agent", VideoDownloadManager.DESKTOP_USER_AGENT)
@@ -445,7 +537,7 @@ class MusicDownloadManager(
                 .build()
             okHttpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    return null
+                    return@withContext null
                 }
                 val finalUrl = response.request.url.toString()
                 val contentType = (response.header("Content-Type") ?: "").lowercase(Locale.US)
@@ -477,7 +569,7 @@ class MusicDownloadManager(
                         isPreview = false
                     )
                     trackInfoCache[cacheKey] = info
-                    return info
+                    return@withContext info
                 }
 
                 val html = response.body?.string().orEmpty()
@@ -534,19 +626,111 @@ class MusicDownloadManager(
     }
 
     /**
+     * Resolves a SoundCloud API transcoding URL (`https://api-v2.soundcloud.com/media/soundcloud:tracks:.../stream/hls`)
+     * into the underlying signed CloudFront `.m3u8` / `.mp3` URL, trying multiple `client_id`s if needed.
+     */
+    private fun resolveSoundCloudTranscodingEndpoint(
+        transcodingUrl: String,
+        trackAuth: String = "",
+        clientIds: List<String> = getAllCandidateSoundCloudClientIds()
+    ): String? {
+        val baseHasClientId = transcodingUrl.contains("client_id=")
+        for (cid in clientIds) {
+            val urlWithCid = if (baseHasClientId) {
+                transcodingUrl.replace(Regex("client_id=[^&]+"), "client_id=$cid")
+            } else {
+                val sep = if (transcodingUrl.contains("?")) "&" else "?"
+                "${transcodingUrl}${sep}client_id=$cid"
+            }
+            val finalEndpoint = if (trackAuth.isNotBlank() && !urlWithCid.contains("track_authorization=")) {
+                val sep = if (urlWithCid.contains("?")) "&" else "?"
+                "${urlWithCid}${sep}track_authorization=${URLEncoder.encode(trackAuth, "UTF-8")}"
+            } else {
+                urlWithCid
+            }
+            try {
+                val req = Request.Builder()
+                    .url(finalEndpoint)
+                    .header("User-Agent", VideoDownloadManager.DESKTOP_USER_AGENT)
+                    .header("Origin", "https://soundcloud.com")
+                    .header("Referer", "https://soundcloud.com/")
+                    .header("Accept", "application/json")
+                    .build()
+                okHttpClient.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val json = JSONObject(resp.body?.string().orEmpty())
+                        val sUrl = json.optString("url").takeIf { it.startsWith("http") }
+                        if (sUrl != null) {
+                            updateSoundCloudClientId(cid)
+                            return sUrl
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return null
+    }
+
+    /**
      * Extracts SoundCloud track metadata and resolves progressive MP3 or HLS `.m3u8` stream via SoundCloud API v2.
-     * Only performs alternate-source lookup if [allowAlternateSource] is explicitly true and verified.
+     * Supports direct `sndcdn.com` streams, `api-v2.soundcloud.com/media/soundcloud:tracks:...` transcodings,
+     * live streams intercepted by `BrowserActivity`, desktop + mobile HTML hydration, and verified YouTube fallback.
      */
     internal fun extractSoundCloudAudio(rawUrl: String, allowAlternateSource: Boolean): MusicTrackInfo? {
         return try {
             var desktopUrl = rawUrl.trim()
             val parsedInitial = desktopUrl.toHttpUrlOrNull() ?: return null
+            val initialHost = parsedInitial.host.lowercase(Locale.US)
+            val initialPathLower = parsedInitial.encodedPath.lowercase(Locale.US)
 
             // Harvest client_id if present in the input URL
             parsedInitial.queryParameter("client_id")?.let { updateSoundCloudClientId(it) }
 
+            // Fast-path A: Direct SoundCloud CDN stream or HLS playlist URL (e.g. cf-hls-media.sndcdn.com/playlist/...m3u8?Policy=...)
+            if (UrlClassifier.matchesDomain(initialHost, "sndcdn.com")) {
+                val ext = when {
+                    initialPathLower.contains(".opus") || initialPathLower.contains(".ogg") -> ".ogg"
+                    initialPathLower.contains(".m4a") || initialPathLower.contains(".aac") -> ".m4a"
+                    else -> ".mp3"
+                }
+                return MusicTrackInfo(
+                    title = "SoundCloud Track",
+                    artist = "SoundCloud",
+                    platform = "SoundCloud",
+                    sourceUrl = rawUrl,
+                    directAudioUrl = desktopUrl,
+                    containerExt = ext,
+                    estimatedSizeBytes = 0L,
+                    mediaSource = "SoundCloud Direct Stream",
+                    isPreview = desktopUrl.contains("/preview/")
+                )
+            }
+
+            // Fast-path B: Direct SoundCloud transcoding API URL (e.g. api-v2.soundcloud.com/media/soundcloud:tracks:123/stream/hls?...)
+            if ((initialHost == "api-v2.soundcloud.com" ||
+                    initialHost == "api.soundcloud.com" ||
+                    initialHost == "api-mobi.soundcloud.com" ||
+                    initialHost == "api-widget.soundcloud.com") &&
+                initialPathLower.contains("/media/soundcloud:tracks:")
+            ) {
+                val unwrapped = resolveSoundCloudTranscodingEndpoint(desktopUrl) ?: desktopUrl
+                val ext = if (initialPathLower.contains("opus") || initialPathLower.contains("ogg")) ".ogg" else ".mp3"
+                return MusicTrackInfo(
+                    title = "SoundCloud Track",
+                    artist = "SoundCloud",
+                    platform = "SoundCloud",
+                    sourceUrl = rawUrl,
+                    directAudioUrl = unwrapped,
+                    containerExt = ext,
+                    estimatedSizeBytes = 0L,
+                    mediaSource = "SoundCloud Official Stream",
+                    isPreview = desktopUrl.contains("/preview/")
+                )
+            }
+
             // Handle w.soundcloud.com/player/?url=... embed URLs
-            if (parsedInitial.host.equals("w.soundcloud.com", ignoreCase = true)) {
+            if (initialHost == "w.soundcloud.com") {
                 val embeddedUrl = parsedInitial.queryParameter("url")?.trim()
                 if (!embeddedUrl.isNullOrBlank() && embeddedUrl.startsWith("http")) {
                     desktopUrl = embeddedUrl
@@ -572,41 +756,48 @@ class MusicDownloadManager(
                 }
             }
 
-            // Preserve secret_token query param if present, strip tracking params (?si=, ?utm_, etc.)
+            // Preserve secret_token query param if present; only strip tracking query params on standard soundcloud.com track URLs
             val resolvedHttp = desktopUrl.toHttpUrlOrNull()
-            val secretToken = resolvedHttp?.queryParameter("secret_token")?.takeIf { it.isNotBlank() }
-            desktopUrl = desktopUrl
-                .replace("://m.soundcloud.com/", "://soundcloud.com/")
-                .replace("://www.soundcloud.com/", "://soundcloud.com/")
-                .substringBefore("?")
-                .trimEnd('/')
-            if (secretToken != null && !desktopUrl.endsWith("/$secretToken")) {
-                desktopUrl = "$desktopUrl?secret_token=${URLEncoder.encode(secretToken, "UTF-8")}"
+            val resolvedHost = resolvedHttp?.host?.lowercase(Locale.US).orEmpty()
+            val isApiHost = resolvedHost.startsWith("api") && resolvedHost.endsWith("soundcloud.com")
+            if (!isApiHost) {
+                val secretToken = resolvedHttp?.queryParameter("secret_token")?.takeIf { it.isNotBlank() }
+                desktopUrl = desktopUrl
+                    .replace("://m.soundcloud.com/", "://soundcloud.com/")
+                    .replace("://www.soundcloud.com/", "://soundcloud.com/")
+                    .substringBefore("?")
+                    .trimEnd('/')
+                if (secretToken != null && !desktopUrl.endsWith("/$secretToken")) {
+                    desktopUrl = "$desktopUrl?secret_token=${URLEncoder.encode(secretToken, "UTF-8")}"
+                }
             }
 
             var html = ""
+            var mobileHtml = ""
             val directTrackIdMatch = Regex("""(?:soundcloud:tracks:|/tracks/)(\d+)""").find(rawUrl)
             val directTrackId = directTrackIdMatch?.groupValues?.getOrNull(1)
 
             if (directTrackId == null) {
-                val reqPage = Request.Builder()
-                    .url(desktopUrl)
-                    .header("User-Agent", VideoDownloadManager.DESKTOP_USER_AGENT)
-                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                    .header("Accept-Language", "en-US,en;q=0.9")
-                    .build()
+                runCatching {
+                    val reqPage = Request.Builder()
+                        .url(desktopUrl)
+                        .header("User-Agent", VideoDownloadManager.DESKTOP_USER_AGENT)
+                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                        .header("Accept-Language", "en-US,en;q=0.9")
+                        .build()
 
-                okHttpClient.newCall(reqPage).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        html = resp.body?.string().orEmpty()
+                    okHttpClient.newCall(reqPage).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            html = resp.body?.string().orEmpty()
+                        }
                     }
                 }
             }
 
-            var soundData: JSONObject? = null
-            if (html.isNotEmpty()) {
-                // 1. Try bracket-balanced window.__sc_hydration JSON array
-                val arr = extractSoundCloudHydrationArray(html)
+            fun parseSoundDataFromHtml(pageHtml: String): JSONObject? {
+                if (pageHtml.isEmpty()) return null
+                var foundSound: JSONObject? = null
+                val arr = extractSoundCloudHydrationArray(pageHtml)
                 if (arr != null) {
                     for (i in 0 until arr.length()) {
                         val item = arr.optJSONObject(i) ?: continue
@@ -614,37 +805,59 @@ class MusicDownloadManager(
                         if (hydratable == "sound") {
                             val candidateData = item.optJSONObject("data")
                             if (candidateData != null) {
-                                soundData = candidateData
+                                foundSound = candidateData
                                 break
                             }
-                        } else if (hydratable == "playlist" && soundData == null) {
+                        } else if (hydratable == "playlist" && foundSound == null) {
                             val playlistData = item.optJSONObject("data")
                             val tracksArr = playlistData?.optJSONArray("tracks")
                             if (tracksArr != null) {
                                 for (tIdx in 0 until tracksArr.length()) {
                                     val tObj = tracksArr.optJSONObject(tIdx) ?: continue
                                     if (tObj.optJSONObject("media")?.optJSONArray("transcodings") != null) {
-                                        soundData = tObj
+                                        foundSound = tObj
                                         break
                                     }
                                 }
-                                if (soundData == null && tracksArr.length() > 0) {
-                                    soundData = tracksArr.optJSONObject(0)
+                                if (foundSound == null && tracksArr.length() > 0) {
+                                    foundSound = tracksArr.optJSONObject(0)
                                 }
                             }
                         }
                     }
                 }
-
-                // 2. Fallback: check __NEXT_DATA__ or any embedded JSON with media.transcodings
-                if (soundData == null || soundData.optJSONObject("media")?.optJSONArray("transcodings") == null) {
+                if (foundSound == null || foundSound.optJSONObject("media")?.optJSONArray("transcodings") == null) {
                     val nextData = Regex(
                         """<script[^>]+id=["']__NEXT_DATA__["'][^>]*>(.*?)</script>""",
                         RegexOption.DOT_MATCHES_ALL
-                    ).find(html)?.groupValues?.getOrNull(1)
+                    ).find(pageHtml)?.groupValues?.getOrNull(1)
                     if (!nextData.isNullOrBlank()) {
                         runCatching {
-                            findSoundObjectWithTranscodings(JSONObject(nextData))?.let { soundData = it }
+                            val nextJson = JSONObject(nextData)
+                            extractInlineSoundCloudClientId(nextData)?.let { updateSoundCloudClientId(it) }
+                            findSoundObjectWithTranscodings(nextJson)?.let { foundSound = it }
+                        }
+                    }
+                }
+                return foundSound
+            }
+
+            var soundData: JSONObject? = parseSoundDataFromHtml(html)
+
+            // If desktop page didn't yield hydration data (e.g. Cloudflare/Datadome challenge on desktop UA), try mobile m.soundcloud.com page
+            if (soundData == null && directTrackId == null && desktopUrl.contains("://soundcloud.com/")) {
+                val mobileUrl = desktopUrl.replace("://soundcloud.com/", "://m.soundcloud.com/")
+                runCatching {
+                    val reqMob = Request.Builder()
+                        .url(mobileUrl)
+                        .header("User-Agent", YouTubeExtractor.DEFAULT_MOBILE_USER_AGENT)
+                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                        .header("Accept-Language", "en-US,en;q=0.9")
+                        .build()
+                    okHttpClient.newCall(reqMob).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            mobileHtml = resp.body?.string().orEmpty()
+                            soundData = parseSoundDataFromHtml(mobileHtml)
                         }
                     }
                 }
@@ -659,13 +872,20 @@ class MusicDownloadManager(
                     clientIdsToTry.add(it)
                 }
             }
+            if (mobileHtml.isNotEmpty()) {
+                extractInlineSoundCloudClientId(mobileHtml)?.let {
+                    updateSoundCloudClientId(it)
+                    clientIdsToTry.add(it)
+                }
+            }
             clientIdsToTry.addAll(fallbackSoundCloudClientIds)
 
             var scrapedJsBundles = false
             fun ensureJsBundlesScraped(): List<String> {
-                if (!scrapedJsBundles && html.isNotEmpty()) {
+                if (!scrapedJsBundles && (html.isNotEmpty() || mobileHtml.isNotEmpty())) {
                     scrapedJsBundles = true
-                    scrapeSoundCloudClientId(html)?.let { freshId ->
+                    val combinedHtml = if (html.isNotEmpty()) "$html\n$mobileHtml" else mobileHtml
+                    scrapeSoundCloudClientId(combinedHtml)?.let { freshId ->
                         updateSoundCloudClientId(freshId)
                         val updated = LinkedHashSet<String>()
                         updated.add(freshId)
@@ -682,6 +902,7 @@ class MusicDownloadManager(
                 val trackIdToResolve = directTrackId
                     ?: soundData?.optLong("id", 0L)?.takeIf { it > 0L }?.toString()
                     ?: Regex("""soundcloud:tracks:(\d+)""").find(html)?.groupValues?.getOrNull(1)
+                    ?: Regex("""soundcloud:tracks:(\d+)""").find(mobileHtml)?.groupValues?.getOrNull(1)
 
                 for (phase in 0..1) {
                     val activeClientIds = if (phase == 0) clientIdsToTry.toList() else ensureJsBundlesScraped()
@@ -689,8 +910,10 @@ class MusicDownloadManager(
                         val resolveUrls = buildList {
                             if (!trackIdToResolve.isNullOrBlank()) {
                                 add("https://api-v2.soundcloud.com/tracks/$trackIdToResolve?client_id=$cid")
+                                add("https://api-mobi.soundcloud.com/tracks/$trackIdToResolve?client_id=$cid")
                             }
                             add("https://api-v2.soundcloud.com/resolve?url=${URLEncoder.encode(desktopUrl, "UTF-8")}&client_id=$cid")
+                            add("https://api-mobi.soundcloud.com/resolve?url=${URLEncoder.encode(desktopUrl, "UTF-8")}&client_id=$cid")
                             add("https://api-widget.soundcloud.com/resolve?url=${URLEncoder.encode(desktopUrl, "UTF-8")}&format=json&client_id=$cid")
                         }
                         for (resUrl in resolveUrls) {
@@ -737,22 +960,34 @@ class MusicDownloadManager(
                 }
             }
 
-            // Extract fallback title/artist from HTML meta tags if soundData was completely unreachable
-            val fallbackHtmlTitle = if (html.isNotEmpty()) {
-                (extractMetaTag(html, "og:title") ?: extractHtmlTitle(html).orEmpty())
+            // Extract fallback title/artist from HTML meta tags or URL slug if soundData was unreachable
+            val sourceHtmlForMeta = if (html.isNotEmpty()) html else mobileHtml
+            val fallbackHtmlTitle = if (sourceHtmlForMeta.isNotEmpty()) {
+                (extractMetaTag(sourceHtmlForMeta, "og:title") ?: extractHtmlTitle(sourceHtmlForMeta).orEmpty())
                     .replace(" | Free Listening on SoundCloud", "")
                     .replace("Stream ", "")
                     .replace(" | Listen online for free on SoundCloud", "")
                     .trim()
             } else ""
 
-            if (soundData == null && fallbackHtmlTitle.isBlank()) return null
+            val urlSegments = desktopUrl.toHttpUrlOrNull()?.pathSegments?.filter { it.isNotBlank() }.orEmpty()
+            val slugFallbackArtist = urlSegments.getOrNull(0)?.replace("-", " ")?.replace("_", " ")?.trim().orEmpty()
+            val slugFallbackTitle = urlSegments.getOrNull(1)?.replace("-", " ")?.replace("_", " ")?.trim().orEmpty()
+
+            val interceptedStream = getInterceptedSoundCloudStream(rawUrl) ?: getInterceptedSoundCloudStream(desktopUrl)
+            if (soundData == null && fallbackHtmlTitle.isBlank() && slugFallbackTitle.isBlank() && interceptedStream == null) {
+                return null
+            }
 
             val title = soundData?.optString("title")?.takeIf { it.isNotBlank() }?.trim()
-                ?: fallbackHtmlTitle.substringBefore(" by ").trim().ifBlank { "SoundCloud Track" }
+                ?: fallbackHtmlTitle.substringBefore(" by ").trim().takeIf { it.isNotBlank() && !it.startsWith("SoundCloud", ignoreCase = true) }
+                ?: slugFallbackTitle.ifBlank { "SoundCloud Track" }
             val artist = soundData?.optJSONObject("user")?.optString("username")?.takeIf { it.isNotBlank() }?.trim()
-                ?: fallbackHtmlTitle.substringAfter(" by ", "SoundCloud").substringBefore(" |").trim().ifBlank { "SoundCloud" }
-            val durationMs = soundData?.optLong("duration", 0L) ?: 0L
+                ?: fallbackHtmlTitle.substringAfter(" by ", "").substringBefore(" |").trim().takeIf { it.isNotBlank() }
+                ?: slugFallbackArtist.ifBlank { "SoundCloud" }
+            val durationMs = soundData?.optLong("duration", 0L)?.takeIf { it > 0L }
+                ?: soundData?.optLong("full_duration", 0L)
+                ?: 0L
             val durationSec = durationMs / 1000L
             val trackAuth = soundData?.optString("track_authorization", "").orEmpty().trim()
             val transcodings = soundData?.optJSONObject("media")?.optJSONArray("transcodings")
@@ -814,55 +1049,106 @@ class MusicDownloadManager(
 
             for (attempt in 0..1) {
                 val activeClientIds = if (attempt == 0) {
-                    listOf(cachedSoundCloudClientId)
+                    clientIdsToTry.toList()
                 } else {
                     ensureJsBundlesScraped()
                 }
 
                 for (cid in activeClientIds) {
                     for (cand in candidates) {
-                        val sep = if (cand.apiUrl.contains("?")) "&" else "?"
-                        val authQuery = if (trackAuth.isNotBlank() && !cand.apiUrl.contains("track_authorization=")) {
-                            "&track_authorization=${URLEncoder.encode(trackAuth, "UTF-8")}"
-                        } else {
-                            ""
-                        }
-                        val resolveEndpoint = "${cand.apiUrl}${sep}client_id=$cid$authQuery"
-                        try {
-                            val reqResolve = Request.Builder()
-                                .url(resolveEndpoint)
-                                .header("User-Agent", VideoDownloadManager.DESKTOP_USER_AGENT)
-                                .header("Origin", "https://soundcloud.com")
-                                .header("Referer", "https://soundcloud.com/")
-                                .header("Accept", "application/json")
-                                .build()
-                            okHttpClient.newCall(reqResolve).execute().use { resp ->
-                                if (resp.isSuccessful) {
-                                    val json = JSONObject(resp.body?.string().orEmpty())
-                                    val sUrl = json.optString("url").takeIf { it.startsWith("http") }
-                                    if (sUrl != null) {
-                                        updateSoundCloudClientId(cid)
-                                        if (resolvedStreamUrl == null) {
-                                            resolvedStreamUrl = sUrl
-                                            chosenExt = when {
-                                                cand.mimeType.contains("mpeg") -> ".mp3"
-                                                cand.mimeType.contains("ogg") || cand.mimeType.contains("opus") -> ".ogg"
-                                                else -> ".m4a"
-                                            }
-                                            isSnippedPreview = cand.isPreview
-                                        } else if (fallbackStreamUrl == null && sUrl != resolvedStreamUrl && !cand.isPreview) {
-                                            fallbackStreamUrl = sUrl
-                                        }
-                                    }
+                        val sUrl = resolveSoundCloudTranscodingEndpoint(
+                            transcodingUrl = cand.apiUrl,
+                            trackAuth = trackAuth,
+                            clientIds = listOf(cid)
+                        )
+                        if (sUrl != null) {
+                            if (resolvedStreamUrl == null) {
+                                resolvedStreamUrl = sUrl
+                                chosenExt = when {
+                                    cand.mimeType.contains("mpeg") -> ".mp3"
+                                    cand.mimeType.contains("ogg") || cand.mimeType.contains("opus") -> ".ogg"
+                                    else -> ".m4a"
                                 }
+                                isSnippedPreview = cand.isPreview
+                            } else if (fallbackStreamUrl == null && sUrl != resolvedStreamUrl && !cand.isPreview) {
+                                fallbackStreamUrl = sUrl
                             }
-                        } catch (_: Exception) {
                         }
                         if (resolvedStreamUrl != null && fallbackStreamUrl != null) break
                     }
                     if (resolvedStreamUrl != null) break
                 }
                 if (resolvedStreamUrl != null) break
+            }
+
+            // If BrowserActivity intercepted a live signed SoundCloud stream for this page, use it when API transcodings failed
+            if (resolvedStreamUrl == null && interceptedStream != null) {
+                val unwrappedIntercepted = if (interceptedStream.contains("/media/soundcloud:tracks:")) {
+                    resolveSoundCloudTranscodingEndpoint(interceptedStream) ?: interceptedStream
+                } else {
+                    interceptedStream
+                }
+                resolvedStreamUrl = unwrappedIntercepted
+                chosenExt = if (unwrappedIntercepted.contains(".opus") || unwrappedIntercepted.contains(".ogg")) ".ogg" else ".mp3"
+                isSnippedPreview = unwrappedIntercepted.contains("/preview/")
+            } else if (fallbackStreamUrl == null && interceptedStream != null && interceptedStream != resolvedStreamUrl) {
+                fallbackStreamUrl = interceptedStream
+            }
+
+            if (resolvedStreamUrl != null && !isSnippedPreview) {
+                return MusicTrackInfo(
+                    title = title,
+                    artist = artist,
+                    platform = "SoundCloud",
+                    sourceUrl = rawUrl,
+                    directAudioUrl = resolvedStreamUrl,
+                    fallbackAudioUrl = fallbackStreamUrl,
+                    containerExt = chosenExt,
+                    estimatedSizeBytes = 0L,
+                    mediaSource = "SoundCloud Official Stream",
+                    isPreview = false,
+                    durationSeconds = durationSec
+                )
+            }
+
+            // Attempt verified alternate-source lookup when SoundCloud stream is unavailable or snipped to a 30s preview
+            if ((allowAlternateSource || context != null) && title.isNotBlank() && title != "SoundCloud Track") {
+                val searchQueries = buildList {
+                    if (artist.isNotBlank() && !artist.equals("SoundCloud", ignoreCase = true) && !title.contains(artist, ignoreCase = true)) {
+                        add("$artist - $title")
+                    }
+                    add(title)
+                }
+                val ytFallback = YouTubeExtractor(context).searchAndExtractVerified(searchQueries) { candidate ->
+                    verifyAlternateMatch(
+                        expectedTitle = title,
+                        expectedArtist = artist,
+                        expectedDurationSec = durationSec,
+                        candidateTitle = candidate.title,
+                        candidateAuthor = candidate.author,
+                        candidateDurationSec = candidate.duration
+                    )
+                }
+                if (ytFallback != null) {
+                    val bestYtAudio = ytFallback.formats.filter { it.isAudioOnly }.maxByOrNull { it.audioBitrate ?: 0 }
+                        ?: ytFallback.formats.firstOrNull()
+                    if (bestYtAudio != null) {
+                        return MusicTrackInfo(
+                            title = title,
+                            artist = artist,
+                            platform = "SoundCloud",
+                            sourceUrl = rawUrl,
+                            directAudioUrl = bestYtAudio.url,
+                            fallbackAudioUrl = resolvedStreamUrl,
+                            containerExt = ".m4a",
+                            estimatedSizeBytes = bestYtAudio.fileSize ?: 0L,
+                            mediaSource = "YouTube Alternate Match (Verified)",
+                            isPreview = false,
+                            durationSeconds = if (ytFallback.duration > 18_000L) ytFallback.duration / 1000L else ytFallback.duration,
+                            alternateMatchVerified = true
+                        )
+                    }
+                }
             }
 
             if (resolvedStreamUrl != null) {
@@ -879,39 +1165,6 @@ class MusicDownloadManager(
                     isPreview = isSnippedPreview,
                     durationSeconds = durationSec
                 )
-            }
-
-            // Attempt verified alternate-source lookup when opted in (or on real Android device when SoundCloud blocks direct transcodings)
-            if (allowAlternateSource || context != null) {
-                val ytFallback = YouTubeExtractor(context).searchAndExtract("$artist - $title")
-                if (ytFallback != null &&
-                    verifyAlternateMatch(
-                        expectedTitle = title,
-                        expectedArtist = artist,
-                        expectedDurationSec = durationSec,
-                        candidateTitle = ytFallback.title,
-                        candidateAuthor = ytFallback.author,
-                        candidateDurationSec = ytFallback.duration
-                    )
-                ) {
-                    val bestYtAudio = ytFallback.formats.filter { it.isAudioOnly }.maxByOrNull { it.audioBitrate ?: 0 }
-                        ?: ytFallback.formats.firstOrNull()
-                    if (bestYtAudio != null) {
-                        return MusicTrackInfo(
-                            title = title,
-                            artist = artist,
-                            platform = "SoundCloud",
-                            sourceUrl = rawUrl,
-                            directAudioUrl = bestYtAudio.url,
-                            containerExt = ".m4a",
-                            estimatedSizeBytes = bestYtAudio.fileSize ?: 0L,
-                            mediaSource = "YouTube Alternate Match (Verified)",
-                            isPreview = false,
-                            durationSeconds = ytFallback.duration,
-                            alternateMatchVerified = true
-                        )
-                    }
-                }
             }
 
             MusicTrackInfo(
@@ -1000,12 +1253,11 @@ class MusicDownloadManager(
 
     private fun extractInlineSoundCloudClientId(text: String): String? {
         val patterns = listOf(
-            Regex("""client_id\s*:\s*"([a-zA-Z0-9]{32})""""),
-            Regex(""""client_id"\s*:\s*"([a-zA-Z0-9]{32})""""),
-            Regex("""client_id="([a-zA-Z0-9]{32})""""),
-            Regex("""client_id=([a-zA-Z0-9]{32})(?:[&"'\s]|$)"""),
-            Regex("""clientId\s*:\s*"([a-zA-Z0-9]{32})""""),
-            Regex(""""clientId"\s*:\s*"([a-zA-Z0-9]{32})"""")
+            Regex("""client_id\s*:\s*["']([a-zA-Z0-9]{32})["']"""),
+            Regex("""["']client_id["']\s*:\s*["']([a-zA-Z0-9]{32})["']"""),
+            Regex("""client_id=["']?([a-zA-Z0-9]{32})(?:[&"'\s]|$)"""),
+            Regex("""clientId\s*:\s*["']([a-zA-Z0-9]{32})["']"""),
+            Regex("""["']clientId["']\s*:\s*["']([a-zA-Z0-9]{32})["']""")
         )
         for (p in patterns) {
             val id = p.find(text)?.groupValues?.getOrNull(1)
@@ -1381,17 +1633,14 @@ class MusicDownloadManager(
         val mime = MediaAssetHelper.getMimeTypeForFilename("track$ext", isVideo = false)
 
         val rawInputName = downloadItem.filename.trim()
-        val isGenericName = rawInputName.isBlank() ||
-            rawInputName.equals("watch", ignoreCase = true) ||
-            rawInputName.startsWith("download_") ||
-            rawInputName.startsWith("Audio_Track")
+        val isGenericName = isGenericPlaceholderFilename(rawInputName)
 
         val decodedSlug = FilenameResolver.decodePercentPreservingPlus(
             validUrl.substringBefore("?").trimEnd('/').substringAfterLast("/")
         )
 
         val fallbackTitle = cachedTrackInfo?.title
-            ?: decodedSlug.substringBeforeLast(".").takeIf { it.isNotBlank() && it != "watch" }
+            ?: decodedSlug.substringBeforeLast(".").takeIf { !isGenericPlaceholderFilename(it) }
             ?: "Audio_Track_${System.currentTimeMillis()}"
 
         val rawCandidate = if (isGenericName) fallbackTitle else rawInputName.substringBeforeLast(".")
@@ -1492,13 +1741,18 @@ class MusicDownloadManager(
             var activeItem = repository.getDownloadById(downloadItem.id) ?: downloadItem
             var targetFilename = activeItem.filename
             if (info != null) {
-                val cleanTitle = FilenameResolver.sanitizeSingleFilename(info.title, fallback = "").trim()
+                val combinedTitle = if (info.artist.isNotBlank() &&
+                    !info.artist.equals(info.platform, ignoreCase = true) &&
+                    !info.title.contains(info.artist, ignoreCase = true)
+                ) {
+                    "${info.artist} - ${info.title}"
+                } else {
+                    info.title
+                }
+                val cleanTitle = FilenameResolver.sanitizeSingleFilename(combinedTitle, fallback = "").trim()
                 val ext = info.containerExt ?: "." + targetFilename.substringAfterLast(".", "mp3")
-                if (cleanTitle.isNotBlank() &&
-                    (targetFilename.startsWith("Audio_Track") ||
-                        targetFilename.startsWith("watch") ||
-                        targetFilename.startsWith("download_") ||
-                        targetFilename.substringBeforeLast(".").length == 22)
+                if (cleanTitle.isNotBlank() && !cleanTitle.equals("SoundCloud Track", ignoreCase = true) &&
+                    isGenericPlaceholderFilename(targetFilename)
                 ) {
                     targetFilename = if (cleanTitle.lowercase(Locale.US).endsWith(ext)) cleanTitle else "$cleanTitle$ext"
                 } else if (info.containerExt != null && !targetFilename.lowercase(Locale.US).endsWith(info.containerExt)) {
@@ -1523,8 +1777,10 @@ class MusicDownloadManager(
                 if (info?.platform == "SoundCloud" || info?.isPreview == true) {
                     info?.fallbackAudioUrl?.let { add(it) }
                 }
+                getInterceptedSoundCloudStream(lookupUrl)?.let { add(it) }
                 if (isEmpty() && directUrl != null && !VideoDownloadManager.isWatchPageUrl(directUrl) &&
-                    !isSoundCloudUrl(directUrl) && !isSpotifyUrl(directUrl)
+                    (!isSoundCloudUrl(directUrl) || directUrl.contains("sndcdn.com") || directUrl.contains("/media/soundcloud:tracks:")) &&
+                    !isSpotifyUrl(directUrl)
                 ) {
                     add(directUrl)
                 }
@@ -1593,19 +1849,25 @@ class MusicDownloadManager(
                 if ((!downloadedOk || !tempRawFile.exists() || tempRawFile.length() <= 0L) &&
                     isSoundCloudUrl(lookupUrl) && (allowAlternate || context != null) && info != null
                 ) {
+                    val searchQueries = buildList {
+                        if (info.artist.isNotBlank() && !info.artist.equals("SoundCloud", ignoreCase = true) && !info.title.contains(info.artist, ignoreCase = true)) {
+                            add("${info.artist} - ${info.title}")
+                        }
+                        add(info.title)
+                    }
                     val ytFallback = runCatching {
-                        YouTubeExtractor(context).searchAndExtract("${info.artist} - ${info.title}")
+                        YouTubeExtractor(context).searchAndExtractVerified(searchQueries) { candidate ->
+                            verifyAlternateMatch(
+                                expectedTitle = info.title,
+                                expectedArtist = info.artist,
+                                expectedDurationSec = info.durationSeconds,
+                                candidateTitle = candidate.title,
+                                candidateAuthor = candidate.author,
+                                candidateDurationSec = candidate.duration
+                            )
+                        }
                     }.getOrNull()
-                    if (ytFallback != null &&
-                        verifyAlternateMatch(
-                            expectedTitle = info.title,
-                            expectedArtist = info.artist,
-                            expectedDurationSec = info.durationSeconds,
-                            candidateTitle = ytFallback.title,
-                            candidateAuthor = ytFallback.author,
-                            candidateDurationSec = ytFallback.duration
-                        )
-                    ) {
+                    if (ytFallback != null) {
                         val bestYtAudio = ytFallback.formats.filter { it.isAudioOnly }.maxByOrNull { it.audioBitrate ?: 0 }
                             ?: ytFallback.formats.firstOrNull()
                         if (bestYtAudio != null) {

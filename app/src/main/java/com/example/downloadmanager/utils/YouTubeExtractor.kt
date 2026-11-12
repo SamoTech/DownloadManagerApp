@@ -210,6 +210,30 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
         return null
     }
 
+    /**
+     * Searches YouTube across [queries] and returns the first candidate with playable formats
+     * that satisfies [verifier] (checking up to 5 video IDs per query).
+     */
+    fun searchAndExtractVerified(
+        queries: List<String>,
+        verifier: (YouTubeVideoInfo) -> Boolean
+    ): YouTubeVideoInfo? {
+        val triedVideoIds = LinkedHashSet<String>()
+        for (rawQuery in queries) {
+            val q = rawQuery.trim()
+            if (q.isEmpty()) continue
+            val ids = searchVideoIds(q, maxResults = 5)
+            for (videoId in ids) {
+                if (!triedVideoIds.add(videoId)) continue
+                val info = extract("https://www.youtube.com/watch?v=$videoId")
+                if (info != null && info.formats.isNotEmpty() && verifier(info)) {
+                    return info
+                }
+            }
+        }
+        return null
+    }
+
     private fun fetchVisitorData(videoId: String): String? {
         return try {
             val req = Request.Builder()
