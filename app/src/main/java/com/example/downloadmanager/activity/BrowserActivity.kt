@@ -66,7 +66,9 @@ class BrowserActivity : AppCompatActivity() {
     private lateinit var videoDownloadManager: VideoDownloadManager
 
     private val detectedLinks = Collections.synchronizedList(mutableListOf<DetectedLinkItem>())
+    @Volatile
     private var currentUrl: String = ""
+    @Volatile
     private var currentPageTitle: String = ""
     private var lastScannedUrl: String = ""
     private var activeScanJob: Job? = null
@@ -719,7 +721,7 @@ class BrowserActivity : AppCompatActivity() {
                     if (deadView != null && parentGroup != null) {
                         parentGroup.removeView(deadView)
                         runCatching { deadView.destroy() }
-                        val replacement = WebView(applicationContext)
+                        val replacement = WebView(this@BrowserActivity)
                         if (layoutParams != null) {
                             replacement.layoutParams = layoutParams
                         }
@@ -830,7 +832,8 @@ class BrowserActivity : AppCompatActivity() {
         binding.btnScanPage.setOnClickListener {
             extractDomMediaAndLinksFromWebView()
             scanCurrentPageAsync(currentUrl, force = true)
-            if (detectedLinks.isNotEmpty()) {
+            val hasLinks = synchronized(detectedLinks) { detectedLinks.isNotEmpty() }
+            if (hasLinks) {
                 showDetectedLinksBottomSheet()
             } else {
                 Toast.makeText(this, "Scanning current page for audio, video, and files...", Toast.LENGTH_SHORT).show()
@@ -976,7 +979,8 @@ class BrowserActivity : AppCompatActivity() {
         if (!force && targetUrl == lastScannedUrl && activeScanJob?.isActive == true) {
             return
         }
-        if (!force && targetUrl == lastScannedUrl && detectedLinks.isNotEmpty()) {
+        val hasLinksForLastUrl = synchronized(detectedLinks) { detectedLinks.isNotEmpty() }
+        if (!force && targetUrl == lastScannedUrl && hasLinksForLastUrl) {
             return
         }
         lastScannedUrl = targetUrl

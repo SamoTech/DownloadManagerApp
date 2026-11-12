@@ -437,14 +437,32 @@ object MediaAssetHelper {
             val read = FileInputStream(file).use { it.read(buf) }
             if (read < 64) return
 
-            // Do not touch MP4, WebM, Ogg, FLAC, or WAV files
+            // Do not touch MP4, WebM/MKV, Ogg, FLAC, WAV/AVI, FLV, AMR, AC-3, MPEG-PS, MPEG-TS, ASF/WMA, or ADTS AAC files
             val boxType = if (read >= 8) String(buf, 4, 4, Charsets.ISO_8859_1) else ""
-            if (boxType in setOf("ftyp", "moov", "moof", "styp", "sidx") ||
+            val isAsfWma = buf[0] == 0x30.toByte() && buf[1] == 0x26.toByte() &&
+                buf[2] == 0xB2.toByte() && buf[3] == 0x75.toByte()
+            val isFlv = buf[0] == 'F'.code.toByte() && buf[1] == 'L'.code.toByte() &&
+                buf[2] == 'V'.code.toByte() && buf[3] == 0x01.toByte()
+            val isAmr = buf[0] == '#'.code.toByte() && buf[1] == '!'.code.toByte() &&
+                buf[2] == 'A'.code.toByte() && buf[3] == 'M'.code.toByte() && buf[4] == 'R'.code.toByte()
+            val isAc3 = buf[0] == 0x0B.toByte() && buf[1] == 0x77.toByte()
+            val isMpegPs = buf[0] == 0x00.toByte() && buf[1] == 0x00.toByte() &&
+                buf[2] == 0x01.toByte() && buf[3] == 0xBA.toByte()
+            val isMpegTs = read >= 377 && buf[0] == 0x47.toByte() &&
+                buf[188] == 0x47.toByte() && buf[376] == 0x47.toByte()
+            if (boxType in setOf("ftyp", "moov", "moof", "styp", "sidx", "wide", "free", "skip", "mdat", "pdin", "uuid") ||
                 (buf[0] == 0x1A.toByte() && buf[1] == 0x45.toByte()) ||
                 (buf[0] == 'O'.code.toByte() && buf[1] == 'g'.code.toByte()) ||
                 (buf[0] == 'f'.code.toByte() && buf[1] == 'L'.code.toByte()) ||
-                (buf[0] == 'R'.code.toByte() && buf[1] == 'I'.code.toByte())
+                (buf[0] == 'R'.code.toByte() && buf[1] == 'I'.code.toByte()) ||
+                isAsfWma || isFlv || isAmr || isAc3 || isMpegPs || isMpegTs
             ) {
+                return
+            }
+
+            // Skip ADTS AAC streams (with or without leading ID3v2 tags) so payload bytes are never misidentified as MP3 frames
+            val postId3 = stripLeadingId3Tags(buf, read)
+            if (postId3 in 0 until (read - 7) && isValidAdtsFrameSync(buf, postId3, read)) {
                 return
             }
 
@@ -536,12 +554,21 @@ object MediaAssetHelper {
         return when (ext) {
             "mp4", "m4v", "mov", "3gp" -> "video/mp4"
             "webm" -> if (isVideo) "video/webm" else "audio/webm"
-            "mkv" -> "video/x-matroska"
+            "mkv" -> if (isVideo) "video/x-matroska" else "audio/x-matroska"
+            "avi" -> "video/x-msvideo"
+            "flv" -> "video/x-flv"
+            "wmv" -> "video/x-ms-wmv"
+            "ts" -> if (isVideo) "video/mp2t" else "audio/mp2t"
+            "mpeg", "mpg" -> "video/mpeg"
             "mp3" -> "audio/mpeg"
             "flac" -> "audio/flac"
-            "m4a", "aac" -> "audio/mp4"
+            "m4a" -> "audio/mp4"
+            "aac" -> "audio/aac"
             "ogg", "opus", "weba" -> "audio/ogg"
             "wav" -> "audio/wav"
+            "wma" -> "audio/x-ms-wma"
+            "amr" -> "audio/amr"
+            "ac3", "eac3" -> "audio/ac3"
             "pdf" -> "application/pdf"
             "jpg", "jpeg" -> "image/jpeg"
             "png" -> "image/png"
@@ -551,6 +578,27 @@ object MediaAssetHelper {
             "zip" -> "application/zip"
             "apk" -> "application/vnd.android.package-archive"
             else -> if (isVideo) "video/mp4" else "audio/mpeg"
+        }
+    }
+
+    fun preferredExtensionForMime(mime: String?): String? {
+        return when (mime?.lowercase()) {
+            "audio/mp4" -> ".m4a"
+            "video/mp4" -> ".mp4"
+            "audio/webm", "video/webm" -> ".webm"
+            "audio/x-matroska", "video/x-matroska" -> ".mkv"
+            "audio/flac" -> ".flac"
+            "audio/ogg" -> ".ogg"
+            "audio/wav" -> ".wav"
+            "audio/mpeg" -> ".mp3"
+            "audio/aac" -> ".aac"
+            "audio/amr" -> ".amr"
+            "audio/ac3" -> ".ac3"
+            "video/mp2t", "audio/mp2t" -> ".ts"
+            "video/x-msvideo" -> ".avi"
+            "video/x-flv" -> ".flv"
+            "video/mpeg" -> ".mpeg"
+            else -> null
         }
     }
 
@@ -576,11 +624,19 @@ object MediaAssetHelper {
             "webm" -> "video/webm"
             "mkv" -> "video/x-matroska"
             "avi" -> "video/x-msvideo"
+            "flv" -> "video/x-flv"
+            "wmv" -> "video/x-ms-wmv"
+            "ts" -> "video/mp2t"
+            "mpeg", "mpg" -> "video/mpeg"
             "mp3" -> "audio/mpeg"
             "flac" -> "audio/flac"
-            "m4a", "aac" -> "audio/mp4"
+            "m4a" -> "audio/mp4"
+            "aac" -> "audio/aac"
             "ogg", "opus", "weba" -> "audio/ogg"
             "wav" -> "audio/wav"
+            "wma" -> "audio/x-ms-wma"
+            "amr" -> "audio/amr"
+            "ac3", "eac3" -> "audio/ac3"
             else -> fallbackMime?.takeIf {
                 it.isNotBlank() && it != "application/x-bittorrent" && it != "application/octet-stream"
             } ?: "application/octet-stream"
@@ -622,7 +678,7 @@ object MediaAssetHelper {
         if (!marker.exists()) return true
         val content = runCatching { marker.readText(Charsets.UTF_8).trim() }.getOrDefault("")
         if (content.startsWith("job:") && jobId > 0L) {
-            return content.startsWith("job:$jobId|")
+            return content.substringBefore("|") == "job:$jobId"
         }
         return true
     }

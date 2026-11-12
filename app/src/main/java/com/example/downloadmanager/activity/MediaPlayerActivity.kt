@@ -463,6 +463,7 @@ class MediaPlayerActivity : AppCompatActivity() {
         // so DefaultExtractorsFactory sniffs the exact header bytes (MP4, fMP4, MPEG-TS, WebM, MKV, MP3, ADTS, FLAC, OGG, WAV)
         val mediaItem = MediaItem.fromUri(Uri.fromFile(file))
         player.setMediaItem(mediaItem)
+        player.setPlaybackSpeed(currentSpeed)
         player.prepare()
         player.playWhenReady = true
     }
@@ -600,8 +601,8 @@ class MediaPlayerActivity : AppCompatActivity() {
                 return@launch
             }
 
-            // If DASH M4A container needs remuxing, try non-destructive remux of the real file once
-            if (!hasRepairedCurrentFile && file.exists() &&
+            // If DASH M4A audio container needs remuxing, try non-destructive remux once (never strip video tracks)
+            if (!hasRepairedCurrentFile && !currentIsVideo && file.exists() &&
                 (detectedMime == "audio/mp4" || detectedMime == "video/mp4")
             ) {
                 hasRepairedCurrentFile = true
@@ -618,6 +619,7 @@ class MediaPlayerActivity : AppCompatActivity() {
             }
 
             updateMediaTitles(currentTitle, "Playback error: unsupported or corrupted media stream")
+            binding.btnPlayPause.setImageResource(R.drawable.ic_play)
             Toast.makeText(this@MediaPlayerActivity, R.string.error_open_file, Toast.LENGTH_SHORT).show()
         }
     }
@@ -636,6 +638,9 @@ class MediaPlayerActivity : AppCompatActivity() {
 
             vv.setOnPreparedListener { mp ->
                 isUsingPlatformVideoPlayer = true
+                if (currentSpeed != 1.0f) {
+                    runCatching { mp.playbackParams = mp.playbackParams.setSpeed(currentSpeed) }
+                }
                 binding.tvTotalTime.text = formatTime(mp.duration.toLong().coerceAtLeast(1L))
                 binding.btnPlayPause.setImageResource(R.drawable.ic_pause)
                 vv.start()
@@ -647,6 +652,12 @@ class MediaPlayerActivity : AppCompatActivity() {
             vv.setOnErrorListener { _, _, _ ->
                 isUsingPlatformVideoPlayer = false
                 vv.visibility = View.GONE
+                if (!startPlatformAudioPlayer(file)) {
+                    binding.audioContainer.visibility = View.VISIBLE
+                    binding.btnPlayPause.setImageResource(R.drawable.ic_play)
+                    updateMediaTitles(currentTitle, "Playback error: unsupported video codec")
+                    Toast.makeText(this@MediaPlayerActivity, R.string.error_open_file, Toast.LENGTH_SHORT).show()
+                }
                 true
             }
             vv.setVideoURI(Uri.fromFile(file))
@@ -674,6 +685,9 @@ class MediaPlayerActivity : AppCompatActivity() {
             )
             mp.setDataSource(file.absolutePath)
             mp.prepare()
+            if (currentSpeed != 1.0f) {
+                runCatching { mp.playbackParams = mp.playbackParams.setSpeed(currentSpeed) }
+            }
             mp.start()
             mp.setOnCompletionListener {
                 binding.btnPlayPause.setImageResource(R.drawable.ic_play)
@@ -693,6 +707,10 @@ class MediaPlayerActivity : AppCompatActivity() {
 
     private fun setupControls() {
         binding.btnPlayPause.setOnClickListener {
+            if (currentMediaFile == null) {
+                Toast.makeText(this, "No completed media loaded", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
             if (isUsingPlatformVideoPlayer) {
                 val vv = binding.platformVideoView
                 if (vv.isPlaying) {
@@ -865,6 +883,7 @@ class MediaPlayerActivity : AppCompatActivity() {
                 platformAudioPlayer?.pause()
             }
         }
+        binding.btnPlayPause.setImageResource(R.drawable.ic_play)
     }
 
     override fun onDestroy() {

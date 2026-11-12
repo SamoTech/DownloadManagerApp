@@ -90,7 +90,7 @@ class MusicDownloadManager(
         private val interceptedSoundCloudStreams = ConcurrentHashMap<String, String>()
 
         @Volatile
-        private var latestInterceptedSoundCloudStream: Pair<String, Long>? = null
+        private var latestInterceptedSoundCloudStream: Triple<String?, String, Long>? = null
 
         fun updateSoundCloudClientId(clientId: String?) {
             val clean = clientId?.trim().orEmpty()
@@ -121,8 +121,8 @@ class MusicDownloadManager(
                     ((lower.contains("api-v2.soundcloud.com") || lower.contains("api-mobi.soundcloud.com")) && lower.contains("/media/soundcloud:tracks:"))
             if (!isPlayableStreamOrTranscoding) return
 
-            latestInterceptedSoundCloudStream = trimmedStream to System.currentTimeMillis()
             val normKey = normalizeSoundCloudPageKey(pageUrl)
+            latestInterceptedSoundCloudStream = Triple(normKey, trimmedStream, System.currentTimeMillis())
             if (normKey != null) {
                 interceptedSoundCloudStreams[normKey] = trimmedStream
             }
@@ -134,8 +134,12 @@ class MusicDownloadManager(
                 interceptedSoundCloudStreams[normKey]?.let { return it }
             }
             val latest = latestInterceptedSoundCloudStream
-            if (latest != null && System.currentTimeMillis() - latest.second < 10 * 60 * 1000L) {
-                return latest.first
+            if (latest != null && System.currentTimeMillis() - latest.third < 10 * 60 * 1000L) {
+                // Only fall back to latest intercepted stream if caller passed no specific track URL,
+                // or the latest stream wasn't scoped to a different SoundCloud track.
+                if (normKey == null || latest.first == null || latest.first == normKey) {
+                    return latest.second
+                }
             }
             return null
         }
@@ -1904,15 +1908,7 @@ class MusicDownloadManager(
                 // Align filename extension and quality label with the true container magic bytes
                 val detectedMime = MediaAssetHelper.detectActualMimeType(tempRawFile, fallbackIsVideo = false)
                     ?: throw IOException("Downloaded file is not a recognized playable audio container")
-                val trueExt = when (detectedMime) {
-                    "audio/mp4", "video/mp4" -> ".m4a"
-                    "audio/webm", "video/webm" -> ".webm"
-                    "audio/flac" -> ".flac"
-                    "audio/ogg" -> ".ogg"
-                    "audio/wav" -> ".wav"
-                    "audio/mpeg" -> ".mp3"
-                    else -> null
-                }
+                val trueExt = MediaAssetHelper.preferredExtensionForMime(detectedMime)
                 if (trueExt != null && !targetFilename.lowercase(Locale.US).endsWith(trueExt)) {
                     targetFilename = targetFilename.substringBeforeLast(".") + trueExt
                 }

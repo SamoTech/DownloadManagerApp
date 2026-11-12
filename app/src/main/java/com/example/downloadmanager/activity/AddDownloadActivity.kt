@@ -224,12 +224,24 @@ class AddDownloadActivity : AppCompatActivity() {
     }
 
     private fun applyDefaultFormatPreferences(prefs: android.content.SharedPreferences) {
-        when (prefs.getString("default_video_quality", "best")) {
-            "high" -> binding.rbHighQuality.isChecked = true
-            "medium" -> binding.rbMediumQuality.isChecked = true
-            "low" -> binding.rbLowQuality.isChecked = true
-            "audio" -> binding.rbAudioOnly.isChecked = true
-            else -> binding.rbBestQuality.isChecked = true
+        val extractAudioDefault = prefs.getBoolean("extract_audio_default", false)
+        if (extractAudioDefault) {
+            binding.rbAudioOnly.isChecked = true
+            binding.cbExtractAudio.isChecked = true
+        } else {
+            when (prefs.getString("default_video_quality", "best")) {
+                "high" -> binding.rbHighQuality.isChecked = true
+                "medium" -> binding.rbMediumQuality.isChecked = true
+                "low" -> binding.rbLowQuality.isChecked = true
+                "audio" -> {
+                    binding.rbAudioOnly.isChecked = true
+                    binding.cbExtractAudio.isChecked = true
+                }
+                else -> {
+                    binding.rbBestQuality.isChecked = true
+                    binding.cbExtractAudio.isChecked = false
+                }
+            }
         }
         when (prefs.getString("default_music_format", "mp3_320")) {
             "mp3_192" -> binding.rbMusicMp3192.isChecked = true
@@ -370,11 +382,13 @@ class AddDownloadActivity : AppCompatActivity() {
         binding.cbExtractAudio.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked && !binding.rbAudioOnly.isChecked) {
                 binding.rbAudioOnly.isChecked = true
+            } else if (!isChecked && binding.rbAudioOnly.isChecked) {
+                binding.rbBestQuality.isChecked = true
             }
         }
         binding.rbAudioOnly.setOnCheckedChangeListener { _, isChecked ->
-            if (isChecked && !binding.cbExtractAudio.isChecked) {
-                binding.cbExtractAudio.isChecked = true
+            if (binding.cbExtractAudio.isChecked != isChecked) {
+                binding.cbExtractAudio.isChecked = isChecked
             }
         }
 

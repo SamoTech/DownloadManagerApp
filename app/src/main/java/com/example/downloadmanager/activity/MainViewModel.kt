@@ -134,7 +134,7 @@ class MainViewModel(val repository: DownloadRepository) : ViewModel() {
                         if (target.isDirectory) {
                             val marker = java.io.File(target, com.example.downloadmanager.utils.TorrentPathSafety.TORRENT_IDENTITY_MARKER)
                             val ownedByJob = !marker.exists() ||
-                                runCatching { marker.readText(Charsets.UTF_8).trim().startsWith("job:${it.id}|") }.getOrDefault(false)
+                                runCatching { marker.readText(Charsets.UTF_8).trim().substringBefore("|") == "job:${it.id}" }.getOrDefault(false)
                             if (ownedByJob) {
                                 target.deleteRecursively()
                             }

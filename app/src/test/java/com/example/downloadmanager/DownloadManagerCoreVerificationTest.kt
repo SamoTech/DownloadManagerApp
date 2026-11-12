@@ -2757,6 +2757,89 @@ class DownloadManagerCoreVerificationTest {
         }
     }
 
+    @Test
+    fun verify_v18_audit_fixes_hashlessOwnership_codecSafety_webmMuxSelection_soundCloudIsolation() {
+        val tempRoot = Files.createTempDirectory("luca_audit_v18_").toFile()
+        try {
+            // 1. Hashless job ownership ("job:<id>" without "|hash:...")
+            val torrentRoot = File(tempRoot, "MyRelease").apply { mkdirs() }
+            val payloadFile = File(torrentRoot, "video.mp4").apply { writeBytes(ByteArray(32)) }
+            File(torrentRoot, TorrentPathSafety.TORRENT_IDENTITY_MARKER).writeText("job:7")
+
+            val ownerItem = DownloadItem(
+                id = 7L,
+                url = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                filename = "MyRelease",
+                savePath = tempRoot.absolutePath,
+                downloadType = DownloadType.MAGNET,
+                status = DownloadStatus.COMPLETED
+            )
+            val resolvedOwn = MediaAssetHelper.resolveTargetFileForOpenOrShare(ownerItem)
+            assertEquals("Owner job 7 must resolve file inside hashless 'job:7' directory", payloadFile.canonicalPath, resolvedOwn?.canonicalPath)
+
+            val otherItem = ownerItem.copy(id = 70L)
+            assertNull("Job 70 must NOT read inside directory owned by 'job:7'", MediaAssetHelper.resolveTargetFileForOpenOrShare(otherItem))
+
+            // 2. Expanded codec MIME mappings & preferred extensions
+            assertEquals("video/x-flv", MediaAssetHelper.getMimeTypeForFilename("clip.flv", isVideo = true))
+            assertEquals("video/x-ms-wmv", MediaAssetHelper.getMimeTypeForFilename("clip.wmv", isVideo = true))
+            assertEquals("video/mp2t", MediaAssetHelper.getMimeTypeForFilename("seg.ts", isVideo = true))
+            assertEquals("audio/aac", MediaAssetHelper.getMimeTypeForFilename("track.aac", isVideo = false))
+            assertEquals("audio/amr", MediaAssetHelper.getMimeTypeForFilename("voice.amr", isVideo = false))
+            assertEquals("audio/ac3", MediaAssetHelper.getMimeTypeForFilename("surround.ac3", isVideo = false))
+            assertEquals("audio/x-ms-wma", MediaAssetHelper.getMimeTypeForFilename("song.wma", isVideo = false))
+            assertEquals(".aac", MediaAssetHelper.preferredExtensionForMime("audio/aac"))
+            assertEquals(".webm", MediaAssetHelper.preferredExtensionForMime("video/webm"))
+
+            // 3. ADTS AAC stream must NOT be trimmed by sanitizeMp3StreamIfNeeded even if payload contains 0xFF 0xFB bytes
+            val adtsFrame = ByteArray(100).apply {
+                this[0] = 0xFF.toByte()
+                this[1] = 0xF1.toByte() // ADTS MPEG-4 AAC, layer=00
+                this[2] = 0x50.toByte() // AAC-LC 44.1kHz
+                this[3] = 0x80.toByte()
+                this[4] = (100 shr 3).toByte() // frame_length = 100
+                this[5] = (((100 and 0x07) shl 5) or 0x1F).toByte()
+                this[6] = 0xFC.toByte()
+            }
+            val fakeMpegInsideAdts = adtsFrame.copyOf().apply {
+                // Inject 2 fake MP3 sync bytes spaced 417 bytes? Even simpler: two valid frames after frame 1
+                this[20] = 0xFF.toByte()
+                this[21] = 0xFB.toByte()
+                this[22] = 0x90.toByte()
+            }
+            val rawAdts = fakeMpegInsideAdts + adtsFrame + ByteArray(64)
+            val adtsFile = File(tempRoot, "stream.aac").apply { writeBytes(rawAdts) }
+            MediaAssetHelper.sanitizeMp3StreamIfNeeded(adtsFile)
+            assertArrayEquals("ADTS AAC stream must not be corrupted by MP3 sanitizer", rawAdts, adtsFile.readBytes())
+            assertEquals("audio/aac", MediaAssetHelper.detectActualMimeType(adtsFile, fallbackIsVideo = false))
+
+            // 4. WebM vs MP4 companion audio matching for adaptive muxing
+            val repo = com.example.downloadmanager.model.DownloadRepository(InMemoryDownloadDao())
+            val videoManager = com.example.downloadmanager.manager.VideoDownloadManager(null, repo)
+            val vp9Video = com.example.downloadmanager.model.VideoFormat("adaptive_248", "https://ex/v.webm", "1080p", container = "webm")
+            val avcVideo = com.example.downloadmanager.model.VideoFormat("adaptive_137", "https://ex/v.mp4", "1080p", container = "mp4")
+            val m4aAudio = com.example.downloadmanager.model.VideoFormat("audio_140", "https://ex/a.m4a", "128k", container = "m4a", isAudioOnly = true, audioBitrate = 128)
+            val opusAudio = com.example.downloadmanager.model.VideoFormat("audio_251", "https://ex/a.webm", "160k", container = "webm", isAudioOnly = true, audioBitrate = 160)
+            val allFormats = listOf(vp9Video, avcVideo, m4aAudio, opusAudio)
+
+            assertEquals(opusAudio, videoManager.selectCompanionAudioFormat(allFormats, vp9Video))
+            assertEquals(m4aAudio, videoManager.selectCompanionAudioFormat(allFormats, avcVideo))
+
+            // 5. SoundCloud intercepted stream isolation between distinct track URLs
+            val trackA = "https://soundcloud.com/artist-one/track-alpha"
+            val trackB = "https://soundcloud.com/artist-one/track-beta"
+            val streamA = "https://cf-hls-media.sndcdn.com/playlist/alpha.128.mp3/playlist.m3u8?Policy=A"
+            com.example.downloadmanager.manager.MusicDownloadManager.recordInterceptedSoundCloudStream(trackA, streamA)
+            assertEquals(streamA, com.example.downloadmanager.manager.MusicDownloadManager.getInterceptedSoundCloudStream(trackA))
+            assertNull(
+                "Track B must never inherit Track A's intercepted SoundCloud stream",
+                com.example.downloadmanager.manager.MusicDownloadManager.getInterceptedSoundCloudStream(trackB)
+            )
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
+
     private fun computeTorrentInfoHash(torrentBytes: ByteArray): ByteArray {
         return computeMultiFileTorrentInfoHash(torrentBytes)
     }

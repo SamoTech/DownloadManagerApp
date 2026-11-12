@@ -202,7 +202,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginHorizontal="20dp"
                     android:contentDescription="@string/resume"
-                    android:src="@drawable/ic_pause"
+                    android:src="@drawable/ic_play"
                     app:backgroundTint="@color/colorPrimary"
                     app:tint="@color/white" />
 

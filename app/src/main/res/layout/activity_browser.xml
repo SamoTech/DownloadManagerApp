@@ -255,7 +255,7 @@
                 android:layout_weight="1"
                 android:ellipsize="end"
                 android:maxLines="1"
-                android:text="Luca v15.0 (Build 15) • Ready"
+                android:text="Luca v18.0 (Build 18) • Ready"
                 android:textColor="#94A3B8"
                 android:textSize="12sp" />
 

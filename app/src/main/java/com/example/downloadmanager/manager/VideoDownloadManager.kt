@@ -1618,6 +1618,30 @@ class VideoDownloadManager(
         }
     }
 
+    internal fun selectCompanionAudioFormat(
+        formats: List<VideoFormat>,
+        videoFormat: VideoFormat
+    ): VideoFormat? {
+        val audioFormats = formats.filter { it.isAudioOnly }
+        if (audioFormats.isEmpty()) return null
+        val wantWebmAudio = videoFormat.container.equals("webm", ignoreCase = true)
+        return audioFormats
+            .filter {
+                if (wantWebmAudio) {
+                    it.container.equals("webm", ignoreCase = true) ||
+                        it.container.equals("ogg", ignoreCase = true)
+                } else {
+                    it.container.equals("m4a", ignoreCase = true) ||
+                        it.container.equals("mp4", ignoreCase = true)
+                }
+            }
+            .maxByOrNull { it.audioBitrate ?: 0 }
+            ?: audioFormats
+                .filter { it.container.equals("m4a", ignoreCase = true) || it.container.equals("mp4", ignoreCase = true) }
+                .maxByOrNull { it.audioBitrate ?: 0 }
+            ?: audioFormats.maxByOrNull { it.audioBitrate ?: 0 }
+    }
+
     fun downloadVideo(
         downloadItem: DownloadItem,
         onProgress: (Long, Long, Int, Long) -> Unit,
@@ -1798,20 +1822,9 @@ class VideoDownloadManager(
                         val videoStreamUrl = chosenFormat?.url ?: currentStreamUrl ?: lookupUrl
 
                         val isAdaptiveVideoOnly = chosenFormat?.formatId?.startsWith("adaptive_") == true
-                        val companionAudioFormat = if (isAdaptiveVideoOnly && streamInfo != null) {
-                            val wantWebmAudio = chosenFormat?.container == "webm"
-                            streamInfo?.formats
-                                ?.filter {
-                                    it.isAudioOnly && if (wantWebmAudio) {
-                                        it.container == "webm" || it.container == "ogg"
-                                    } else {
-                                        it.container == "m4a" || it.container == "mp4"
-                                    }
-                                }
-                                ?.maxByOrNull { it.audioBitrate ?: 0 }
-                                ?: streamInfo?.formats
-                                    ?.filter { it.isAudioOnly && (it.container == "m4a" || it.container == "mp4") }
-                                    ?.maxByOrNull { it.audioBitrate ?: 0 }
+                        val currentFormats = streamInfo?.formats
+                        val companionAudioFormat = if (isAdaptiveVideoOnly && chosenFormat != null && currentFormats != null) {
+                            selectCompanionAudioFormat(currentFormats, chosenFormat)
                         } else {
                             null
                         }
@@ -1895,10 +1908,7 @@ class VideoDownloadManager(
                                 continue
                             }
 
-                            val fallbackAudio = streamInfo?.formats
-                                ?.filter { it.isAudioOnly && (it.container == "m4a" || it.container == "mp4") }
-                                ?.maxByOrNull { it.audioBitrate ?: 0 }
-                                ?: streamInfo?.formats?.filter { it.isAudioOnly }?.maxByOrNull { it.audioBitrate ?: 0 }
+                            val allFormats = streamInfo?.formats.orEmpty()
 
                             for (cand in candidateFormats) {
                                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
@@ -1906,9 +1916,14 @@ class VideoDownloadManager(
                                 try {
                                     if (stagingTarget.exists()) stagingTarget.delete()
                                     val isCandAdaptiveOnly = cand.formatId.startsWith("adaptive_")
-                                    if (isCandAdaptiveOnly && fallbackAudio != null) {
+                                    val candidateAudio = if (isCandAdaptiveOnly) {
+                                        selectCompanionAudioFormat(allFormats, cand)
+                                    } else {
+                                        null
+                                    }
+                                    if (isCandAdaptiveOnly && candidateAudio != null) {
                                         val tmpVid = File(dir, ".tmp_fb_vid_${downloadItem.id}.${cand.container}")
-                                        val tmpAud = File(dir, ".tmp_fb_aud_${downloadItem.id}.${fallbackAudio.container}")
+                                        val tmpAud = File(dir, ".tmp_fb_aud_${downloadItem.id}.${candidateAudio.container}")
                                         try {
                                             val vOk = streamUrlToFile(
                                                 downloadId = downloadItem.id,
@@ -1919,9 +1934,9 @@ class VideoDownloadManager(
                                             )
                                             val aOk = vOk && streamUrlToFile(
                                                 downloadId = downloadItem.id,
-                                                streamUrl = fallbackAudio.url,
+                                                streamUrl = candidateAudio.url,
                                                 destFile = tmpAud,
-                                                expectedSize = fallbackAudio.fileSize ?: 0L
+                                                expectedSize = candidateAudio.fileSize ?: 0L
                                             ) { _, _, _, _ -> }
                                             if (aOk && MediaAssetHelper.muxMp4VideoAndM4aAudio(tmpVid, tmpAud, stagingTarget)) {
                                                 videoSuccess = true
@@ -1973,6 +1988,15 @@ class VideoDownloadManager(
                     if (!videoSuccess || !stagingTarget.exists() || stagingTarget.length() <= 0L) {
                         stagingTarget.delete()
                         throw lastError ?: IOException("Failed to download video stream from $lookupUrl")
+                    }
+                }
+
+                val prePromoteMime = MediaAssetHelper.detectActualMimeType(stagingTarget, fallbackIsVideo = !wantAudio)
+                val trueExt = MediaAssetHelper.preferredExtensionForMime(prePromoteMime)
+                if (trueExt != null && !targetFilename.lowercase(Locale.US).endsWith(trueExt)) {
+                    val base = if (targetFilename.contains('.')) targetFilename.substringBeforeLast('.') else targetFilename
+                    if (base.isNotBlank()) {
+                        targetFilename = "$base$trueExt"
                     }
                 }
 

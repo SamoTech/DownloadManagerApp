@@ -202,7 +202,7 @@
                     android:id="@+id/tvAppVersion"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Luca v16.0 (Build 16)"
+                    android:text="Luca v18.0 (Build 18)"
                     android:textColor="#38BDF8"
                     android:textSize="12sp"
                     android:textStyle="bold" />

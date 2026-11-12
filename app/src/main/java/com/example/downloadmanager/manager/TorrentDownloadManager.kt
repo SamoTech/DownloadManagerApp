@@ -181,11 +181,11 @@ class TorrentDownloadManager(
         return runCatching {
             val prefs = PreferenceManager.getDefaultSharedPreferences(ctx)
             if (prefs.contains("allow_third_party_torrent_resolvers")) {
-                prefs.getBoolean("allow_third_party_torrent_resolvers", true)
+                prefs.getBoolean("allow_third_party_torrent_resolvers", false)
             } else {
-                prefs.getBoolean("allow_third_party_resolvers", true)
+                prefs.getBoolean("allow_third_party_resolvers", false)
             }
-        }.getOrDefault(true)
+        }.getOrDefault(false)
     }
 
     /**
@@ -3276,7 +3276,7 @@ class TorrentDownloadManager(
                     val markerFile = File(folder, TorrentPathSafety.TORRENT_IDENTITY_MARKER)
                     val ownedByOtherJob = if (markerFile.exists()) {
                         val markerText = runCatching { markerFile.readText(StandardCharsets.UTF_8).trim() }.getOrDefault("")
-                        markerText.startsWith("job:") && !markerText.startsWith("job:${downloadItem.id}|")
+                        markerText.startsWith("job:") && markerText.substringBefore("|") != "job:${downloadItem.id}"
                     } else {
                         false
                     }

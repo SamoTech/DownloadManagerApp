@@ -653,7 +653,7 @@ class DownloadService : Service() {
                             val markerFile = File(target, com.example.downloadmanager.utils.TorrentPathSafety.TORRENT_IDENTITY_MARKER)
                             val ownedByOtherJob = if (markerFile.exists()) {
                                 val markerText = runCatching { markerFile.readText(Charsets.UTF_8).trim() }.getOrDefault("")
-                                markerText.startsWith("job:") && !markerText.startsWith("job:${item.id}|")
+                                markerText.startsWith("job:") && markerText.substringBefore("|") != "job:${item.id}"
                             } else {
                                 false
                             }
@@ -714,7 +714,7 @@ class DownloadService : Service() {
                             val markerFile = File(jobFolder, com.example.downloadmanager.utils.TorrentPathSafety.TORRENT_IDENTITY_MARKER)
                             val ownedByOtherJob = if (markerFile.exists()) {
                                 val markerText = runCatching { markerFile.readText(Charsets.UTF_8).trim() }.getOrDefault("")
-                                markerText.startsWith("job:") && !markerText.startsWith("job:${item.id}|")
+                                markerText.startsWith("job:") && markerText.substringBefore("|") != "job:${item.id}"
                             } else {
                                 false
                             }

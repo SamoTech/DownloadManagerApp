@@ -125,14 +125,10 @@ class DownloadAdapter(
                 DownloadType.MUSIC -> R.drawable.ic_music
                 DownloadType.MAGNET -> R.drawable.ic_torrent
                 DownloadType.DIRECT -> {
-                    val lower = downloadItem.filename.lowercase()
+                    val ext = downloadItem.filename.substringAfterLast(".", "").lowercase()
                     when {
-                        lower.endsWith(".mp3") || lower.endsWith(".flac") ||
-                            lower.endsWith(".wav") || lower.endsWith(".m4a") ||
-                            lower.endsWith(".aac") || lower.endsWith(".ogg") ||
-                            lower.endsWith(".opus") -> R.drawable.ic_music
-                        lower.endsWith(".mp4") || lower.endsWith(".webm") ||
-                            lower.endsWith(".mkv") -> R.drawable.ic_video
+                        ext in com.example.downloadmanager.utils.MediaAssetHelper.AUDIO_EXTENSIONS -> R.drawable.ic_music
+                        ext in com.example.downloadmanager.utils.MediaAssetHelper.VIDEO_EXTENSIONS -> R.drawable.ic_video
                         else -> R.drawable.ic_file
                     }
                 }
