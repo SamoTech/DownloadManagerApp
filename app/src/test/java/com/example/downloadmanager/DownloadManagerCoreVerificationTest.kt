@@ -12,7 +12,9 @@ import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
 import com.example.downloadmanager.model.DownloadType
+import com.example.downloadmanager.model.TorrentFileInfo
 import com.example.downloadmanager.model.TorrentFileState
+import com.example.downloadmanager.model.TorrentMetadata
 import com.example.downloadmanager.utils.FilenameResolver
 import com.example.downloadmanager.utils.HlsPlaylistParser
 import com.example.downloadmanager.utils.HttpRangeValidator
@@ -1493,9 +1495,9 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun phase7_activeTorrentSelectedFile_compactAndDictTrackers_andDistinctStatuses() = runBlocking {
-        // 0. Verify Luca Version 19.0 (Build 19)
-        assertEquals("19.0", BuildConfig.VERSION_NAME)
-        assertEquals(19, BuildConfig.VERSION_CODE)
+        // 0. Verify Luca Version 20.0 (Build 20)
+        assertEquals("20.0", BuildConfig.VERSION_NAME)
+        assertEquals(20, BuildConfig.VERSION_CODE)
 
         val tempRoot = createTempDirectory("phase7_torrent_trace").toFile()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -2750,8 +2752,8 @@ class DownloadManagerCoreVerificationTest {
             assertTrue(MediaAssetHelper.hasVideoTrack(tailMoovMp4))
             assertEquals("H.264 • AAC 44.1kHz Stereo", MediaAssetHelper.inspectMediaCodecSummary(tailMoovMp4, isVideo = true))
 
-            assertEquals(19, BuildConfig.VERSION_CODE)
-            assertEquals("19.0", BuildConfig.VERSION_NAME)
+            assertEquals(20, BuildConfig.VERSION_CODE)
+            assertEquals("20.0", BuildConfig.VERSION_NAME)
         } finally {
             try { peerServer.close() } catch (_: Exception) {}
             server.stop(0)
@@ -3444,6 +3446,358 @@ class DownloadManagerCoreVerificationTest {
         } finally {
             manager.shutdownSeeding()
             runCatching { server.stop(0) }
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun v20_torrentDownload_sparseStaleTrackerFallback_partialBitfieldAndTransientChoke_completesVerified() = runBlocking {
+        val tempRoot = createTempDirectory("v20_torrent_peer_fixes").toFile()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        // Two peer servers:
+        // - peerA sends BITFIELD for piece 0 ONLY, chokes transiently after block 0 of piece 0, then unchokes
+        // - peerB (discovered only via DHT XOR routing) has piece 1 ONLY
+        val peerA = ServerSocket(0, 10, java.net.InetAddress.getByName("127.0.0.1"))
+        val peerB = ServerSocket(0, 10, java.net.InetAddress.getByName("127.0.0.1"))
+        val dhtBootstrapUdp = java.net.DatagramSocket(0, java.net.InetAddress.getByName("127.0.0.1"))
+        val dhtClosestUdp = java.net.DatagramSocket(0, java.net.InetAddress.getByName("127.0.0.1"))
+        val dhtFarUdp = java.net.DatagramSocket(0, java.net.InetAddress.getByName("127.0.0.1"))
+
+        val stopFlag = java.util.concurrent.atomic.AtomicBoolean(false)
+        val peerARequestedInvalidPiece = java.util.concurrent.atomic.AtomicBoolean(false)
+        val peerAChokedCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+        // 2 pieces x 20 KB = 40 KB (each piece > 16 KB block so transient choke splits blocks inside piece 0)
+        val pieceLen = 20 * 1024
+        val payload = ByteArray(40 * 1024) { ((it * 31 + 11) and 0xFF).toByte() }
+        val sha1 = MessageDigest.getInstance("SHA-1")
+        val p0Hash = sha1.digest(payload.copyOfRange(0, pieceLen))
+        val p1Hash = sha1.digest(payload.copyOfRange(pieceLen, payload.size))
+        val hashes = p0Hash + p1Hash
+        val rawInfo = ByteArrayOutputStream().apply {
+            write("d6:lengthi${payload.size}e4:name12:v20_peer.bin12:piece lengthi${pieceLen}e6:pieces${hashes.size}:".toByteArray(StandardCharsets.US_ASCII))
+            write(hashes)
+            write("e".toByteArray(StandardCharsets.US_ASCII))
+        }.toByteArray()
+        val infoHashBytes = sha1.digest(rawInfo)
+        val infoHashHex = infoHashBytes.joinToString("") { "%02x".format(it) }
+
+        val threadA = Thread {
+            while (!stopFlag.get()) {
+                val sock = runCatching { peerA.accept() }.getOrNull() ?: break
+                Thread {
+                    runCatching {
+                        sock.use { s ->
+                            s.soTimeout = 4000
+                            val inp = java.io.DataInputStream(s.getInputStream())
+                            val out = java.io.DataOutputStream(s.getOutputStream())
+                            val pstrlen = inp.readUnsignedByte()
+                            val hs = ByteArray(pstrlen + 48)
+                            inp.readFully(hs)
+
+                            out.writeByte(19)
+                            out.write("BitTorrent protocol".toByteArray(StandardCharsets.US_ASCII))
+                            out.write(ByteArray(8).apply { this[7] = 0x05.toByte() })
+                            out.write(infoHashBytes)
+                            out.write("-PEERA0-000000000001".toByteArray(StandardCharsets.US_ASCII))
+                            // Partial BITFIELD: ONLY piece 0 (0x80), NOT piece 1
+                            out.writeInt(2)
+                            out.writeByte(5)
+                            out.writeByte(0x80)
+                            out.flush()
+
+                            var chokedOnce = false
+                            while (!stopFlag.get()) {
+                                val mLen = inp.readInt()
+                                if (mLen <= 0) continue
+                                val mId = inp.readUnsignedByte()
+                                when (mId) {
+                                    2 -> { // INTERESTED -> UNCHOKE
+                                        out.writeInt(1)
+                                        out.writeByte(1)
+                                        out.flush()
+                                    }
+                                    6 -> { // REQUEST
+                                        val idx = inp.readInt()
+                                        val begin = inp.readInt()
+                                        val len = inp.readInt()
+                                        if (idx != 0) {
+                                            peerARequestedInvalidPiece.set(true)
+                                            out.writeInt(13)
+                                            out.writeByte(16) // REJECT_REQUEST
+                                            out.writeInt(idx); out.writeInt(begin); out.writeInt(len)
+                                            out.flush()
+                                        } else {
+                                            val start = idx * pieceLen + begin
+                                            val slice = payload.copyOfRange(start, start + len)
+                                            out.writeInt(9 + slice.size)
+                                            out.writeByte(7)
+                                            out.writeInt(idx)
+                                            out.writeInt(begin)
+                                            out.write(slice)
+                                            if (begin == 0 && !chokedOnce) {
+                                                // Immediately follow block 0 with a transient CHOKE, then UNCHOKE after 120ms
+                                                chokedOnce = true
+                                                peerAChokedCount.incrementAndGet()
+                                                out.writeInt(1)
+                                                out.writeByte(0) // CHOKE
+                                                out.flush()
+                                                Thread.sleep(120L)
+                                                out.writeInt(1)
+                                                out.writeByte(1) // UNCHOKE
+                                            }
+                                            out.flush()
+                                        }
+                                    }
+                                    else -> if (mLen > 1) inp.skipBytes(mLen - 1)
+                                }
+                            }
+                        }
+                    }
+                }.start()
+            }
+        }.apply { isDaemon = true; start() }
+
+        val threadB = Thread {
+            while (!stopFlag.get()) {
+                val sock = runCatching { peerB.accept() }.getOrNull() ?: break
+                Thread {
+                    runCatching {
+                        sock.use { s ->
+                            s.soTimeout = 4000
+                            val inp = java.io.DataInputStream(s.getInputStream())
+                            val out = java.io.DataOutputStream(s.getOutputStream())
+                            val pstrlen = inp.readUnsignedByte()
+                            val hs = ByteArray(pstrlen + 48)
+                            inp.readFully(hs)
+
+                            out.writeByte(19)
+                            out.write("BitTorrent protocol".toByteArray(StandardCharsets.US_ASCII))
+                            out.write(ByteArray(8))
+                            out.write(infoHashBytes)
+                            out.write("-PEERB0-000000000002".toByteArray(StandardCharsets.US_ASCII))
+                            // Partial BITFIELD: ONLY piece 1 (0x40)
+                            out.writeInt(2)
+                            out.writeByte(5)
+                            out.writeByte(0x40)
+                            out.flush()
+
+                            while (!stopFlag.get()) {
+                                val mLen = inp.readInt()
+                                if (mLen <= 0) continue
+                                val mId = inp.readUnsignedByte()
+                                when (mId) {
+                                    2 -> {
+                                        out.writeInt(1)
+                                        out.writeByte(1)
+                                        out.flush()
+                                    }
+                                    6 -> {
+                                        val idx = inp.readInt()
+                                        val begin = inp.readInt()
+                                        val len = inp.readInt()
+                                        if (idx == 1) {
+                                            val start = idx * pieceLen + begin
+                                            val slice = payload.copyOfRange(start, start + len)
+                                            out.writeInt(9 + slice.size)
+                                            out.writeByte(7)
+                                            out.writeInt(idx)
+                                            out.writeInt(begin)
+                                            out.write(slice)
+                                            out.flush()
+                                        } else {
+                                            out.writeInt(13)
+                                            out.writeByte(16)
+                                            out.writeInt(idx); out.writeInt(begin); out.writeInt(len)
+                                            out.flush()
+                                        }
+                                    }
+                                    else -> if (mLen > 1) inp.skipBytes(mLen - 1)
+                                }
+                            }
+                        }
+                    }
+                }.start()
+            }
+        }.apply { isDaemon = true; start() }
+
+        // DHT bootstrap returns two nodes: a far node (XOR highest bit flipped) and a close node (exact prefix match -> peerB)
+        fun dhtNodeEntry(nodeId: ByteArray, port: Int): ByteArray =
+            nodeId + byteArrayOf(127, 0, 0, 1, ((port ushr 8) and 0xFF).toByte(), (port and 0xFF).toByte())
+
+        val closeNodeId = infoHashBytes.copyOf().apply { this[19] = (this[19].toInt() xor 0x01).toByte() }
+        val farNodeId = infoHashBytes.copyOf().apply { this[0] = (this[0].toInt() xor 0x80).toByte() }
+
+        val dhtBootstrapThread = Thread {
+            val buf = ByteArray(1024)
+            while (!stopFlag.get()) {
+                val pkt = java.net.DatagramPacket(buf, buf.size)
+                runCatching { dhtBootstrapUdp.receive(pkt) }.onSuccess {
+                    val nodesBytes = dhtNodeEntry(farNodeId, dhtFarUdp.localPort) +
+                        dhtNodeEntry(closeNodeId, dhtClosestUdp.localPort)
+                    val resp = ByteArrayOutputStream().apply {
+                        write("d1:rd2:id20:".toByteArray(StandardCharsets.ISO_8859_1))
+                        write(farNodeId)
+                        write("5:nodes${nodesBytes.size}:".toByteArray(StandardCharsets.ISO_8859_1))
+                        write(nodesBytes)
+                        write("e1:t2:aa1:y1:re".toByteArray(StandardCharsets.ISO_8859_1))
+                    }.toByteArray()
+                    dhtBootstrapUdp.send(java.net.DatagramPacket(resp, resp.size, pkt.address, pkt.port))
+                }.onFailure { break }
+            }
+        }.apply { isDaemon = true; start() }
+
+        val dhtClosestThread = Thread {
+            val buf = ByteArray(1024)
+            while (!stopFlag.get()) {
+                val pkt = java.net.DatagramPacket(buf, buf.size)
+                runCatching { dhtClosestUdp.receive(pkt) }.onSuccess {
+                    val compactPeerB = byteArrayOf(
+                        127, 0, 0, 1,
+                        ((peerB.localPort ushr 8) and 0xFF).toByte(),
+                        (peerB.localPort and 0xFF).toByte()
+                    )
+                    val resp = ByteArrayOutputStream().apply {
+                        write("d1:rd2:id20:".toByteArray(StandardCharsets.ISO_8859_1))
+                        write(closeNodeId)
+                        write("6:valuesl6:".toByteArray(StandardCharsets.ISO_8859_1))
+                        write(compactPeerB)
+                        write("ee1:t2:aa1:y1:re".toByteArray(StandardCharsets.ISO_8859_1))
+                    }.toByteArray()
+                    dhtClosestUdp.send(java.net.DatagramPacket(resp, resp.size, pkt.address, pkt.port))
+                }.onFailure { break }
+            }
+        }.apply { isDaemon = true; start() }
+
+        try {
+            // Tracker returns bogon 0.0.0.0:6881 + unreachable ::1 + peerA ONLY (incomplete swarm without peerB from DHT!)
+            server.createContext("/announce") { ex ->
+                val bogonAndPeerA = byteArrayOf(
+                    0, 0, 0, 0, 0x1A, 0xE1.toByte(),
+                    127, 0, 0, 1, ((peerA.localPort ushr 8) and 0xFF).toByte(), (peerA.localPort and 0xFF).toByte()
+                )
+                val deadIpv6 = ByteArray(18).apply {
+                    this[15] = 1 // ::1
+                    this[16] = 0xFA.toByte()
+                    this[17] = 0x01
+                }
+                val resp = ByteArrayOutputStream().apply {
+                    write("d8:completei1e10:incompletei1e8:intervali60e5:peers${bogonAndPeerA.size}:".toByteArray(StandardCharsets.ISO_8859_1))
+                    write(bogonAndPeerA)
+                    write("6:peers618:".toByteArray(StandardCharsets.ISO_8859_1))
+                    write(deadIpv6)
+                    write("e".toByteArray(StandardCharsets.ISO_8859_1))
+                }.toByteArray()
+                ex.sendResponseHeaders(200, resp.size.toLong())
+                ex.responseBody.use { it.write(resp) }
+            }
+            server.executor = Executors.newCachedThreadPool()
+            server.start()
+
+            val announceUrl = "http://127.0.0.1:${server.address.port}/announce"
+
+            val dao = InMemoryDownloadDao()
+            val repo = DownloadRepository(dao)
+            val manager = TorrentDownloadManager(null, repo)
+            manager.dhtNodesOverrideForTest = listOf("127.0.0.1" to dhtBootstrapUdp.localPort)
+
+            // Verify DHT XOR routing discovers peerB cleanly
+            val dhtDiscovered = manager.discoverPeersFromDht(infoHashBytes)
+            assertTrue(
+                "DHT XOR lookup must discover peerB at port ${peerB.localPort}",
+                dhtDiscovered.any { it.port == peerB.localPort }
+            )
+
+            // Verify tracker parses bogon + ::1 + peerA cleanly
+            val trackerSwarm = manager.discoverSwarmFromTrackers(infoHashBytes, listOf(announceUrl))
+            assertTrue("Tracker must include peerA", trackerSwarm.peers.any { it.port == peerA.localPort })
+
+            val metadata = TorrentMetadata(
+                name = "v20_peer",
+                hash = infoHashHex,
+                files = listOf(TorrentFileInfo(0, "v20_peer.bin", payload.size.toLong(), "v20_peer.bin", true)),
+                totalSize = payload.size.toLong(),
+                pieceSize = pieceLen,
+                pieces = "",
+                seeds = 1,
+                peers = 2,
+                hasPieceHashes = true,
+                hasResolvedMetadata = true
+            )
+            val validatedEntries = TorrentPathSafety.validateTorrentEntries(
+                listOf(TorrentPathSafety.RawTorrentEntry(0, listOf("v20_peer.bin"), payload.size.toLong()))
+            )
+            val extMeta = TorrentDownloadManager.ExtendedTorrentMeta(
+                metadata = metadata,
+                validatedEntries = validatedEntries,
+                trackers = listOf(announceUrl),
+                webSeeds = emptyList(),
+                pieceHashes = listOf(p0Hash, p1Hash),
+                rawPieceHashesBytes = hashes,
+                rawInfoBytes = rawInfo
+            )
+            val itemId = repo.insert(
+                DownloadItem(
+                    url = "magnet:?xt=urn:btih:$infoHashHex&dn=v20_peer",
+                    filename = "v20_peer",
+                    savePath = tempRoot.absolutePath,
+                    fileSize = payload.size.toLong(),
+                    status = DownloadStatus.DOWNLOADING,
+                    downloadType = DownloadType.MAGNET,
+                    torrentName = "v20_peer",
+                    torrentHash = infoHashHex
+                )
+            )
+            val item = repo.getDownloadById(itemId)!!
+            val jobDir = File(tempRoot, "v20_peer_job").apply { mkdirs() }
+            val bogusPeer = InetSocketAddress(java.net.InetAddress.getByAddress(byteArrayOf(0, 0, 0, 0)), 6881)
+            val deadIpv6Peer = InetSocketAddress(java.net.InetAddress.getByName("::1"), 65432)
+            val ok = manager.downloadViaPeers(
+                item = item,
+                extMeta = extMeta,
+                filesToDownload = metadata.files,
+                selectedIndices = setOf(0),
+                torrentFolder = jobDir,
+                onProgress = { _, _, _, _, _, _, _ -> },
+                explicitPeers = listOf(
+                    bogusPeer,
+                    deadIpv6Peer,
+                    InetSocketAddress("127.0.0.1", peerA.localPort),
+                    InetSocketAddress("127.0.0.1", peerB.localPort)
+                )
+            )
+            assertTrue("Download across partial choked peerA + peerB must succeed", ok)
+            assertFalse(
+                "Partial BITFIELD peerA must NEVER receive a REQUEST for piece 1 it does not have",
+                peerARequestedInvalidPiece.get()
+            )
+            assertTrue("peerA must have exercised transient CHOKE -> UNCHOKE recovery", peerAChokedCount.get() >= 1)
+
+            TorrentPathSafety.promoteStagedFiles(jobDir, validatedEntries, setOf(0))
+            val verification = TorrentPathSafety.verifyTorrentFiles(
+                jobRoot = jobDir,
+                entries = validatedEntries,
+                selectedIndices = setOf(0),
+                pieceLength = pieceLen,
+                pieceHashes = hashes,
+                hasPieceHashes = true,
+                useStagingFiles = false
+            )
+            assertTrue("Final verified files must be SHA-1 VERIFIED", verification.allSelectedComplete)
+            assertEquals("VERIFIED", verification.integrityStatus)
+            assertArrayEquals(payload, File(jobDir, "v20_peer.bin").readBytes())
+        } finally {
+            stopFlag.set(true)
+            runCatching { server.stop(0) }
+            runCatching { peerA.close() }
+            runCatching { peerB.close() }
+            runCatching { dhtBootstrapUdp.close() }
+            runCatching { dhtClosestUdp.close() }
+            runCatching { dhtFarUdp.close() }
+            threadA.join(500)
+            threadB.join(500)
+            dhtBootstrapThread.join(500)
+            dhtClosestThread.join(500)
             tempRoot.deleteRecursively()
         }
     }

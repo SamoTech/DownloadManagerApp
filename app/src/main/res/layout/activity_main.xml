@@ -19,7 +19,7 @@
             android:layout_width="match_parent"
             android:layout_height="?attr/actionBarSize"
             android:background="@color/colorHeaderBg"
-            app:title="Luca v19.0 (Build 19)"
+            app:title="Luca v20.0 (Build 20)"
             app:subtitle="@string/app_name"
             app:titleTextColor="@android:color/white"
             app:subtitleTextColor="#38BDF8"
@@ -202,7 +202,7 @@
                     android:id="@+id/tvAppVersion"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Luca v19.0 (Build 19)"
+                    android:text="Luca v20.0 (Build 20)"
                     android:textColor="#38BDF8"
                     android:textSize="12sp"
                     android:textStyle="bold" />
