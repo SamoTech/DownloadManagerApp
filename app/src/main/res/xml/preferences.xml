@@ -133,7 +133,7 @@
             android:key="allow_third_party_torrent_resolvers"
             android:title="@string/allow_third_party_torrent_resolvers"
             android:summary="@string/allow_third_party_torrent_resolvers_summary"
-            android:defaultValue="false" />
+            android:defaultValue="true" />
     </PreferenceCategory>
 
     <PreferenceCategory
@@ -156,7 +156,7 @@
         <Preference
             android:key="pref_app_version"
             android:title="App Version"
-            android:summary="Luca Download Manager v18.0 (Build 18)"
+            android:summary="Luca Download Manager v19.0 (Build 19)"
             android:selectable="false" />
     </PreferenceCategory>
 

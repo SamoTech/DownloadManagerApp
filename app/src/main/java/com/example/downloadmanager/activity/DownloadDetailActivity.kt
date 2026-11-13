@@ -122,8 +122,16 @@ class DownloadDetailActivity : AppCompatActivity() {
             else -> null
         }
 
+        val isSeeding = (downloadItem.downloadType == DownloadType.TORRENT ||
+            downloadItem.downloadType == DownloadType.MAGNET) &&
+            downloadItem.status == DownloadStatus.COMPLETED &&
+            TorrentDownloadManager.isSeedingActive(downloadItem.id)
+
         val statusSummary = buildString {
-            append(getStatusText(downloadItem.status))
+            append(
+                if (isSeeding) getString(R.string.seeding_status)
+                else getStatusText(downloadItem.status)
+            )
             if (!distinctReason.isNullOrBlank()) {
                 append(" (")
                 append(distinctReason)
@@ -184,13 +192,35 @@ class DownloadDetailActivity : AppCompatActivity() {
             }
             val integrityNote = downloadItem.integrityStatus?.let { " • Integrity: $it" }.orEmpty()
             binding.tvTorrentHash.text = "InfoHash: ${downloadItem.torrentHash ?: "--"}$integrityNote"
-            if (downloadItem.uploadSpeed > 0) {
-                binding.tvUploadSpeed.text = getString(
-                    R.string.upload_speed,
-                    formatSpeed(downloadItem.uploadSpeed)
-                )
+            binding.tvUploadSpeed.text = when {
+                downloadItem.uploadSpeed > 0 -> {
+                    val base = getString(R.string.upload_speed, formatSpeed(downloadItem.uploadSpeed))
+                    if (downloadItem.uploadedSize > 0) "$base (${formatFileSize(downloadItem.uploadedSize)})" else base
+                }
+                downloadItem.uploadedSize > 0 ->
+                    getString(R.string.uploaded_total, formatFileSize(downloadItem.uploadedSize))
+                isSeeding ->
+                    "${getString(R.string.seeding_status)} (0 B/s)"
+                else ->
+                    getString(R.string.unknown_speed)
+            }
+            if (downloadItem.status == DownloadStatus.COMPLETED) {
+                binding.btnToggleSeeding.visibility = View.VISIBLE
+                binding.btnToggleSeeding.text = getString(if (isSeeding) R.string.stop_seeding else R.string.seed)
+                binding.btnToggleSeeding.setOnClickListener {
+                    if (TorrentDownloadManager.isSeedingActive(downloadItem.id)) {
+                        if (isBound) downloadService?.stopSeeding(downloadItem.id)
+                        else sendServiceCommand(DownloadService.ACTION_STOP_SEEDING, downloadItem.id)
+                    } else {
+                        if (isBound) downloadService?.startSeeding(downloadItem.id)
+                        else sendServiceCommand(DownloadService.ACTION_START_SEEDING, downloadItem.id)
+                    }
+                    binding.btnToggleSeeding.postDelayed({
+                        viewModel.download.value?.let { updateUI(it) }
+                    }, 300L)
+                }
             } else {
-                binding.tvUploadSpeed.text = getString(R.string.unknown_speed)
+                binding.btnToggleSeeding.visibility = View.GONE
             }
             populateTorrentFilesSection(downloadItem)
         } else {

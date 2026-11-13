@@ -45,6 +45,12 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/action_toggle_seed"
+        android:icon="@drawable/ic_torrent"
+        android:title="@string/seed"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/action_copy_link"
         android:icon="@drawable/ic_copy"
         android:title="@string/copy_link"

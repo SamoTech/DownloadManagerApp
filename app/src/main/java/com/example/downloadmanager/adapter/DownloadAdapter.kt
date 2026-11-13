@@ -84,11 +84,16 @@ class DownloadAdapter(
                 tvEta.text = itemView.context.getString(R.string.unknown_eta)
             }
             
-            tvStatus.text = getStatusText(downloadItem)
-            tvStatus.setTextColor(getStatusColor(downloadItem))
+            val isTorrent = downloadItem.downloadType == DownloadType.TORRENT ||
+                downloadItem.downloadType == DownloadType.MAGNET
+            val isSeeding = isTorrent &&
+                downloadItem.status == DownloadStatus.COMPLETED &&
+                com.example.downloadmanager.manager.TorrentDownloadManager.isSeedingActive(downloadItem.id)
+
+            tvStatus.text = getStatusText(downloadItem, isSeeding)
+            tvStatus.setTextColor(getStatusColor(downloadItem, isSeeding))
             
-            if (downloadItem.downloadType == DownloadType.TORRENT ||
-                downloadItem.downloadType == DownloadType.MAGNET) {
+            if (isTorrent) {
                 torrentInfo.visibility = View.VISIBLE
                 tvPeers.text = if (downloadItem.peers >= 0) {
                     itemView.context.getString(R.string.peers, downloadItem.peers)
@@ -100,19 +105,21 @@ class DownloadAdapter(
                 } else {
                     itemView.context.getString(R.string.seeds_unavailable)
                 }
-                if (downloadItem.uploadSpeed > 0) {
-                    tvUploadSpeed.text = itemView.context.getString(
-                        R.string.upload_speed,
-                        formatSpeed(downloadItem.uploadSpeed)
-                    )
-                } else {
-                    tvUploadSpeed.text = itemView.context.getString(R.string.unknown_speed)
+                tvUploadSpeed.text = when {
+                    downloadItem.uploadSpeed > 0 ->
+                        itemView.context.getString(R.string.upload_speed, formatSpeed(downloadItem.uploadSpeed))
+                    downloadItem.uploadedSize > 0 ->
+                        itemView.context.getString(R.string.uploaded_total, formatFileSize(downloadItem.uploadedSize))
+                    isSeeding ->
+                        "${itemView.context.getString(R.string.seeding_status)} (0 B/s)"
+                    else ->
+                        itemView.context.getString(R.string.unknown_speed)
                 }
             } else {
                 torrentInfo.visibility = View.GONE
             }
             
-            setupActionButtons(downloadItem, onActionClick)
+            setupActionButtons(downloadItem, isTorrent, isSeeding, onActionClick)
             
             itemView.setOnClickListener { onItemClick(downloadItem) }
             ivMore.setOnClickListener { showOverflowMenu(downloadItem, onActionClick) }
@@ -213,7 +220,7 @@ class DownloadAdapter(
             }
         }
         
-        private fun getStatusText(downloadItem: DownloadItem): String {
+        private fun getStatusText(downloadItem: DownloadItem, isSeeding: Boolean): String {
             val err = downloadItem.errorMessage?.trim().orEmpty()
             val errLower = err.lowercase()
             return when (downloadItem.status) {
@@ -231,7 +238,11 @@ class DownloadAdapter(
                     else -> itemView.context.getString(R.string.downloading)
                 }
                 DownloadStatus.PAUSED -> itemView.context.getString(R.string.paused)
-                DownloadStatus.COMPLETED -> itemView.context.getString(R.string.completed_status)
+                DownloadStatus.COMPLETED -> if (isSeeding) {
+                    itemView.context.getString(R.string.seeding_status)
+                } else {
+                    itemView.context.getString(R.string.completed_status)
+                }
                 DownloadStatus.FAILED -> when {
                     errLower.contains("tracker unreachable") -> "Tracker unreachable"
                     errLower.contains("no peers returned") || errLower.contains("empty bittorrent swarm") -> "No peers returned"
@@ -244,12 +255,16 @@ class DownloadAdapter(
             }
         }
         
-        private fun getStatusColor(downloadItem: DownloadItem): Int {
+        private fun getStatusColor(downloadItem: DownloadItem, isSeeding: Boolean): Int {
             val context = itemView.context
             val errLower = downloadItem.errorMessage?.lowercase().orEmpty()
             return when (downloadItem.status) {
                 DownloadStatus.DOWNLOADING -> ContextCompat.getColor(context, R.color.status_downloading)
-                DownloadStatus.COMPLETED -> ContextCompat.getColor(context, R.color.status_completed)
+                DownloadStatus.COMPLETED -> if (isSeeding) {
+                    ContextCompat.getColor(context, R.color.colorPrimary)
+                } else {
+                    ContextCompat.getColor(context, R.color.status_completed)
+                }
                 DownloadStatus.PAUSED -> ContextCompat.getColor(context, R.color.status_paused)
                 DownloadStatus.FAILED -> ContextCompat.getColor(context, R.color.status_failed)
                 DownloadStatus.CANCELLED -> ContextCompat.getColor(context, R.color.status_cancelled)
@@ -263,6 +278,8 @@ class DownloadAdapter(
         
         private fun setupActionButtons(
             downloadItem: DownloadItem,
+            isTorrent: Boolean,
+            isSeeding: Boolean,
             onActionClick: (DownloadItem, String) -> Unit
         ) {
             when (downloadItem.status) {
@@ -305,7 +322,17 @@ class DownloadAdapter(
                     btnAction2.text = itemView.context.getString(R.string.share)
                     btnAction2.setOnClickListener { onActionClick(downloadItem, "share") }
                     
-                    btnAction3.visibility = View.GONE
+                    if (isTorrent) {
+                        btnAction3.visibility = View.VISIBLE
+                        btnAction3.text = itemView.context.getString(
+                            if (isSeeding) R.string.stop_seeding else R.string.seed
+                        )
+                        btnAction3.setOnClickListener {
+                            onActionClick(downloadItem, if (isSeeding) "stop_seeding" else "start_seeding")
+                        }
+                    } else {
+                        btnAction3.visibility = View.GONE
+                    }
                 }
                 
                 else -> {
@@ -322,6 +349,10 @@ class DownloadAdapter(
         ) {
             val popupMenu = PopupMenu(itemView.context, ivMore)
             popupMenu.menuInflater.inflate(R.menu.menu_download_item, popupMenu.menu)
+            val isTorrentCompleted = downloadItem.status == DownloadStatus.COMPLETED &&
+                (downloadItem.downloadType == DownloadType.TORRENT || downloadItem.downloadType == DownloadType.MAGNET)
+            val isSeeding = isTorrentCompleted &&
+                com.example.downloadmanager.manager.TorrentDownloadManager.isSeedingActive(downloadItem.id)
             
             popupMenu.menu.findItem(R.id.action_pause)?.isVisible = 
                 downloadItem.status == DownloadStatus.DOWNLOADING
@@ -339,6 +370,10 @@ class DownloadAdapter(
             popupMenu.menu.findItem(R.id.action_delete)?.isVisible = true
             popupMenu.menu.findItem(R.id.action_share)?.isVisible = 
                 downloadItem.status == DownloadStatus.COMPLETED
+            popupMenu.menu.findItem(R.id.action_toggle_seed)?.apply {
+                isVisible = isTorrentCompleted
+                title = itemView.context.getString(if (isSeeding) R.string.stop_seeding else R.string.seed)
+            }
             
             popupMenu.setOnMenuItemClickListener { menuItem ->
                 when (menuItem.itemId) {
@@ -368,6 +403,10 @@ class DownloadAdapter(
                     }
                     R.id.action_share -> {
                         onActionClick(downloadItem, "share")
+                        true
+                    }
+                    R.id.action_toggle_seed -> {
+                        onActionClick(downloadItem, if (isSeeding) "stop_seeding" else "start_seeding")
                         true
                     }
                     R.id.action_copy_link -> {

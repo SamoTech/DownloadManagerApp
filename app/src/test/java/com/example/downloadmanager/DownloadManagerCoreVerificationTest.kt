@@ -21,6 +21,7 @@ import com.example.downloadmanager.utils.TorrentPathSafety
 import com.example.downloadmanager.utils.UrlClassifier
 import com.example.downloadmanager.utils.YouTubeExtractor
 import com.sun.net.httpserver.HttpServer
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -37,6 +38,7 @@ import java.io.File
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.ServerSocket
+import java.net.Socket
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.security.MessageDigest
@@ -1491,9 +1493,9 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun phase7_activeTorrentSelectedFile_compactAndDictTrackers_andDistinctStatuses() = runBlocking {
-        // 0. Verify Luca Version 18.0 (Build 18)
-        assertEquals("18.0", BuildConfig.VERSION_NAME)
-        assertEquals(18, BuildConfig.VERSION_CODE)
+        // 0. Verify Luca Version 19.0 (Build 19)
+        assertEquals("19.0", BuildConfig.VERSION_NAME)
+        assertEquals(19, BuildConfig.VERSION_CODE)
 
         val tempRoot = createTempDirectory("phase7_torrent_trace").toFile()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -2748,8 +2750,8 @@ class DownloadManagerCoreVerificationTest {
             assertTrue(MediaAssetHelper.hasVideoTrack(tailMoovMp4))
             assertEquals("H.264 • AAC 44.1kHz Stereo", MediaAssetHelper.inspectMediaCodecSummary(tailMoovMp4, isVideo = true))
 
-            assertEquals(18, BuildConfig.VERSION_CODE)
-            assertEquals("18.0", BuildConfig.VERSION_NAME)
+            assertEquals(19, BuildConfig.VERSION_CODE)
+            assertEquals("19.0", BuildConfig.VERSION_NAME)
         } finally {
             try { peerServer.close() } catch (_: Exception) {}
             server.stop(0)
@@ -2863,5 +2865,586 @@ class DownloadManagerCoreVerificationTest {
         }
         val sha1 = MessageDigest.getInstance("SHA-1")
         return sha1.digest(torrentBytes.copyOfRange(infoStart, infoEnd))
+    }
+
+    // =========================================================================
+    // v19: Torrent Fetch Files (DHT + BEP-9 Race), Peer Download (BEP-6 Reject),
+    //      and Active BitTorrent Seeding Engine Verification
+    // =========================================================================
+
+    @Test
+    fun v19_fetchFiles_dhtAndBep9Race_resolvesMultiFileMagnetFast() = runBlocking {
+        val file0Data = ByteArray(1800) { (it * 7 + 1).toByte() }
+        val file1Data = ByteArray(1400) { (it * 13 + 3).toByte() }
+        val combinedData = file0Data + file1Data
+        val pieceLen = 2048
+        val sha1 = MessageDigest.getInstance("SHA-1")
+        val p0Hash = sha1.digest(combinedData.copyOfRange(0, pieceLen))
+        val p1Hash = sha1.digest(combinedData.copyOfRange(pieceLen, combinedData.size))
+        val piecesBlob = p0Hash + p1Hash
+
+        val rawInfoBytes = ByteArrayOutputStream().apply {
+            write("d5:filesl".toByteArray(StandardCharsets.US_ASCII))
+            write("d6:lengthi${file0Data.size}e4:pathl4:docs8:read.txtee".toByteArray(StandardCharsets.US_ASCII))
+            write("d6:lengthi${file1Data.size}e4:pathl5:media9:track.mp3ee".toByteArray(StandardCharsets.US_ASCII))
+            write("e4:name10:SamplePack".toByteArray(StandardCharsets.US_ASCII))
+            write("12:piece lengthi${pieceLen}e6:pieces${piecesBlob.size}:".toByteArray(StandardCharsets.US_ASCII))
+            write(piecesBlob)
+            write("e".toByteArray(StandardCharsets.US_ASCII))
+        }.toByteArray()
+        val infoHashBytes = sha1.digest(rawInfoBytes)
+        val infoHashHex = infoHashBytes.joinToString("") { "%02x".format(it) }
+
+        val deadPeerServer = ServerSocket(0, 5, java.net.InetAddress.getByName("127.0.0.1"))
+        val fastBep9Server = ServerSocket(0, 5, java.net.InetAddress.getByName("127.0.0.1"))
+        val dhtBootstrapUdp = java.net.DatagramSocket(0, java.net.InetAddress.getByName("127.0.0.1"))
+        val dhtReferralUdp = java.net.DatagramSocket(0, java.net.InetAddress.getByName("127.0.0.1"))
+
+        val stopFlag = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        // Slow/unresponsive decoy peer (waits 4s before closing)
+        val deadThread = Thread {
+            runCatching {
+                deadPeerServer.accept().use { s ->
+                    Thread.sleep(4000)
+                }
+            }
+        }.apply { isDaemon = true; start() }
+
+        // Fast BEP-9 peer advertising ut_metadata extId=3 (tests flexible extId support!)
+        val fastThread = Thread {
+            while (!stopFlag.get()) {
+                val sock = runCatching { fastBep9Server.accept() }.getOrNull() ?: break
+                Thread {
+                    runCatching {
+                        sock.use { s ->
+                            s.soTimeout = 4000
+                            val inp = java.io.DataInputStream(s.getInputStream())
+                            val out = java.io.DataOutputStream(s.getOutputStream())
+                            val pstrlen = inp.readUnsignedByte()
+                            val proto = ByteArray(pstrlen); inp.readFully(proto)
+                            val res = ByteArray(8); inp.readFully(res)
+                            val hash = ByteArray(20); inp.readFully(hash)
+                            val pid = ByteArray(20); inp.readFully(pid)
+
+                            out.writeByte(19)
+                            out.write("BitTorrent protocol".toByteArray(StandardCharsets.US_ASCII))
+                            val ourRes = ByteArray(8).apply { this[5] = 0x10.toByte() }
+                            out.write(ourRes)
+                            out.write(infoHashBytes)
+                            out.write("-TR4050-000000000001".toByteArray(StandardCharsets.US_ASCII))
+                            val hsDict = "d1:md11:ut_metadatai3ee13:metadata_sizei${rawInfoBytes.size}ee".toByteArray(StandardCharsets.US_ASCII)
+                            out.writeInt(2 + hsDict.size)
+                            out.writeByte(20)
+                            out.writeByte(0)
+                            out.write(hsDict)
+                            out.flush()
+
+                            var remoteUtMetaId = 1
+                            while (!stopFlag.get()) {
+                                val len = inp.readInt()
+                                if (len <= 0) continue
+                                val id = inp.readUnsignedByte()
+                                if (id == 20 && len >= 2) {
+                                    val extId = inp.readUnsignedByte()
+                                    val body = ByteArray(len - 2); inp.readFully(body)
+                                    if (extId == 0) {
+                                        val m = TorrentDownloadManager.SimpleBencodeDecoder(body).readValue() as? Map<*, *>
+                                        val mm = m?.get("m") as? Map<*, *>
+                                        remoteUtMetaId = (mm?.get("ut_metadata") as? Number)?.toInt() ?: 1
+                                    } else if (extId == 3) {
+                                        val req = TorrentDownloadManager.SimpleBencodeDecoder(body).readValue() as? Map<*, *>
+                                        if ((req?.get("msg_type") as? Number)?.toInt() == 0) {
+                                            val pieceIdx = (req["piece"] as? Number)?.toInt() ?: 0
+                                            if (pieceIdx == 0) {
+                                                val hdr = "d8:msg_typei1e5:piecei0e10:total_sizei${rawInfoBytes.size}ee".toByteArray(StandardCharsets.US_ASCII)
+                                                out.writeInt(2 + hdr.size + rawInfoBytes.size)
+                                                out.writeByte(20)
+                                                out.writeByte(remoteUtMetaId)
+                                                out.write(hdr)
+                                                out.write(rawInfoBytes)
+                                                out.flush()
+                                            }
+                                        }
+                                    }
+                                } else if (len > 1) {
+                                    inp.skipBytes(len - 1)
+                                }
+                            }
+                        }
+                    }
+                }.apply { isDaemon = true; start() }
+            }
+        }.apply { isDaemon = true; start() }
+
+        // DHT hop 1 (bootstrap) -> returns compact `nodes` pointing to hop 2
+        val dhtBootThread = Thread {
+            val buf = ByteArray(1024)
+            while (!stopFlag.get()) {
+                val pkt = java.net.DatagramPacket(buf, buf.size)
+                val ok = runCatching { dhtBootstrapUdp.receive(pkt); true }.getOrDefault(false)
+                if (!ok) break
+                val reqMap = TorrentDownloadManager.SimpleBencodeDecoder(pkt.data.copyOfRange(0, pkt.length)).readValue() as? Map<*, *> ?: continue
+                val tx = (reqMap["t"] as? ByteArray) ?: byteArrayOf('a'.code.toByte(), 'b'.code.toByte())
+                val refPort = dhtReferralUdp.localPort
+                val compactNode = ByteArray(26).apply {
+                    this[20] = 127; this[21] = 0; this[22] = 0; this[23] = 1
+                    this[24] = ((refPort ushr 8) and 0xFF).toByte()
+                    this[25] = (refPort and 0xFF).toByte()
+                }
+                val resp = ByteArrayOutputStream().apply {
+                    write("d1:rd2:id20:012345678901234567895:nodes26:".toByteArray(StandardCharsets.ISO_8859_1))
+                    write(compactNode)
+                    write("5:token2:ok".toByteArray(StandardCharsets.ISO_8859_1))
+                    write("e1:t${tx.size}:".toByteArray(StandardCharsets.ISO_8859_1))
+                    write(tx)
+                    write("1:y1:re".toByteArray(StandardCharsets.ISO_8859_1))
+                }.toByteArray()
+                dhtBootstrapUdp.send(java.net.DatagramPacket(resp, resp.size, pkt.address, pkt.port))
+            }
+        }.apply { isDaemon = true; start() }
+
+        // DHT hop 2 (referral) -> returns BOTH slow decoy peer and fast BEP-9 peer in `values`
+        val dhtRefThread = Thread {
+            val buf = ByteArray(1024)
+            while (!stopFlag.get()) {
+                val pkt = java.net.DatagramPacket(buf, buf.size)
+                val ok = runCatching { dhtReferralUdp.receive(pkt); true }.getOrDefault(false)
+                if (!ok) break
+                val reqMap = TorrentDownloadManager.SimpleBencodeDecoder(pkt.data.copyOfRange(0, pkt.length)).readValue() as? Map<*, *> ?: continue
+                val tx = (reqMap["t"] as? ByteArray) ?: byteArrayOf('c'.code.toByte(), 'd'.code.toByte())
+                val pDead = deadPeerServer.localPort
+                val pFast = fastBep9Server.localPort
+                val compactDead = byteArrayOf(127, 0, 0, 1, ((pDead ushr 8) and 0xFF).toByte(), (pDead and 0xFF).toByte())
+                val compactFast = byteArrayOf(127, 0, 0, 1, ((pFast ushr 8) and 0xFF).toByte(), (pFast and 0xFF).toByte())
+                val resp = ByteArrayOutputStream().apply {
+                    write("d1:rd2:id20:987654321098765432105:token2:ok6:valuesl6:".toByteArray(StandardCharsets.ISO_8859_1))
+                    write(compactDead)
+                    write("6:".toByteArray(StandardCharsets.ISO_8859_1))
+                    write(compactFast)
+                    write("ee1:t${tx.size}:".toByteArray(StandardCharsets.ISO_8859_1))
+                    write(tx)
+                    write("1:y1:re".toByteArray(StandardCharsets.ISO_8859_1))
+                }.toByteArray()
+                dhtReferralUdp.send(java.net.DatagramPacket(resp, resp.size, pkt.address, pkt.port))
+            }
+        }.apply { isDaemon = true; start() }
+
+        try {
+            val repo = DownloadRepository(InMemoryDownloadDao())
+            val manager = TorrentDownloadManager(null, repo)
+            manager.dhtNodesOverrideForTest = listOf("127.0.0.1" to dhtBootstrapUdp.localPort)
+            val trackerlessMagnet = "magnet:?xt=urn:btih:$infoHashHex&dn=SamplePack"
+
+            val startMs = System.currentTimeMillis()
+            val meta = manager.getTorrentMetadata(trackerlessMagnet)
+            val elapsedMs = System.currentTimeMillis() - startMs
+
+            assertNotNull("Trackerless magnet must resolve via multi-hop DHT + BEP-9 race", meta)
+            assertTrue("Metadata must be marked resolved", meta!!.hasResolvedMetadata)
+            assertEquals("SamplePack", meta.name)
+            assertEquals(2, meta.files.size)
+            assertEquals("docs/read.txt", meta.files[0].path)
+            assertEquals("media/track.mp3", meta.files[1].path)
+            assertEquals(combinedData.size.toLong(), meta.totalSize)
+            assertTrue("Winner race must finish before the 4s decoy peer (took ${elapsedMs}ms)", elapsedMs < 3500L)
+        } finally {
+            stopFlag.set(true)
+            runCatching { deadPeerServer.close() }
+            runCatching { fastBep9Server.close() }
+            runCatching { dhtBootstrapUdp.close() }
+            runCatching { dhtReferralUdp.close() }
+            deadThread.join(500)
+            fastThread.join(500)
+            dhtBootThread.join(500)
+            dhtRefThread.join(500)
+        }
+    }
+
+    @Test
+    fun v19_torrentDownload_bep6RejectAndPostUnchokeBitfield_completesVerified() = runBlocking {
+        val tempRoot = createTempDirectory("v19_bep6_download").toFile()
+        val pieceLen = 1024
+        val piece0 = ByteArray(pieceLen) { (it * 3 + 5).toByte() }
+        val piece1 = ByteArray(pieceLen) { (it * 11 + 2).toByte() }
+        val payload = piece0 + piece1
+        val sha1 = MessageDigest.getInstance("SHA-1")
+        val hashes = sha1.digest(piece0) + sha1.digest(piece1)
+        val rawInfo = ByteArrayOutputStream().apply {
+            write("d6:lengthi${payload.size}e4:name11:bep6_ok.bin12:piece lengthi${pieceLen}e6:pieces${hashes.size}:".toByteArray(StandardCharsets.US_ASCII))
+            write(hashes)
+            write("e".toByteArray(StandardCharsets.US_ASCII))
+        }.toByteArray()
+        val infoHashBytes = sha1.digest(rawInfo)
+        val infoHashHex = infoHashBytes.joinToString("") { "%02x".format(it) }
+
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val peerA = ServerSocket(0, 5, java.net.InetAddress.getByName("127.0.0.1"))
+        val peerB = ServerSocket(0, 5, java.net.InetAddress.getByName("127.0.0.1"))
+        val stopFlag = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        fun servePeer(srv: ServerSocket, rejectPieceIdx: Int?) = Thread {
+            while (!stopFlag.get()) {
+                val sock = runCatching { srv.accept() }.getOrNull() ?: break
+                Thread {
+                    runCatching {
+                        sock.use { s ->
+                            val inp = java.io.DataInputStream(s.getInputStream())
+                            val out = java.io.DataOutputStream(s.getOutputStream())
+                            val pstrlen = inp.readUnsignedByte()
+                            inp.skipBytes(pstrlen)
+                            val res = ByteArray(8); inp.readFully(res)
+                            val h = ByteArray(20); inp.readFully(h)
+                            val p = ByteArray(20); inp.readFully(p)
+
+                            out.writeByte(19)
+                            out.write("BitTorrent protocol".toByteArray(StandardCharsets.US_ASCII))
+                            out.write(ByteArray(8))
+                            out.write(infoHashBytes)
+                            out.write("-PEERB6-000000000001".toByteArray(StandardCharsets.US_ASCII))
+                            out.flush()
+
+                            while (!stopFlag.get()) {
+                                val len = inp.readInt()
+                                if (len <= 0) continue
+                                val id = inp.readUnsignedByte()
+                                when (id) {
+                                    2 -> {
+                                        // Send UNCHOKE first, then BITFIELD (verifies post-unchoke BITFIELD handling)
+                                        out.writeInt(1); out.writeByte(1)
+                                        out.writeInt(2); out.writeByte(5); out.writeByte(0xC0)
+                                        out.flush()
+                                    }
+                                    6 -> {
+                                        val reqIdx = inp.readInt()
+                                        val reqBegin = inp.readInt()
+                                        val reqLen = inp.readInt()
+                                        if (rejectPieceIdx != null && reqIdx == rejectPieceIdx) {
+                                            // Send BEP-6 REJECT_REQUEST (id = 16) instead of stalling for 8s
+                                            out.writeInt(13)
+                                            out.writeByte(16)
+                                            out.writeInt(reqIdx)
+                                            out.writeInt(reqBegin)
+                                            out.writeInt(reqLen)
+                                            out.flush()
+                                        } else {
+                                            val start = reqIdx * pieceLen + reqBegin
+                                            val slice = payload.copyOfRange(start, start + reqLen)
+                                            out.writeInt(9 + slice.size)
+                                            out.writeByte(7)
+                                            out.writeInt(reqIdx)
+                                            out.writeInt(reqBegin)
+                                            out.write(slice)
+                                            out.flush()
+                                        }
+                                    }
+                                    else -> if (len > 1) inp.skipBytes(len - 1)
+                                }
+                            }
+                        }
+                    }
+                }.apply { isDaemon = true; start() }
+            }
+        }.apply { isDaemon = true; start() }
+
+        val threadA = servePeer(peerA, rejectPieceIdx = 1)
+        val threadB = servePeer(peerB, rejectPieceIdx = null)
+
+        try {
+            val torrentBytes = ("d8:announce${("http://127.0.0.1:${server.address.port}/announce").length}:http://127.0.0.1:${server.address.port}/announce4:info".toByteArray(StandardCharsets.ISO_8859_1)) +
+                rawInfo + "e".toByteArray(StandardCharsets.ISO_8859_1)
+            val torrentFile = File(tempRoot, "bep6.torrent").apply { writeBytes(torrentBytes) }
+
+            server.createContext("/announce") { ex ->
+                val compact = ByteArrayOutputStream().apply {
+                    write(byteArrayOf(127, 0, 0, 1, ((peerA.localPort ushr 8) and 0xFF).toByte(), (peerA.localPort and 0xFF).toByte()))
+                    write(byteArrayOf(127, 0, 0, 1, ((peerB.localPort ushr 8) and 0xFF).toByte(), (peerB.localPort and 0xFF).toByte()))
+                }.toByteArray()
+                val resp = ByteArrayOutputStream().apply {
+                    write("d8:completei2e10:incompletei0e8:intervali60e5:peers12:".toByteArray(StandardCharsets.ISO_8859_1))
+                    write(compact)
+                    write("e".toByteArray(StandardCharsets.ISO_8859_1))
+                }.toByteArray()
+                ex.sendResponseHeaders(200, resp.size.toLong())
+                ex.responseBody.use { it.write(resp) }
+            }
+            server.executor = Executors.newCachedThreadPool()
+            server.start()
+
+            val dao = InMemoryDownloadDao()
+            val repo = DownloadRepository(dao)
+            val manager = TorrentDownloadManager(null, repo)
+            val item = DownloadItem(
+                url = torrentFile.absolutePath,
+                filename = "bep6_ok",
+                savePath = tempRoot.absolutePath,
+                downloadType = DownloadType.TORRENT,
+                status = DownloadStatus.QUEUED
+            )
+            val id = manager.startTorrentDownload(item, null)
+            val saved = repo.getDownloadById(id)!!
+
+            var completed: DownloadItem? = null
+            var errMsg: String? = null
+            manager.executeTorrentJob(
+                saved,
+                onProgress = { _, _, _, _, _, _, _ -> },
+                onComplete = { completed = it },
+                onError = { _, msg -> errMsg = msg }
+            )
+
+            assertNull("Must recover cleanly after BEP-6 REJECT_REQUEST without error: $errMsg", errMsg)
+            assertNotNull("Torrent download must complete", completed)
+            assertEquals("VERIFIED", completed!!.integrityStatus)
+            val outFile = File(File(tempRoot, completed!!.filename), "bep6_ok.bin")
+            assertTrue(outFile.exists())
+            assertArrayEquals(payload, outFile.readBytes())
+        } finally {
+            stopFlag.set(true)
+            runCatching { server.stop(0) }
+            runCatching { peerA.close() }
+            runCatching { peerB.close() }
+            threadA.join(500)
+            threadB.join(500)
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun v19_seedPeers_servesMetadataAndPiecesOverTcp_tracksUploadedBytesAndStops() = runBlocking {
+        val tempRoot = createTempDirectory("v19_seed_peers").toFile()
+        val trackerQueries = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+
+        val pieceLen = 2048
+        val payload = ByteArray(3500) { ((it * 29 + 17) and 0xFF).toByte() }
+        val sha1 = MessageDigest.getInstance("SHA-1")
+        val p0 = sha1.digest(payload.copyOfRange(0, pieceLen))
+        val p1 = sha1.digest(payload.copyOfRange(pieceLen, payload.size))
+        val hashes = p0 + p1
+        val rawInfo = ByteArrayOutputStream().apply {
+            write("d6:lengthi${payload.size}e4:name12:seeded_v.bin12:piece lengthi${pieceLen}e6:pieces${hashes.size}:".toByteArray(StandardCharsets.US_ASCII))
+            write(hashes)
+            write("e".toByteArray(StandardCharsets.US_ASCII))
+        }.toByteArray()
+        val infoHashBytes = sha1.digest(rawInfo)
+        val infoHashHex = infoHashBytes.joinToString("") { "%02x".format(it) }
+
+        val dao = InMemoryDownloadDao()
+        val repo = DownloadRepository(dao)
+        val manager = TorrentDownloadManager(null, repo)
+
+        try {
+            server.createContext("/announce") { ex ->
+                trackerQueries.add(ex.requestURI.rawQuery ?: "")
+                val resp = "d8:completei1e10:incompletei2e8:intervali60e5:peers0:e".toByteArray(StandardCharsets.ISO_8859_1)
+                ex.sendResponseHeaders(200, resp.size.toLong())
+                ex.responseBody.use { it.write(resp) }
+            }
+            server.executor = Executors.newCachedThreadPool()
+            server.start()
+
+            val torrentUrl = "http://127.0.0.1:${server.address.port}/announce"
+            val torrentFile = File(tempRoot, "seed.torrent").apply {
+                writeBytes(
+                    "d8:announce${torrentUrl.length}:${torrentUrl}4:info".toByteArray(StandardCharsets.ISO_8859_1) +
+                        rawInfo + "e".toByteArray(StandardCharsets.ISO_8859_1)
+                )
+            }
+
+            // Prepare completed verified torrent folder on disk
+            val jobFolder = TorrentPathSafety.allocateSafeJobRoot(
+                baseDownloadDir = tempRoot,
+                rawTorrentName = "seeded_v",
+                infoHashHex = infoHashHex,
+                jobId = 1L
+            )
+            File(jobFolder, "seeded_v.bin").writeBytes(payload)
+
+            val itemId = repo.insert(
+                DownloadItem(
+                    url = torrentFile.absolutePath,
+                    filename = jobFolder.name,
+                    savePath = tempRoot.absolutePath,
+                    fileSize = payload.size.toLong(),
+                    downloadedSize = payload.size.toLong(),
+                    progress = 100,
+                    status = DownloadStatus.COMPLETED,
+                    downloadType = DownloadType.TORRENT,
+                    torrentName = "seeded_v.bin",
+                    torrentHash = infoHashHex,
+                    integrityStatus = "VERIFIED"
+                )
+            )
+            val completedItem = repo.getDownloadById(itemId)!!
+
+            manager.startSeeding(
+                downloadItem = completedItem,
+                announceTrackers = true,
+                enforcePreferences = false
+            )
+
+            // Wait for seeding engine to verify pieces & bind listening server port
+            var stats: TorrentDownloadManager.SeedSessionStats? = null
+            val waitStart = System.currentTimeMillis()
+            while (System.currentTimeMillis() - waitStart < 5000L) {
+                stats = manager.getSeedSessionStats(itemId)
+                if (stats != null && stats.listeningPort > 0 && TorrentDownloadManager.isSeedingActive(itemId)) {
+                    break
+                }
+                delay(50L)
+            }
+            assertNotNull("Seed session must start", stats)
+            assertTrue("Seeder must be marked active", TorrentDownloadManager.isSeedingActive(itemId))
+            assertEquals(2, stats!!.availablePieceCount)
+            val announceWaitStart = System.currentTimeMillis()
+            while (System.currentTimeMillis() - announceWaitStart < 3000L &&
+                trackerQueries.none { it.contains("event=started") && it.contains("left=0") && it.contains("port=${stats.listeningPort}") }
+            ) {
+                delay(50L)
+            }
+            assertTrue(
+                "Started announce must include left=0 and real port=${stats.listeningPort}",
+                trackerQueries.any { it.contains("event=started") && it.contains("left=0") && it.contains("port=${stats.listeningPort}") }
+            )
+
+            // Connect a real BitTorrent TCP leecher socket to verify BEP-9 metadata + BEP-3 BITFIELD + UNCHOKE + PIECE serving
+            val leecherReceived = ByteArray(payload.size)
+            Socket("127.0.0.1", stats.listeningPort).use { sock ->
+                sock.soTimeout = 5000
+                val out = java.io.DataOutputStream(sock.getOutputStream())
+                val inp = java.io.DataInputStream(sock.getInputStream())
+
+                out.writeByte(19)
+                out.write("BitTorrent protocol".toByteArray(StandardCharsets.US_ASCII))
+                val res = ByteArray(8).apply { this[5] = 0x10.toByte() }
+                out.write(res)
+                out.write(infoHashBytes)
+                out.write("-LEECH9-000000000001".toByteArray(StandardCharsets.US_ASCII))
+                out.flush()
+
+                val pstrlen = inp.readUnsignedByte()
+                assertEquals(19, pstrlen)
+                val proto = ByteArray(19); inp.readFully(proto)
+                inp.readFully(ByteArray(8))
+                val peerHash = ByteArray(20); inp.readFully(peerHash)
+                assertArrayEquals(infoHashBytes, peerHash)
+                inp.readFully(ByteArray(20))
+
+                // Expect BITFIELD with both pieces set (0b11000000 = 0xC0) + BEP-10 ext handshake
+                var sawBitfield = false
+                var peerUtMetaId = 1
+                var sawExtHs = false
+                while (!sawBitfield || !sawExtHs) {
+                    val mLen = inp.readInt()
+                    val mId = inp.readUnsignedByte()
+                    when (mId) {
+                        5 -> {
+                            val bf = ByteArray(mLen - 1); inp.readFully(bf)
+                            assertEquals(0xC0, bf[0].toInt() and 0xFF)
+                            sawBitfield = true
+                        }
+                        20 -> {
+                            val extId = inp.readUnsignedByte()
+                            val body = ByteArray(mLen - 2); inp.readFully(body)
+                            if (extId == 0) {
+                                val map = TorrentDownloadManager.SimpleBencodeDecoder(body).readValue() as Map<*, *>
+                                peerUtMetaId = ((map["m"] as Map<*, *>)["ut_metadata"] as Number).toInt()
+                                sawExtHs = true
+                            }
+                        }
+                        else -> if (mLen > 1) inp.skipBytes(mLen - 1)
+                    }
+                }
+
+                // Request BEP-9 metadata from seeder
+                val extHs = "d1:md11:ut_metadatai1eee".toByteArray(StandardCharsets.US_ASCII)
+                out.writeInt(2 + extHs.size); out.writeByte(20); out.writeByte(0); out.write(extHs)
+                val metaReq = "d8:msg_typei0e5:piecei0ee".toByteArray(StandardCharsets.US_ASCII)
+                out.writeInt(2 + metaReq.size); out.writeByte(20); out.writeByte(peerUtMetaId); out.write(metaReq)
+                out.flush()
+
+                var fetchedMeta: ByteArray? = null
+                while (fetchedMeta == null) {
+                    val mLen = inp.readInt()
+                    val mId = inp.readUnsignedByte()
+                    if (mId == 20 && mLen >= 2) {
+                        val extId = inp.readUnsignedByte()
+                        val body = ByteArray(mLen - 2); inp.readFully(body)
+                        if (extId == 1) {
+                            val dec = TorrentDownloadManager.SimpleBencodeDecoder(body)
+                            val hdr = dec.readValue() as Map<*, *>
+                            if ((hdr["msg_type"] as Number).toInt() == 1) {
+                                fetchedMeta = body.copyOfRange(dec.position, body.size)
+                            }
+                        }
+                    } else if (mLen > 1) inp.skipBytes(mLen - 1)
+                }
+                assertArrayEquals("Seeder BEP-9 must return exact info dictionary bytes", rawInfo, fetchedMeta)
+
+                // Send INTERESTED, wait for UNCHOKE, then download both pieces via REQUEST
+                out.writeInt(1); out.writeByte(2); out.flush()
+                var unchoked = false
+                while (!unchoked) {
+                    val mLen = inp.readInt()
+                    if (mLen <= 0) continue
+                    val mId = inp.readUnsignedByte()
+                    if (mId == 1) unchoked = true
+                    else if (mLen > 1) inp.skipBytes(mLen - 1)
+                }
+
+                // Request piece 0 (2048B) and piece 1 (1452B)
+                val requests = listOf(Triple(0, 0, pieceLen), Triple(1, 0, payload.size - pieceLen))
+                for ((idx, off, len) in requests) {
+                    out.writeInt(13); out.writeByte(6); out.writeInt(idx); out.writeInt(off); out.writeInt(len)
+                }
+                out.flush()
+
+                var piecesReceived = 0
+                while (piecesReceived < requests.size) {
+                    val mLen = inp.readInt()
+                    if (mLen <= 0) continue
+                    val mId = inp.readUnsignedByte()
+                    if (mId == 7) {
+                        val rIdx = inp.readInt()
+                        val rBegin = inp.readInt()
+                        val dataLen = mLen - 9
+                        inp.readFully(leecherReceived, rIdx * pieceLen + rBegin, dataLen)
+                        piecesReceived++
+                    } else if (mLen > 1) inp.skipBytes(mLen - 1)
+                }
+            }
+
+            assertArrayEquals("Leecher must receive byte-exact payload from seeder", payload, leecherReceived)
+
+            // Wait briefly for stats sampling & verify uploadedBytes recorded
+            val uploadWaitStart = System.currentTimeMillis()
+            var afterUpload = manager.getSeedSessionStats(itemId)
+            while (System.currentTimeMillis() - uploadWaitStart < 2000L &&
+                (afterUpload == null || afterUpload.uploadedBytes < payload.size.toLong())
+            ) {
+                delay(30L)
+                afterUpload = manager.getSeedSessionStats(itemId)
+            }
+            assertNotNull(afterUpload)
+            assertEquals(payload.size.toLong(), afterUpload!!.uploadedBytes)
+
+            // Stop seeding cleanly & verify stopped announce + zeroed speed
+            manager.stopSeeding(itemId)
+            assertFalse("Seeding must be inactive after stopSeeding", TorrentDownloadManager.isSeedingActive(itemId))
+            assertTrue(
+                "Stopped announce must be sent to tracker on stopSeeding",
+                trackerQueries.any { it.contains("event=stopped") }
+            )
+            val finalRow = repo.getDownloadById(itemId)!!
+            assertEquals(DownloadStatus.COMPLETED, finalRow.status)
+            assertEquals(0L, finalRow.uploadSpeed)
+            assertNull("Completed/seeded item must not pollute errorMessage", finalRow.errorMessage)
+            assertTrue(finalRow.uploadedSize >= payload.size.toLong())
+        } finally {
+            manager.shutdownSeeding()
+            runCatching { server.stop(0) }
+            tempRoot.deleteRecursively()
+        }
     }
 }

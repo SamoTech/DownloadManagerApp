@@ -296,9 +296,29 @@ class MainActivity : AppCompatActivity() {
             "delete" -> showDeleteConfirmation(downloadItem)
             "open" -> openFile(downloadItem)
             "share" -> shareFile(downloadItem)
+            "start_seeding" -> startSeeding(downloadItem)
+            "stop_seeding" -> stopSeeding(downloadItem)
             "copy_link" -> copyLink(downloadItem)
             "details" -> openDownloadDetails(downloadItem)
         }
+    }
+
+    private fun startSeeding(downloadItem: DownloadItem) {
+        if (isBound) {
+            downloadService?.startSeeding(downloadItem.id)
+        } else {
+            sendServiceCommand(DownloadService.ACTION_START_SEEDING, downloadItem.id)
+        }
+        binding.recyclerView.postDelayed({ downloadAdapter.notifyDataSetChanged() }, 250L)
+    }
+
+    private fun stopSeeding(downloadItem: DownloadItem) {
+        if (isBound) {
+            downloadService?.stopSeeding(downloadItem.id)
+        } else {
+            sendServiceCommand(DownloadService.ACTION_STOP_SEEDING, downloadItem.id)
+        }
+        binding.recyclerView.postDelayed({ downloadAdapter.notifyDataSetChanged() }, 250L)
     }
 
     private fun copyLink(downloadItem: DownloadItem) {

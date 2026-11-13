@@ -79,6 +79,8 @@ class DownloadService : Service() {
         const val ACTION_CANCEL_DOWNLOAD = "com.example.downloadmanager.CANCEL_DOWNLOAD"
         const val ACTION_RETRY_DOWNLOAD = "com.example.downloadmanager.RETRY_DOWNLOAD"
         const val ACTION_PROCESS_QUEUE = "com.example.downloadmanager.PROCESS_QUEUE"
+        const val ACTION_START_SEEDING = "com.example.downloadmanager.START_SEEDING"
+        const val ACTION_STOP_SEEDING = "com.example.downloadmanager.STOP_SEEDING"
 
         const val EXTRA_DOWNLOAD_ID = "extra_download_id"
         const val EXTRA_URL = "extra_url"
@@ -119,6 +121,11 @@ class DownloadService : Service() {
         if (key == "use_mobile_data" || key == "max_concurrent_downloads" || key == "auto_resume_failed") {
             serviceScope.launch {
                 enforceNetworkPolicyAndProcessQueue()
+            }
+        } else if (key == "enable_seeding" && !prefs.getBoolean("enable_seeding", true)) {
+            serviceScope.launch {
+                torrentDownloadManager.shutdownSeeding()
+                demoteForegroundIfIdle()
             }
         }
     }
@@ -197,6 +204,8 @@ class DownloadService : Service() {
                 ACTION_RESUME_DOWNLOAD -> if (downloadId != -1L) resumeDownload(downloadId)
                 ACTION_CANCEL_DOWNLOAD -> if (downloadId != -1L) cancelDownload(downloadId)
                 ACTION_RETRY_DOWNLOAD -> if (downloadId != -1L) retryDownload(downloadId)
+                ACTION_START_SEEDING -> if (downloadId != -1L) startSeeding(downloadId)
+                ACTION_STOP_SEEDING -> if (downloadId != -1L) stopSeeding(downloadId)
                 ACTION_PROCESS_QUEUE -> serviceScope.launch { processQueue() }
             }
         }
@@ -321,13 +330,42 @@ class DownloadService : Service() {
     }
 
     private fun demoteForegroundIfIdle() {
-        if (activeDownloadIds.isEmpty() && isInForeground) {
+        val hasSeeding = TorrentDownloadManager.hasAnyActiveSeeding()
+        if (activeDownloadIds.isEmpty() && !hasSeeding && isInForeground) {
             try {
                 stopForeground(STOP_FOREGROUND_DETACH)
                 notificationManager.cancel(FOREGROUND_NOTIFICATION_ID)
             } catch (_: Exception) {}
             isInForeground = false
         }
+    }
+
+    fun startSeeding(downloadId: Long) {
+        serviceScope.launch {
+            val item = repository.getDownloadById(downloadId) ?: return@launch
+            if (item.status != DownloadStatus.COMPLETED) return@launch
+            if (item.downloadType != DownloadType.TORRENT && item.downloadType != DownloadType.MAGNET) return@launch
+            ensureForegroundStarted()
+            val seedJob = torrentDownloadManager.startSeeding(
+                downloadItem = item,
+                announceTrackers = true,
+                enforcePreferences = true
+            )
+            seedJob.invokeOnCompletion {
+                demoteForegroundIfIdle()
+            }
+        }
+    }
+
+    fun stopSeeding(downloadId: Long) {
+        serviceScope.launch {
+            torrentDownloadManager.stopSeeding(downloadId)
+            demoteForegroundIfIdle()
+        }
+    }
+
+    fun getActiveSeedStats(downloadId: Long): TorrentDownloadManager.SeedSessionStats? {
+        return torrentDownloadManager.getSeedSessionStats(downloadId)
     }
 
     fun startNewDownload(item: DownloadItem, onIdCreated: ((Long) -> Unit)? = null) {
@@ -457,6 +495,11 @@ class DownloadService : Service() {
             val onCompleteCallback: (DownloadItem) -> Unit = { completedItem ->
                 serviceScope.launch {
                     showCompletionNotification(completedItem.id, completedItem.filename)
+                    if ((completedItem.downloadType == DownloadType.TORRENT || completedItem.downloadType == DownloadType.MAGNET) &&
+                        torrentDownloadManager.isSeedingEnabled()
+                    ) {
+                        startSeeding(completedItem.id)
+                    }
                 }
             }
 
@@ -841,6 +884,11 @@ class DownloadService : Service() {
 
     override fun onDestroy() {
         runningInProcessIds.clear()
+        runCatching {
+            if (::torrentDownloadManager.isInitialized) {
+                torrentDownloadManager.shutdownSeeding()
+            }
+        }
         try {
             connectivityManager.unregisterNetworkCallback(networkCallback)
         } catch (_: Exception) {}

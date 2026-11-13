@@ -19,16 +19,21 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.ByteArrayInputStream
@@ -43,6 +48,7 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.ServerSocket
 import java.net.Socket
 import java.net.URI
 import java.net.URLDecoder
@@ -57,7 +63,10 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import java.util.zip.GZIPInputStream
 import kotlin.random.Random
 
@@ -68,6 +77,16 @@ class TorrentDownloadManager(
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val activeJobs = ConcurrentHashMap<Long, Job>()
+    private val activeSeedingJobs = ConcurrentHashMap<Long, Job>()
+    private val seedingSessions = ConcurrentHashMap<Long, SeedSession>()
+    private val seedingSessionsByHash = ConcurrentHashMap<String, SeedSession>()
+    private val serverLock = Any()
+    @Volatile
+    private var peerServerSocket: ServerSocket? = null
+    @Volatile
+    private var peerServerAcceptJob: Job? = null
+
+    internal var dhtNodesOverrideForTest: List<Pair<String, Int>>? = null
 
     private val probeHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -100,6 +119,45 @@ class TorrentDownloadManager(
         val hasResolvedMetadata: Boolean = true
     )
 
+    data class SeedSessionStats(
+        val downloadId: Long,
+        val listeningPort: Int,
+        val uploadedBytes: Long,
+        val uploadSpeedBytesPerSec: Long,
+        val connectedPeers: Int,
+        val swarmSeeds: Int,
+        val swarmPeers: Int,
+        val availablePieceCount: Int,
+        val totalPieceCount: Int
+    )
+
+    private class SeedSession(
+        val downloadId: Long,
+        val infoHashHex: String,
+        val infoHashBytes: ByteArray,
+        val peerId: ByteArray,
+        val extMeta: ExtendedTorrentMeta,
+        val torrentFolder: File,
+        val availablePieces: BitSet,
+        val totalPieces: Int,
+        val totalTorrentSize: Long,
+        val payloadSizeForRatio: Long,
+        val pieceLength: Int
+    ) {
+        val uploadedBytes = AtomicLong(0L)
+        val uploadSpeedBytesPerSec = AtomicLong(0L)
+        val connectedPeers = AtomicInteger(0)
+        val swarmSeeds = AtomicInteger(extMeta.metadata.seeds.coerceAtLeast(0))
+        val swarmPeers = AtomicInteger(extMeta.metadata.peers.coerceAtLeast(0))
+        val stopRequested = AtomicBoolean(false)
+        val sockets = ConcurrentHashMap.newKeySet<Socket>()
+        val startedAtMs = System.currentTimeMillis()
+        @Volatile
+        var lastStatsSampleMs = startedAtMs
+        @Volatile
+        var lastStatsSampleBytes = 0L
+    }
+
     companion object {
         private const val TAG = "TorrentDownloadManager"
         private const val BLOCK_SIZE = 16 * 1024 // 16 KB standard BitTorrent block
@@ -115,8 +173,14 @@ class TorrentDownloadManager(
         const val STATUS_PEER_CONNECTION_FAILED = "Peer connection failed"
         const val STATUS_DOWNLOADING = "Downloading"
         const val STATUS_VERIFYING = "Verifying..."
+        const val STATUS_SEEDING = "Seeding"
 
         private val metadataCache = ConcurrentHashMap<String, ExtendedTorrentMeta>()
+        private val activeSeedingIds = ConcurrentHashMap.newKeySet<Long>()
+
+        fun isSeedingActive(downloadId: Long): Boolean = activeSeedingIds.contains(downloadId)
+
+        fun hasAnyActiveSeeding(): Boolean = activeSeedingIds.isNotEmpty()
 
         internal fun clearMetadataCacheForTest() {
             metadataCache.clear()
@@ -181,11 +245,104 @@ class TorrentDownloadManager(
         return runCatching {
             val prefs = PreferenceManager.getDefaultSharedPreferences(ctx)
             if (prefs.contains("allow_third_party_torrent_resolvers")) {
-                prefs.getBoolean("allow_third_party_torrent_resolvers", false)
+                prefs.getBoolean("allow_third_party_torrent_resolvers", true)
             } else {
-                prefs.getBoolean("allow_third_party_resolvers", false)
+                prefs.getBoolean("allow_third_party_resolvers", true)
             }
-        }.getOrDefault(false)
+        }.getOrDefault(true)
+    }
+
+    fun isSeedingEnabled(): Boolean {
+        val ctx = context ?: return false
+        return runCatching {
+            PreferenceManager.getDefaultSharedPreferences(ctx).getBoolean("enable_seeding", true)
+        }.getOrDefault(true)
+    }
+
+    private fun getMaxConnections(): Int {
+        val ctx = context ?: return 32
+        return runCatching {
+            val prefs = PreferenceManager.getDefaultSharedPreferences(ctx)
+            val raw = try {
+                prefs.getString("max_connections", "100")?.toIntOrNull()
+            } catch (_: ClassCastException) {
+                prefs.getInt("max_connections", 100)
+            } ?: 100
+            raw.coerceIn(4, 200)
+        }.getOrDefault(100)
+    }
+
+    private fun getMaxUploadSpeedBytesPerSec(): Long {
+        val ctx = context ?: return 0L
+        return runCatching {
+            val prefs = PreferenceManager.getDefaultSharedPreferences(ctx)
+            val kbps = try {
+                prefs.getString("max_upload_speed", "0")?.toLongOrNull()
+            } catch (_: ClassCastException) {
+                prefs.getInt("max_upload_speed", 0).toLong()
+            } ?: 0L
+            (kbps.coerceAtLeast(0L)) * 1024L
+        }.getOrDefault(0L)
+    }
+
+    private fun getTargetSeedRatio(): Double {
+        val ctx = context ?: return -1.0
+        return runCatching {
+            val prefs = PreferenceManager.getDefaultSharedPreferences(ctx)
+            prefs.getString("seed_ratio", "1.0")?.toDoubleOrNull() ?: 1.0
+        }.getOrDefault(1.0)
+    }
+
+    private fun getSeedUntilSeconds(): Long {
+        val ctx = context ?: return -1L
+        return runCatching {
+            val prefs = PreferenceManager.getDefaultSharedPreferences(ctx)
+            val raw = prefs.getString("seed_until", "forever")?.trim()?.lowercase(Locale.US) ?: "forever"
+            if (raw == "forever" || raw == "-1" || raw.isEmpty()) -1L else (raw.toLongOrNull() ?: -1L)
+        }.getOrDefault(-1L)
+    }
+
+    fun invalidateMetadataCache(magnetOrTorrentUrl: String) {
+        val trimmed = magnetOrTorrentUrl.trim()
+        metadataCache.remove(magnetOrTorrentUrl)
+        metadataCache.remove(trimmed)
+    }
+
+    private fun persistResolvedInfoBytes(
+        hashLower: String,
+        rawInfoBytes: ByteArray,
+        rawTorrentBytes: ByteArray? = null
+    ) {
+        val ctx = context ?: return
+        if (hashLower.length != 40 || rawInfoBytes.isEmpty()) return
+        runCatching {
+            val torrentsDir = File(ctx.filesDir, "torrents").apply { mkdirs() }
+            val infoFile = File(torrentsDir, "info_$hashLower.bin")
+            FileOutputStream(infoFile, false).use { fos ->
+                fos.write(rawInfoBytes)
+                fos.flush()
+            }
+            if (rawTorrentBytes != null && rawTorrentBytes.isNotEmpty()) {
+                val metaFile = File(torrentsDir, "meta_$hashLower.torrent")
+                FileOutputStream(metaFile, false).use { fos ->
+                    fos.write(rawTorrentBytes)
+                    fos.flush()
+                }
+            }
+        }
+    }
+
+    private fun loadCachedInfoBytes(hashLower: String): ByteArray? {
+        val ctx = context ?: return null
+        if (hashLower.length != 40) return null
+        return runCatching {
+            val infoFile = File(ctx.filesDir, "torrents/info_$hashLower.bin")
+            if (infoFile.exists() && infoFile.isFile && infoFile.length() in 1L..(4L * 1024L * 1024L)) {
+                infoFile.readBytes()
+            } else {
+                null
+            }
+        }.getOrNull()
     }
 
     /**
@@ -405,35 +562,32 @@ class TorrentDownloadManager(
                 it.hasResolvedMetadata && it.metadata.hash.equals(hashLower, ignoreCase = true)
             }?.let { return@coroutineScope it }
 
-            val swarmDeferred = async(Dispatchers.IO) {
-                if (infoHashBytes.size == 20) {
-                    val trackerSwarm = if (magnetParams.trackers.isNotEmpty()) {
-                        discoverSwarmFromTrackers(
-                            infoHashBytes = infoHashBytes,
-                            trackers = magnetParams.trackers,
-                            peerIdBytes = sessionPeerId,
-                            leftBytes = magnetParams.exactLength.coerceAtLeast(0L)
-                        )
-                    } else {
-                        SwarmStats(emptyList(), -1, -1, 0)
-                    }
-                    if (trackerSwarm.peers.isNotEmpty() || isLoopbackOnlyMagnet || context == null) {
-                        trackerSwarm
-                    } else {
-                        val dhtPeers = discoverPeersFromDht(infoHashBytes, sessionPeerId)
-                        if (dhtPeers.isNotEmpty()) {
-                            SwarmStats(
-                                peers = (trackerSwarm.peers + dhtPeers).distinct(),
-                                seeders = maxOf(trackerSwarm.seeders, 1),
-                                leechers = maxOf(trackerSwarm.leechers, dhtPeers.size),
-                                respondedTrackers = trackerSwarm.respondedTrackers + 1
-                            )
-                        } else {
-                            trackerSwarm
-                        }
-                    }
+            val probeScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+            val probeParentHandle = coroutineContext[Job]?.invokeOnCompletion { cause ->
+                if (cause != null) probeScope.cancel()
+            }
+            try {
+            val trackerSwarmDeferred = probeScope.async {
+                if (infoHashBytes.size == 20 && magnetParams.trackers.isNotEmpty()) {
+                    discoverSwarmFromTrackers(
+                        infoHashBytes = infoHashBytes,
+                        trackers = magnetParams.trackers,
+                        peerIdBytes = sessionPeerId,
+                        leftBytes = magnetParams.exactLength.coerceAtLeast(0L)
+                    )
                 } else {
                     SwarmStats(emptyList(), -1, -1, 0)
+                }
+            }
+
+            val dhtPeersDeferred = probeScope.async {
+                val canQueryDht = infoHashBytes.size == 20 &&
+                    !isLoopbackOnlyMagnet &&
+                    (context != null || dhtNodesOverrideForTest != null)
+                if (canQueryDht) {
+                    discoverPeersFromDht(infoHashBytes, sessionPeerId)
+                } else {
+                    emptyList()
                 }
             }
 
@@ -461,14 +615,13 @@ class TorrentDownloadManager(
             var firstSecurityException: SecurityException? = null
             var resolvedParsedMeta: ExtendedTorrentMeta? = null
 
-            for (candidateUrl in candidateTorrentUrls) {
-                val isExplicitCandidate = candidateUrl in explicitUrlSet
+            // Fetch explicit torrent URLs first, then race any public cache URLs concurrently
+            for (candidateUrl in explicitTorrentUrls) {
                 val bytes = withTimeoutOrNull(4500L) {
                     runCatching { readLocalOrRemoteTorrentBytes(candidateUrl) }.getOrNull()
                 } ?: continue
                 if (!isValidBencodedTorrent(bytes)) continue
                 try {
-                    // Strictly enforce the requested Magnet info-hash for EVERY candidate source
                     val parsed = parseBencodedTorrentBytes(
                         bytes = bytes,
                         fallbackHash = magnetParams.infoHash,
@@ -479,15 +632,121 @@ class TorrentDownloadManager(
                     resolvedParsedMeta = parsed
                     break
                 } catch (se: SecurityException) {
-                    if (isExplicitCandidate && firstSecurityException == null) {
-                        firstSecurityException = se
-                    }
-                    // Continue checking subsequent candidate sources so a bad source never suppresses a valid later source
+                    if (firstSecurityException == null) firstSecurityException = se
                 } catch (_: Exception) {
                 }
             }
 
-            val swarm = swarmDeferred.await()
+            if (resolvedParsedMeta == null && publicCacheTorrentUrls.isNotEmpty()) {
+                val winnerChannel = Channel<ExtendedTorrentMeta>(Channel.CONFLATED)
+                val activeCalls = ConcurrentHashMap.newKeySet<Call>()
+                val cacheWorkers = publicCacheTorrentUrls.map { candidateUrl ->
+                    probeScope.launch {
+                        val bytes = withTimeoutOrNull(4500L) {
+                            runCatching {
+                                readLocalOrRemoteTorrentBytes(candidateUrl) { call ->
+                                    activeCalls.add(call)
+                                }
+                            }.getOrNull()
+                        } ?: return@launch
+                        if (!isValidBencodedTorrent(bytes)) return@launch
+                        val parsed = runCatching {
+                            parseBencodedTorrentBytes(
+                                bytes = bytes,
+                                fallbackHash = magnetParams.infoHash,
+                                extraTrackers = magnetParams.trackers,
+                                extraWebSeeds = mergedWebSeeds,
+                                expectedInfoHash = hashLower
+                            )
+                        }.getOrNull()
+                        if (parsed != null) {
+                            winnerChannel.trySend(parsed)
+                        }
+                    }
+                }
+                try {
+                    resolvedParsedMeta = withTimeoutOrNull(4800L) { winnerChannel.receive() }
+                } finally {
+                    activeCalls.forEach { runCatching { it.cancel() } }
+                    activeCalls.clear()
+                    cacheWorkers.forEach { it.cancel() }
+                    winnerChannel.close()
+                }
+            }
+
+            // Race DHT peers + BEP-9 immediately if DHT yields peers before trackers finish, then fall back to full tracker wait
+            val earlyDhtPeers = withTimeoutOrNull(1800L) { dhtPeersDeferred.await() } ?: emptyList()
+            val trackerSwarmEarly = if (earlyDhtPeers.isNotEmpty()) {
+                if (trackerSwarmDeferred.isCompleted) {
+                    trackerSwarmDeferred.await()
+                } else {
+                    withTimeoutOrNull(250L) { trackerSwarmDeferred.await() }
+                }
+            } else {
+                trackerSwarmDeferred.await()
+            }
+
+            if (resolvedParsedMeta == null && trackerSwarmEarly == null && earlyDhtPeers.isNotEmpty() && infoHashBytes.size == 20) {
+                val dhtBep9Info = fetchMetadataFromPeersBep9(infoHashBytes, earlyDhtPeers, sessionPeerId)
+                if (dhtBep9Info != null) {
+                    val intermediateTracker = if (trackerSwarmDeferred.isCompleted) {
+                        trackerSwarmDeferred.await()
+                    } else {
+                        SwarmStats(emptyList(), -1, -1, 0)
+                    }
+                    trackerSwarmDeferred.cancel()
+                    val combinedEarlyPeers = (intermediateTracker.peers + earlyDhtPeers).distinct()
+                    val respondedEarlySources = intermediateTracker.respondedTrackers + 1
+                    val earlySeeds = maxOf(intermediateTracker.seeders.coerceAtLeast(0), 1)
+                    val earlyPeersCount = maxOf(intermediateTracker.leechers.coerceAtLeast(0), combinedEarlyPeers.size)
+                    val parsedFromPeer = parseRawInfoDictionaryBytes(
+                        infoBytes = dhtBep9Info,
+                        infoHashHex = hashLower,
+                        trackers = magnetParams.trackers,
+                        webSeeds = mergedWebSeeds
+                    )
+                    val withSwarm = parsedFromPeer.copy(
+                        metadata = parsedFromPeer.metadata.copy(
+                            seeds = earlySeeds,
+                            peers = earlyPeersCount,
+                            swarmMeasured = true,
+                            swarmTimestampMs = System.currentTimeMillis(),
+                            trackerStatus = "Active (${combinedEarlyPeers.size} peers via DHT)",
+                            hasResolvedMetadata = true
+                        )
+                    )
+                    persistResolvedInfoBytes(hashLower, withSwarm.rawInfoBytes)
+                    metadataCache[trimmed] = withSwarm
+                    metadataCache["hash:$hashLower"] = withSwarm
+                    return@coroutineScope withSwarm
+                }
+            }
+
+            val trackerSwarm = trackerSwarmEarly ?: trackerSwarmDeferred.await()
+            val dhtPeers = if (earlyDhtPeers.isNotEmpty()) {
+                earlyDhtPeers
+            } else if (trackerSwarm.peers.size >= 25) {
+                dhtPeersDeferred.cancel()
+                emptyList()
+            } else {
+                dhtPeersDeferred.await()
+            }
+            val mergedPeers = (trackerSwarm.peers + dhtPeers).distinct()
+            val respondedSources = trackerSwarm.respondedTrackers + if (dhtPeers.isNotEmpty()) 1 else 0
+            val swarm = SwarmStats(
+                peers = mergedPeers,
+                seeders = when {
+                    trackerSwarm.seeders >= 0 && dhtPeers.isNotEmpty() -> maxOf(trackerSwarm.seeders, 1)
+                    trackerSwarm.respondedTrackers > 0 -> trackerSwarm.seeders
+                    dhtPeers.isNotEmpty() -> 1
+                    else -> -1
+                },
+                leechers = when {
+                    respondedSources > 0 -> maxOf(trackerSwarm.leechers.coerceAtLeast(0), mergedPeers.size)
+                    else -> -1
+                },
+                respondedTrackers = respondedSources
+            )
             val measuredSeeds = if (swarm.respondedTrackers > 0) swarm.seeders.coerceAtLeast(0) else -1
             val measuredPeers = if (swarm.respondedTrackers > 0) {
                 maxOf(swarm.leechers, swarm.peers.size).coerceAtLeast(0)
@@ -515,7 +774,9 @@ class TorrentDownloadManager(
                         hasResolvedMetadata = true
                     )
                 )
+                persistResolvedInfoBytes(hashLower, withSwarm.rawInfoBytes)
                 metadataCache[trimmed] = withSwarm
+                metadataCache["hash:$hashLower"] = withSwarm
                 return@coroutineScope withSwarm
             }
 
@@ -539,7 +800,36 @@ class TorrentDownloadManager(
                             hasResolvedMetadata = true
                         )
                     )
+                    persistResolvedInfoBytes(hashLower, withSwarm.rawInfoBytes)
                     metadataCache[trimmed] = withSwarm
+                    metadataCache["hash:$hashLower"] = withSwarm
+                    return@coroutineScope withSwarm
+                }
+            }
+
+            // Also check locally cached raw info dictionary bytes if previously resolved
+            loadCachedInfoBytes(hashLower)?.let { cachedInfo ->
+                val parsedCached = runCatching {
+                    parseRawInfoDictionaryBytes(
+                        infoBytes = cachedInfo,
+                        infoHashHex = hashLower,
+                        trackers = magnetParams.trackers,
+                        webSeeds = mergedWebSeeds
+                    )
+                }.getOrNull()
+                if (parsedCached != null) {
+                    val withSwarm = parsedCached.copy(
+                        metadata = parsedCached.metadata.copy(
+                            seeds = measuredSeeds,
+                            peers = measuredPeers,
+                            swarmMeasured = swarm.respondedTrackers > 0,
+                            swarmTimestampMs = if (swarm.respondedTrackers > 0) nowMs else 0L,
+                            trackerStatus = computedTrackerStatus,
+                            hasResolvedMetadata = true
+                        )
+                    )
+                    metadataCache[trimmed] = withSwarm
+                    metadataCache["hash:$hashLower"] = withSwarm
                     return@coroutineScope withSwarm
                 }
             }
@@ -567,6 +857,10 @@ class TorrentDownloadManager(
                 trackerStatus = computedTrackerStatus
             )
             return@coroutineScope fallbackMeta
+            } finally {
+                probeParentHandle?.dispose()
+                probeScope.cancel()
+            }
         } else {
             metadataCache[trimmed]?.takeIf { it.hasResolvedMetadata && it.metadata.swarmMeasured }?.let {
                 return@coroutineScope it
@@ -583,12 +877,21 @@ class TorrentDownloadManager(
                     extraTrackers = emptyList(),
                     extraWebSeeds = emptyList()
                 )
+                val hashLower = parsed.metadata.hash.lowercase(Locale.US)
+                persistResolvedInfoBytes(hashLower, parsed.rawInfoBytes, torrentBytes)
                 // Cache parsed .torrent file list immediately so UI and startTorrentDownload have the exact file tree even if trackers are slow
                 metadataCache.putIfAbsent(trimmed, parsed)
+                metadataCache.putIfAbsent("hash:$hashLower", parsed)
 
                 val hashBytes = hexToBytes(parsed.metadata.hash)
                 val isLoopbackOnly = parsed.trackers.isNotEmpty() && parsed.trackers.all { isLoopbackTracker(it) }
-                val swarm = if (hashBytes.size == 20 && parsed.trackers.isNotEmpty()) {
+                val dhtDeferred = async(Dispatchers.IO) {
+                    val canQueryDht = hashBytes.size == 20 &&
+                        !isLoopbackOnly &&
+                        (context != null || dhtNodesOverrideForTest != null)
+                    if (canQueryDht) discoverPeersFromDht(hashBytes, sessionPeerId) else emptyList()
+                }
+                val trackerSwarm = if (hashBytes.size == 20 && parsed.trackers.isNotEmpty()) {
                     val primarySwarm = discoverSwarmFromTrackers(
                         infoHashBytes = hashBytes,
                         trackers = parsed.trackers,
@@ -598,38 +901,35 @@ class TorrentDownloadManager(
                     if (primarySwarm.peers.isNotEmpty() || isLoopbackOnly) {
                         primarySwarm
                     } else {
-                        val fallbackSwarm = discoverSwarmFromTrackers(
+                        discoverSwarmFromTrackers(
                             infoHashBytes = hashBytes,
                             trackers = effectiveTrackersForSwarm(parsed.trackers),
                             peerIdBytes = sessionPeerId,
                             leftBytes = parsed.metadata.totalSize.coerceAtLeast(0L)
                         )
-                        if (fallbackSwarm.peers.isNotEmpty() || context == null) {
-                            fallbackSwarm
-                        } else {
-                            val dhtPeers = discoverPeersFromDht(hashBytes, sessionPeerId)
-                            if (dhtPeers.isNotEmpty()) {
-                                SwarmStats(
-                                    peers = dhtPeers,
-                                    seeders = maxOf(fallbackSwarm.seeders, 1),
-                                    leechers = maxOf(fallbackSwarm.leechers, dhtPeers.size),
-                                    respondedTrackers = fallbackSwarm.respondedTrackers + 1
-                                )
-                            } else {
-                                fallbackSwarm
-                            }
-                        }
-                    }
-                } else if (hashBytes.size == 20 && parsed.trackers.isEmpty() && context != null) {
-                    val dhtPeers = discoverPeersFromDht(hashBytes, sessionPeerId)
-                    if (dhtPeers.isNotEmpty()) {
-                        SwarmStats(dhtPeers, 1, dhtPeers.size, 1)
-                    } else {
-                        SwarmStats(emptyList(), -1, -1, 0)
                     }
                 } else {
                     SwarmStats(emptyList(), -1, -1, 0)
                 }
+                val dhtPeers = if (trackerSwarm.peers.size >= 25) {
+                    dhtDeferred.cancel()
+                    emptyList()
+                } else {
+                    dhtDeferred.await()
+                }
+                val mergedPeers = (trackerSwarm.peers + dhtPeers).distinct()
+                val respondedSources = trackerSwarm.respondedTrackers + if (dhtPeers.isNotEmpty()) 1 else 0
+                val swarm = SwarmStats(
+                    peers = mergedPeers,
+                    seeders = when {
+                        trackerSwarm.seeders >= 0 && dhtPeers.isNotEmpty() -> maxOf(trackerSwarm.seeders, 1)
+                        trackerSwarm.respondedTrackers > 0 -> trackerSwarm.seeders
+                        dhtPeers.isNotEmpty() -> 1
+                        else -> -1
+                    },
+                    leechers = if (respondedSources > 0) maxOf(trackerSwarm.leechers.coerceAtLeast(0), mergedPeers.size) else -1,
+                    respondedTrackers = respondedSources
+                )
                 val measuredSeeds = if (swarm.respondedTrackers > 0) swarm.seeders.coerceAtLeast(0) else -1
                 val measuredPeers = if (swarm.respondedTrackers > 0) {
                     maxOf(swarm.leechers, swarm.peers.size).coerceAtLeast(0)
@@ -656,6 +956,7 @@ class TorrentDownloadManager(
                     )
                 )
                 metadataCache[trimmed] = withSwarm
+                metadataCache["hash:$hashLower"] = withSwarm
                 return@coroutineScope withSwarm
             }
 
@@ -663,12 +964,15 @@ class TorrentDownloadManager(
         }
     }
 
-    private fun readLocalOrRemoteTorrentBytes(uriOrPath: String): ByteArray? {
+    private fun readLocalOrRemoteTorrentBytes(
+        uriOrPath: String,
+        onCallCreated: ((Call) -> Unit)? = null
+    ): ByteArray? {
         val trimmed = uriOrPath.trim()
         return when {
             trimmed.startsWith("http://", ignoreCase = true) ||
                 trimmed.startsWith("https://", ignoreCase = true) -> {
-                fetchBytesFast(trimmed)
+                fetchBytesFast(trimmed, onCallCreated)
             }
             trimmed.startsWith("content://", ignoreCase = true) -> {
                 val ctx = context ?: return null
@@ -1003,6 +1307,7 @@ class TorrentDownloadManager(
      * Cancels any active transfer coroutine for [downloadId] and awaits its termination.
      */
     suspend fun stopAndAwait(downloadId: Long) {
+        stopSeeding(downloadId)
         val job = activeJobs.remove(downloadId)
         if (job != null && job.isActive) {
             job.cancelAndJoin()
@@ -1055,7 +1360,7 @@ class TorrentDownloadManager(
                     m.swarmMeasured && m.peers > 0 ->
                         "Connected swarm peers (${m.peers}) did not provide BEP-9 (ut_metadata) torrent metadata"
                     else ->
-                        "$STATUS_TRACKER_UNREACHABLE: could not resolve magnet metadata (trackers unreachable and DHT is not supported)"
+                        "$STATUS_TRACKER_UNREACHABLE: could not resolve magnet metadata via trackers, DHT, or metadata caches"
                 }
                 throw IOException(reason)
             }
@@ -1300,7 +1605,31 @@ class TorrentDownloadManager(
                 mediaSource = if (completedViaWebSeeds) "BitTorrent WebSeed" else "BitTorrent Peer Swarm",
                 integrityStatus = verification.integrityStatus
             )
+            metadataCache[sourceUri.trim()] = extMeta
+            metadataCache["hash:${meta.hash.lowercase(Locale.US)}"] = extMeta
+            persistResolvedInfoBytes(meta.hash.lowercase(Locale.US), extMeta.rawInfoBytes)
             repository.update(completedItem)
+
+            if (extMeta.trackers.isNotEmpty() && !extMeta.trackers.all { isLoopbackTracker(it) }) {
+                val announceHash = hexToBytes(meta.hash)
+                if (announceHash.size == 20) {
+                    val announcePort = getPeerServerPort().let { if (it > 0) it else 6881 }
+                    scope.launch(Dispatchers.IO) {
+                        runCatching {
+                            discoverSwarmFromTrackers(
+                                infoHashBytes = announceHash,
+                                trackers = extMeta.trackers.take(6),
+                                peerIdBytes = generatePeerId(),
+                                leftBytes = 0L,
+                                port = announcePort,
+                                downloadedBytes = actualBytesOnDisk,
+                                event = "completed"
+                            )
+                        }
+                    }
+                }
+            }
+
             onComplete(completedItem)
 
         } catch (_: CancellationException) {
@@ -1662,14 +1991,29 @@ class TorrentDownloadManager(
                     repository.update(current.copy(errorMessage = STATUS_CONTACTING_TRACKER))
                 }
             }
-            val isLoopbackOnly = candidateTrackers.isNotEmpty() && candidateTrackers.all { isLoopbackTracker(it) }
-            val primarySwarm = discoverSwarmFromTrackers(infoHashBytes, candidateTrackers, sessionPeerId, initialRemainingBytes)
+            val isLoopbackOnly = extMeta.trackers.isNotEmpty() && extMeta.trackers.all { isLoopbackTracker(it) }
+            val activePort = getPeerServerPort().let { if (it > 0) it else 6881 }
+            val primarySwarm = discoverSwarmFromTrackers(
+                infoHashBytes = infoHashBytes,
+                trackers = candidateTrackers,
+                peerIdBytes = sessionPeerId,
+                leftBytes = initialRemainingBytes,
+                port = activePort,
+                event = "started"
+            )
             val trackerSwarm = if (primarySwarm.peers.isNotEmpty() || isLoopbackOnly) {
                 primarySwarm
             } else {
                 val fallbackTrackers = (defaultTrackers - candidateTrackers.toSet()).distinct()
                 if (fallbackTrackers.isNotEmpty()) {
-                    val secondarySwarm = discoverSwarmFromTrackers(infoHashBytes, fallbackTrackers, sessionPeerId, initialRemainingBytes)
+                    val secondarySwarm = discoverSwarmFromTrackers(
+                        infoHashBytes = infoHashBytes,
+                        trackers = fallbackTrackers,
+                        peerIdBytes = sessionPeerId,
+                        leftBytes = initialRemainingBytes,
+                        port = activePort,
+                        event = "started"
+                    )
                     if (secondarySwarm.respondedTrackers > 0) {
                         SwarmStats(
                             peers = (primarySwarm.peers + secondarySwarm.peers).distinct(),
@@ -1684,7 +2028,7 @@ class TorrentDownloadManager(
                     primarySwarm
                 }
             }
-            val swarm = if (trackerSwarm.peers.isNotEmpty() || isLoopbackOnly || context == null) {
+            val swarm = if (trackerSwarm.peers.isNotEmpty() || isLoopbackOnly || (context == null && dhtNodesOverrideForTest == null)) {
                 trackerSwarm
             } else {
                 val dhtPeers = discoverPeersFromDht(infoHashBytes, sessionPeerId)
@@ -1853,389 +2197,500 @@ class TorrentDownloadManager(
         val unchokedPeers = AtomicInteger(0)
         val lastPeerSocketError = java.util.concurrent.atomic.AtomicReference<String?>(null)
 
-        val initialCandidates = peers.take(100)
+        val maxConns = getMaxConnections()
+        val initialCandidates = peers.take(maxOf(maxConns, 100))
         val peerQueue = ConcurrentLinkedQueue<InetSocketAddress>(initialCandidates)
         val seenPeers = ConcurrentHashMap.newKeySet<InetSocketAddress>().apply {
             addAll(initialCandidates)
         }
 
-        fun claimNextPieceForPeer(peerBitfield: BitSet): Int? {
+        fun claimNextPieceForPeer(peerBitfield: BitSet, peerRejected: Set<Int>): Int? {
             // 1. Prefer an unclaimed needed piece that the peer advertises (or any needed piece if peer sent no bitfield)
             for (p in neededPiecesList) {
-                if (p in completedPieces || p in inFlightPieces) continue
+                if (p in completedPieces || p in inFlightPieces || p in peerRejected) continue
                 if (peerBitfield.isEmpty || peerBitfield.get(p)) {
                     if (inFlightPieces.add(p)) return p
                 }
             }
             // 2. Fallback if peerBitfield only had partial HAVE announcements
             for (p in neededPiecesList) {
-                if (p in completedPieces || p in inFlightPieces) continue
+                if (p in completedPieces || p in inFlightPieces || p in peerRejected) continue
                 if (inFlightPieces.add(p)) return p
             }
             // 3. Endgame mode: all remaining needed pieces are already in-flight on slow peers; allow racing
             for (p in neededPiecesList) {
-                if (p !in completedPieces && (peerBitfield.isEmpty || peerBitfield.get(p))) {
+                if (p !in completedPieces && p !in peerRejected && (peerBitfield.isEmpty || peerBitfield.get(p))) {
                     return p
                 }
             }
             return null
         }
 
-        val workerCount = minOf(8, initialCandidates.size.coerceAtLeast(1))
-        val workers = (0 until workerCount).map {
-            async(Dispatchers.IO) {
-                while (completedPieces.size < neededPiecesList.size) {
-                    val peer = peerQueue.poll() ?: break
-                    ensureActive()
-                    val st = repository.getDownloadById(item.id)?.status
-                    if (st == DownloadStatus.PAUSED || st == DownloadStatus.CANCELLED) {
-                        throw CancellationException()
-                    }
+        suspend fun runPeerWorkerWave(workerCount: Int) = coroutineScope {
+            val workers = (0 until workerCount).map {
+                async(Dispatchers.IO) {
+                    var emptyWaitLoops = 0
+                    while (completedPieces.size < neededPiecesList.size) {
+                        val peer = peerQueue.poll()
+                        if (peer == null) {
+                            if (connectedPeersCount.get() > 0 && emptyWaitLoops < 20) {
+                                emptyWaitLoops++
+                                delay(150L)
+                                continue
+                            }
+                            break
+                        }
+                        emptyWaitLoops = 0
+                        ensureActive()
+                        val st = repository.getDownloadById(item.id)?.status
+                        if (st == DownloadStatus.PAUSED || st == DownloadStatus.CANCELLED) {
+                            throw CancellationException()
+                        }
 
-                    runCatching {
-                        Socket().use { socket ->
-                            socket.connect(peer, 3000)
-                            socket.soTimeout = 8000
-                            tcpConnectedPeers.incrementAndGet()
-                            connectedPeersCount.incrementAndGet()
-                            try {
-                                val out = DataOutputStream(socket.getOutputStream())
-                                val inp = DataInputStream(socket.getInputStream())
+                        runCatching {
+                            Socket().use { socket ->
+                                socket.connect(peer, 3000)
+                                socket.soTimeout = 8000
+                                tcpConnectedPeers.incrementAndGet()
+                                connectedPeersCount.incrementAndGet()
+                                try {
+                                    val out = DataOutputStream(socket.getOutputStream())
+                                    val inp = DataInputStream(socket.getInputStream())
 
-                                // 68-byte BitTorrent handshake with consistent sessionPeerId and BEP-10 Extension flag
-                                out.writeByte(19)
-                                out.write("BitTorrent protocol".toByteArray(StandardCharsets.US_ASCII))
-                                val handshakeReserved = ByteArray(8).apply { this[5] = 0x10.toByte() }
-                                out.write(handshakeReserved)
-                                out.write(infoHashBytes)
-                                out.write(sessionPeerId)
-                                out.flush()
+                                    // 68-byte BitTorrent handshake with consistent sessionPeerId and BEP-10 Extension flag
+                                    out.writeByte(19)
+                                    out.write("BitTorrent protocol".toByteArray(StandardCharsets.US_ASCII))
+                                    val handshakeReserved = ByteArray(8).apply { this[5] = 0x10.toByte() }
+                                    out.write(handshakeReserved)
+                                    out.write(infoHashBytes)
+                                    out.write(sessionPeerId)
+                                    out.flush()
 
-                                val pstrlen = inp.readUnsignedByte()
-                                if (pstrlen != 19) return@use
-                                val proto = ByteArray(19)
-                                inp.readFully(proto)
-                                val reserved = ByteArray(8)
-                                inp.readFully(reserved)
-                                val peerHash = ByteArray(20)
-                                inp.readFully(peerHash)
-                                val peerId = ByteArray(20)
-                                inp.readFully(peerId)
-                                if (!peerHash.contentEquals(infoHashBytes)) return@use
+                                    val pstrlen = inp.readUnsignedByte()
+                                    if (pstrlen != 19) return@use
+                                    val proto = ByteArray(19)
+                                    inp.readFully(proto)
+                                    val reserved = ByteArray(8)
+                                    inp.readFully(reserved)
+                                    val peerHash = ByteArray(20)
+                                    inp.readFully(peerHash)
+                                    val peerId = ByteArray(20)
+                                    inp.readFully(peerId)
+                                    if (!peerHash.contentEquals(infoHashBytes)) return@use
 
-                                // If peer advertises BEP-10 Extension Protocol support, send extended handshake for ut_pex (id=2)
-                                if ((reserved[5].toInt() and 0x10) != 0) {
-                                    val extHs = "d1:md11:ut_metadatai1e6:ut_pexi2eee".toByteArray(StandardCharsets.US_ASCII)
-                                    out.writeInt(2 + extHs.size)
-                                    out.writeByte(20)
-                                    out.writeByte(0)
-                                    out.write(extHs)
-                                }
+                                    // If peer advertises BEP-10 Extension Protocol support, send extended handshake for ut_pex (id=2)
+                                    if ((reserved[5].toInt() and 0x10) != 0) {
+                                        val extHs = "d1:md11:ut_metadatai1e6:ut_pexi2eee".toByteArray(StandardCharsets.US_ASCII)
+                                        out.writeInt(2 + extHs.size)
+                                        out.writeByte(20)
+                                        out.writeByte(0)
+                                        out.write(extHs)
+                                    }
 
-                                // Send INTERESTED (id = 2)
-                                out.writeInt(1)
-                                out.writeByte(2)
-                                out.flush()
+                                    // Send INTERESTED (id = 2)
+                                    out.writeInt(1)
+                                    out.writeByte(2)
+                                    out.flush()
 
-                                var peerChoking = true
-                                val peerBitfield = BitSet(extMeta.pieceHashes.size)
+                                    var peerChoking = true
+                                    var peerUtPexId = 2
+                                    val peerBitfield = BitSet(extMeta.pieceHashes.size)
+                                    val peerRejectedPieces = HashSet<Int>()
 
-                                fun handleControlMessage(msgId: Int, payloadLen: Int) {
-                                    when (msgId) {
-                                        0 -> {
-                                            peerChoking = true
-                                            if (payloadLen > 0) skipFully(inp, payloadLen)
-                                        }
-                                        1 -> {
-                                            peerChoking = false
-                                            if (payloadLen > 0) skipFully(inp, payloadLen)
-                                        }
-                                        4 -> {
-                                            if (payloadLen >= 4) {
-                                                val haveIdx = inp.readInt()
-                                                if (haveIdx in 0 until extMeta.pieceHashes.size) {
-                                                    peerBitfield.set(haveIdx)
-                                                }
-                                                if (payloadLen > 4) skipFully(inp, payloadLen - 4)
-                                            } else if (payloadLen > 0) {
-                                                skipFully(inp, payloadLen)
-                                            }
-                                        }
-                                        5 -> {
-                                            val bf = ByteArray(payloadLen)
-                                            inp.readFully(bf)
-                                            for (i in 0 until extMeta.pieceHashes.size) {
-                                                val byteIdx = i / 8
-                                                val bitIdx = 7 - (i % 8)
-                                                if (byteIdx < bf.size && ((bf[byteIdx].toInt() shr bitIdx) and 1) == 1) {
-                                                    peerBitfield.set(i)
-                                                }
-                                            }
-                                        }
-                                        14 -> {
-                                            // BEP-6 Fast Extension HAVE_ALL
-                                            peerBitfield.set(0, extMeta.pieceHashes.size)
-                                            if (payloadLen > 0) skipFully(inp, payloadLen)
-                                        }
-                                        15 -> {
-                                            // BEP-6 Fast Extension HAVE_NONE
-                                            peerBitfield.clear()
-                                            if (payloadLen > 0) skipFully(inp, payloadLen)
-                                        }
-                                        20 -> {
-                                            // BEP-10 Extended message (e.g. ut_pex peer exchange)
-                                            if (payloadLen >= 1) {
-                                                val extId = inp.readUnsignedByte()
-                                                val extBody = ByteArray(payloadLen - 1)
-                                                inp.readFully(extBody)
-                                                if (extId == 2 && seenPeers.size < 180) {
+                                    fun addDiscoveredPexPeers(pexMap: Map<*, *>?) {
+                                        if (pexMap == null) return
+                                        val added = pexMap["added"] as? ByteArray
+                                        if (added != null) {
+                                            var idx = 0
+                                            while (idx + 6 <= added.size && seenPeers.size < 180) {
+                                                val ip = added.copyOfRange(idx, idx + 4)
+                                                val p = ((added[idx + 4].toInt() and 0xFF) shl 8) or
+                                                    (added[idx + 5].toInt() and 0xFF)
+                                                if (p in 1..65535) {
                                                     runCatching {
-                                                        val pexMap = SimpleBencodeDecoder(extBody).readValue() as? Map<*, *>
-                                                        val added = pexMap?.get("added") as? ByteArray
-                                                        if (added != null) {
-                                                            var idx = 0
-                                                            while (idx + 6 <= added.size && seenPeers.size < 180) {
-                                                                val ip = added.copyOfRange(idx, idx + 4)
-                                                                val p = ((added[idx + 4].toInt() and 0xFF) shl 8) or
-                                                                    (added[idx + 5].toInt() and 0xFF)
-                                                                if (p in 1..65535) {
-                                                                    val addr = InetSocketAddress(InetAddress.getByAddress(ip), p)
-                                                                    if (seenPeers.add(addr)) {
-                                                                        peerQueue.offer(addr)
-                                                                    }
-                                                                }
-                                                                idx += 6
-                                                            }
-                                                        }
+                                                        val addr = InetSocketAddress(InetAddress.getByAddress(ip), p)
+                                                        if (seenPeers.add(addr)) peerQueue.offer(addr)
                                                     }
                                                 }
-                                            } else if (payloadLen > 0) {
-                                                skipFully(inp, payloadLen)
+                                                idx += 6
                                             }
                                         }
-                                        else -> {
-                                            if (payloadLen > 0) skipFully(inp, payloadLen)
+                                        val added6 = pexMap["added6"] as? ByteArray
+                                        if (added6 != null) {
+                                            var idx = 0
+                                            while (idx + 18 <= added6.size && seenPeers.size < 180) {
+                                                val ip6 = added6.copyOfRange(idx, idx + 16)
+                                                val p = ((added6[idx + 16].toInt() and 0xFF) shl 8) or
+                                                    (added6[idx + 17].toInt() and 0xFF)
+                                                if (p in 1..65535) {
+                                                    runCatching {
+                                                        val addr = InetSocketAddress(InetAddress.getByAddress(ip6), p)
+                                                        if (seenPeers.add(addr)) peerQueue.offer(addr)
+                                                    }
+                                                }
+                                                idx += 18
+                                            }
                                         }
                                     }
-                                }
 
-                                var waitLoops = 0
-                                val unchokeDeadline = System.currentTimeMillis() + 6500L
-                                while (peerChoking && waitLoops < 256 && System.currentTimeMillis() < unchokeDeadline) {
-                                    waitLoops++
-                                    val len = inp.readInt()
-                                    if (len <= 0) continue
-                                    if (len > 2 * 1024 * 1024) return@use
-                                    val msgId = inp.readUnsignedByte()
-                                    handleControlMessage(msgId, len - 1)
-                                }
+                                    fun handleControlMessage(msgId: Int, payloadLen: Int) {
+                                        when (msgId) {
+                                            0 -> {
+                                                peerChoking = true
+                                                if (payloadLen > 0) skipFully(inp, payloadLen)
+                                            }
+                                            1 -> {
+                                                peerChoking = false
+                                                if (payloadLen > 0) skipFully(inp, payloadLen)
+                                            }
+                                            4 -> {
+                                                if (payloadLen >= 4) {
+                                                    val haveIdx = inp.readInt()
+                                                    if (haveIdx in 0 until extMeta.pieceHashes.size) {
+                                                        peerBitfield.set(haveIdx)
+                                                    }
+                                                    if (payloadLen > 4) skipFully(inp, payloadLen - 4)
+                                                } else if (payloadLen > 0) {
+                                                    skipFully(inp, payloadLen)
+                                                }
+                                            }
+                                            5 -> {
+                                                val bf = ByteArray(payloadLen)
+                                                inp.readFully(bf)
+                                                for (i in 0 until extMeta.pieceHashes.size) {
+                                                    val byteIdx = i / 8
+                                                    val bitIdx = 7 - (i % 8)
+                                                    if (byteIdx < bf.size && ((bf[byteIdx].toInt() shr bitIdx) and 1) == 1) {
+                                                        peerBitfield.set(i)
+                                                    }
+                                                }
+                                            }
+                                            14 -> {
+                                                // BEP-6 Fast Extension HAVE_ALL
+                                                peerBitfield.set(0, extMeta.pieceHashes.size)
+                                                if (payloadLen > 0) skipFully(inp, payloadLen)
+                                            }
+                                            15 -> {
+                                                // BEP-6 Fast Extension HAVE_NONE
+                                                peerBitfield.clear()
+                                                if (payloadLen > 0) skipFully(inp, payloadLen)
+                                            }
+                                            16 -> {
+                                                // BEP-6 REJECT_REQUEST (outside active piece loop)
+                                                if (payloadLen >= 4) {
+                                                    val rejIdx = inp.readInt()
+                                                    peerRejectedPieces.add(rejIdx)
+                                                    if (payloadLen > 4) skipFully(inp, payloadLen - 4)
+                                                } else if (payloadLen > 0) {
+                                                    skipFully(inp, payloadLen)
+                                                }
+                                            }
+                                            20 -> {
+                                                // BEP-10 Extended message (handshake or ut_pex peer exchange)
+                                                if (payloadLen >= 1) {
+                                                    val extId = inp.readUnsignedByte()
+                                                    val extBody = ByteArray(payloadLen - 1)
+                                                    inp.readFully(extBody)
+                                                    if (extId == 0) {
+                                                        runCatching {
+                                                            val hsMap = SimpleBencodeDecoder(extBody).readValue() as? Map<*, *>
+                                                            val mMap = hsMap?.get("m") as? Map<*, *>
+                                                            val pexVal = (mMap?.get("ut_pex") as? Number)?.toInt()
+                                                            if (pexVal != null && pexVal > 0) peerUtPexId = pexVal
+                                                        }
+                                                    } else if ((extId == 2 || extId == peerUtPexId) && seenPeers.size < 180) {
+                                                        runCatching {
+                                                            val pexMap = SimpleBencodeDecoder(extBody).readValue() as? Map<*, *>
+                                                            addDiscoveredPexPeers(pexMap)
+                                                        }
+                                                    }
+                                                } else if (payloadLen > 0) {
+                                                    skipFully(inp, payloadLen)
+                                                }
+                                            }
+                                            else -> {
+                                                if (payloadLen > 0) skipFully(inp, payloadLen)
+                                            }
+                                        }
+                                    }
 
-                                if (peerChoking) return@use
-                                unchokedPeers.incrementAndGet()
-
-                                while (completedPieces.size < neededPiecesList.size && !peerChoking) {
-                                    // Drain any pending HAVE/BITFIELD/PEX messages already in socket buffer before piece selection
-                                    var drainCount = 0
-                                    while (!peerChoking && drainCount < 64 && runCatching { inp.available() >= 4 }.getOrDefault(false)) {
-                                        drainCount++
+                                    var waitLoops = 0
+                                    val unchokeDeadline = System.currentTimeMillis() + 6500L
+                                    while (peerChoking && waitLoops < 256 && System.currentTimeMillis() < unchokeDeadline) {
+                                        waitLoops++
                                         val len = inp.readInt()
-                                        if (len <= 0) continue
+                                        if (len < 0) return@use
+                                        if (len == 0) continue
                                         if (len > 2 * 1024 * 1024) return@use
                                         val msgId = inp.readUnsignedByte()
                                         handleControlMessage(msgId, len - 1)
                                     }
-                                    if (peerChoking) break
 
-                                    val pieceIdx = claimNextPieceForPeer(peerBitfield) ?: break
-                                    try {
-                                        if (pieceIdx in completedPieces) continue
-                                        ensureActive()
-                                        val stInner = repository.getDownloadById(item.id)?.status
-                                        if (stInner == DownloadStatus.PAUSED || stInner == DownloadStatus.CANCELLED) {
-                                            throw CancellationException()
+                                    if (peerChoking) return@use
+                                    unchokedPeers.incrementAndGet()
+
+                                    while (completedPieces.size < neededPiecesList.size && !peerChoking) {
+                                        // Drain any pending HAVE/BITFIELD/PEX messages already in socket buffer before piece selection
+                                        var drainCount = 0
+                                        while (!peerChoking && drainCount < 64 && runCatching { inp.available() >= 4 }.getOrDefault(false)) {
+                                            drainCount++
+                                            val len = inp.readInt()
+                                            if (len < 0) return@use
+                                            if (len == 0) continue
+                                            if (len > 2 * 1024 * 1024) return@use
+                                            val msgId = inp.readUnsignedByte()
+                                            handleControlMessage(msgId, len - 1)
                                         }
+                                        if (peerChoking) break
 
-                                        val pieceStartGlobal = pieceIdx.toLong() * pieceLength.toLong()
-                                        val thisPieceSize = minOf(pieceLength.toLong(), totalTorrentSize - pieceStartGlobal).toInt()
-                                        if (thisPieceSize <= 0) continue
-
-                                        val totalBlocks = (thisPieceSize + BLOCK_SIZE - 1) / BLOCK_SIZE
-                                        val receivedBlocks = BitSet(totalBlocks)
-                                        val pieceBuffer = ByteArray(thisPieceSize)
-                                        var nextBlockToRequest = 0
-                                        var inFlightBlockCount = 0
-                                        var receivedBytesInPiece = 0
-                                        var peerChokedDuringPiece = false
-
-                                        while (receivedBlocks.cardinality() < totalBlocks && !peerChokedDuringPiece) {
-                                            // Fill block request pipeline (1 request for single-block test pieces, up to 8 for large pieces)
-                                            var flushedRequests = false
-                                            while (nextBlockToRequest < totalBlocks && inFlightBlockCount < PIPELINE_DEPTH) {
-                                                val reqOffset = nextBlockToRequest * BLOCK_SIZE
-                                                val blockLen = minOf(BLOCK_SIZE, thisPieceSize - reqOffset)
-                                                out.writeInt(13)
-                                                out.writeByte(6)
-                                                out.writeInt(pieceIdx)
-                                                out.writeInt(reqOffset)
-                                                out.writeInt(blockLen)
-                                                nextBlockToRequest++
-                                                inFlightBlockCount++
-                                                flushedRequests = true
-                                            }
-                                            if (flushedRequests) {
-                                                out.flush()
+                                        val pieceIdx = claimNextPieceForPeer(peerBitfield, peerRejectedPieces) ?: break
+                                        try {
+                                            if (pieceIdx in completedPieces) continue
+                                            ensureActive()
+                                            val stInner = repository.getDownloadById(item.id)?.status
+                                            if (stInner == DownloadStatus.PAUSED || stInner == DownloadStatus.CANCELLED) {
+                                                throw CancellationException()
                                             }
 
-                                            var gotBlock = false
-                                            var blockWaitMessages = 0
-                                            while (!gotBlock && blockWaitMessages < 160) {
-                                                blockWaitMessages++
-                                                val msgLen = inp.readInt()
-                                                if (msgLen <= 0) continue
-                                                if (msgLen > 2 * 1024 * 1024) throw IOException("Oversized peer message: $msgLen")
-                                                val id = inp.readUnsignedByte()
-                                                when (id) {
-                                                    0 -> {
-                                                        peerChoking = true
-                                                        peerChokedDuringPiece = true
-                                                        if (msgLen > 1) skipFully(inp, msgLen - 1)
+                                            val pieceStartGlobal = pieceIdx.toLong() * pieceLength.toLong()
+                                            val thisPieceSize = minOf(pieceLength.toLong(), totalTorrentSize - pieceStartGlobal).toInt()
+                                            if (thisPieceSize <= 0) continue
+
+                                            val totalBlocks = (thisPieceSize + BLOCK_SIZE - 1) / BLOCK_SIZE
+                                            val receivedBlocks = BitSet(totalBlocks)
+                                            val pieceBuffer = ByteArray(thisPieceSize)
+                                            var nextBlockToRequest = 0
+                                            var inFlightBlockCount = 0
+                                            var receivedBytesInPiece = 0
+                                            var peerAbortedConnection = false
+                                            var pieceRejectedByPeer = false
+
+                                            while (receivedBlocks.cardinality() < totalBlocks && !peerAbortedConnection && !pieceRejectedByPeer) {
+                                                // Fill block request pipeline
+                                                var flushedRequests = false
+                                                while (nextBlockToRequest < totalBlocks && inFlightBlockCount < PIPELINE_DEPTH) {
+                                                    val reqOffset = nextBlockToRequest * BLOCK_SIZE
+                                                    val blockLen = minOf(BLOCK_SIZE, thisPieceSize - reqOffset)
+                                                    out.writeInt(13)
+                                                    out.writeByte(6)
+                                                    out.writeInt(pieceIdx)
+                                                    out.writeInt(reqOffset)
+                                                    out.writeInt(blockLen)
+                                                    nextBlockToRequest++
+                                                    inFlightBlockCount++
+                                                    flushedRequests = true
+                                                }
+                                                if (flushedRequests) {
+                                                    out.flush()
+                                                }
+
+                                                var gotBlock = false
+                                                var blockWaitMessages = 0
+                                                while (!gotBlock && !pieceRejectedByPeer && !peerAbortedConnection && blockWaitMessages < 160) {
+                                                    blockWaitMessages++
+                                                    val msgLen = inp.readInt()
+                                                    if (msgLen < 0) {
+                                                        peerAbortedConnection = true
                                                         break
                                                     }
-                                                    7 -> { // PIECE
-                                                        val rIdx = inp.readInt()
-                                                        val rBegin = inp.readInt()
-                                                        val dataLen = msgLen - 9
-                                                        if (rIdx == pieceIdx &&
-                                                            rBegin >= 0 &&
-                                                            dataLen > 0 &&
-                                                            rBegin + dataLen <= thisPieceSize
-                                                        ) {
-                                                            inp.readFully(pieceBuffer, rBegin, dataLen)
-                                                            val blkIdx = rBegin / BLOCK_SIZE
-                                                            if (blkIdx in 0 until totalBlocks && !receivedBlocks.get(blkIdx)) {
-                                                                receivedBlocks.set(blkIdx)
-                                                                receivedBytesInPiece += dataLen
+                                                    if (msgLen == 0) continue
+                                                    if (msgLen > 2 * 1024 * 1024) throw IOException("Oversized peer message: $msgLen")
+                                                    val id = inp.readUnsignedByte()
+                                                    when (id) {
+                                                        0 -> {
+                                                            peerChoking = true
+                                                            peerAbortedConnection = true
+                                                            if (msgLen > 1) skipFully(inp, msgLen - 1)
+                                                        }
+                                                        7 -> { // PIECE
+                                                            val rIdx = inp.readInt()
+                                                            val rBegin = inp.readInt()
+                                                            val dataLen = msgLen - 9
+                                                            if (rIdx == pieceIdx &&
+                                                                rBegin >= 0 &&
+                                                                dataLen > 0 &&
+                                                                rBegin + dataLen <= thisPieceSize
+                                                            ) {
+                                                                inp.readFully(pieceBuffer, rBegin, dataLen)
+                                                                val blkIdx = rBegin / BLOCK_SIZE
+                                                                if (blkIdx in 0 until totalBlocks && !receivedBlocks.get(blkIdx)) {
+                                                                    receivedBlocks.set(blkIdx)
+                                                                    receivedBytesInPiece += dataLen
+                                                                }
+                                                                inFlightBlockCount = (inFlightBlockCount - 1).coerceAtLeast(0)
+                                                                gotBlock = true
+                                                            } else if (dataLen > 0) {
+                                                                skipFully(inp, dataLen)
                                                             }
-                                                            inFlightBlockCount = (inFlightBlockCount - 1).coerceAtLeast(0)
-                                                            gotBlock = true
-                                                        } else if (dataLen > 0) {
-                                                            skipFully(inp, dataLen)
+                                                        }
+                                                        16 -> { // BEP-6 REJECT_REQUEST (piece, begin, length)
+                                                            if (msgLen >= 13) {
+                                                                val rejIdx = inp.readInt()
+                                                                inp.readInt()
+                                                                inp.readInt()
+                                                                if (msgLen > 13) skipFully(inp, msgLen - 13)
+                                                                inFlightBlockCount = (inFlightBlockCount - 1).coerceAtLeast(0)
+                                                                peerRejectedPieces.add(rejIdx)
+                                                                if (rejIdx == pieceIdx) {
+                                                                    pieceRejectedByPeer = true
+                                                                }
+                                                            } else {
+                                                                if (msgLen > 1) skipFully(inp, msgLen - 1)
+                                                                pieceRejectedByPeer = true
+                                                            }
+                                                        }
+                                                        else -> {
+                                                            handleControlMessage(id, msgLen - 1)
+                                                            if (peerChoking) {
+                                                                peerAbortedConnection = true
+                                                            }
                                                         }
                                                     }
-                                                    else -> {
-                                                        handleControlMessage(id, msgLen - 1)
-                                                        if (peerChoking) {
-                                                            peerChokedDuringPiece = true
-                                                            break
+                                                }
+                                                if (!gotBlock && !pieceRejectedByPeer) {
+                                                    peerAbortedConnection = true
+                                                }
+
+                                                if (gotBlock) {
+                                                    synchronized(fileWriteLock) {
+                                                        val blockNow = System.currentTimeMillis()
+                                                        val blockElapsed = (blockNow - lastReportTime).coerceAtLeast(1L)
+                                                        if (blockElapsed >= 300L) {
+                                                            val inFlightSelectedBytes = (downloadedBytes + receivedBytesInPiece).coerceAtMost(totalSelectedBytes)
+                                                            val blockSpeed = ((inFlightSelectedBytes - lastReportedBytes).coerceAtLeast(0L) * 1000L) / blockElapsed
+                                                            val blockPct = ((inFlightSelectedBytes * 100L) / totalSelectedBytes).toInt().coerceIn(1, 99)
+                                                            val reportedPeers = maxOf(connectedPeersCount.get(), peers.size).coerceAtLeast(1)
+                                                            val reportedSeeds = if (discoveredSeeders >= 0) discoveredSeeders else -1
+                                                            onProgress(
+                                                                inFlightSelectedBytes,
+                                                                totalSelectedBytes,
+                                                                blockPct,
+                                                                blockSpeed,
+                                                                reportedPeers,
+                                                                reportedSeeds,
+                                                                0L
+                                                            )
+                                                            lastReportTime = blockNow
+                                                            lastReportedBytes = inFlightSelectedBytes
                                                         }
                                                     }
                                                 }
                                             }
-                                            if (!gotBlock) {
-                                                peerChokedDuringPiece = true
-                                                break
+                                            if (peerAbortedConnection) break
+                                            if (pieceRejectedByPeer) continue
+
+                                            // Verify SHA-1 hash of piece before writing any bytes to disk
+                                            val sha1 = MessageDigest.getInstance("SHA-1").digest(pieceBuffer)
+                                            if (!sha1.contentEquals(extMeta.pieceHashes[pieceIdx])) {
+                                                continue
                                             }
 
+                                            var isFirstVerifiedPiece = false
                                             synchronized(fileWriteLock) {
-                                                val blockNow = System.currentTimeMillis()
-                                                val blockElapsed = (blockNow - lastReportTime).coerceAtLeast(1L)
-                                                if (blockElapsed >= 300L) {
-                                                    val inFlightSelectedBytes = (downloadedBytes + receivedBytesInPiece).coerceAtMost(totalSelectedBytes)
-                                                    val blockSpeed = ((inFlightSelectedBytes - lastReportedBytes).coerceAtLeast(0L) * 1000L) / blockElapsed
-                                                    val blockPct = ((inFlightSelectedBytes * 100L) / totalSelectedBytes).toInt().coerceIn(1, 99)
-                                                    val reportedPeers = maxOf(connectedPeersCount.get(), peers.size).coerceAtLeast(1)
-                                                    val reportedSeeds = if (discoveredSeeders >= 0) discoveredSeeders else -1
-                                                    onProgress(
-                                                        inFlightSelectedBytes,
-                                                        totalSelectedBytes,
-                                                        blockPct,
-                                                        blockSpeed,
-                                                        reportedPeers,
-                                                        reportedSeeds,
-                                                        0L
-                                                    )
-                                                    lastReportTime = blockNow
-                                                    lastReportedBytes = inFlightSelectedBytes
-                                                }
-                                            }
-                                        }
-                                        if (peerChokedDuringPiece) break
-
-                                        // Verify SHA-1 hash of piece before writing any bytes to disk
-                                        val sha1 = MessageDigest.getInstance("SHA-1").digest(pieceBuffer)
-                                        if (!sha1.contentEquals(extMeta.pieceHashes[pieceIdx])) {
-                                            continue
-                                        }
-
-                                        var isFirstVerifiedPiece = false
-                                        synchronized(fileWriteLock) {
-                                            if (pieceIdx !in completedPieces) {
-                                                val pieceEndGlobal = pieceStartGlobal + thisPieceSize
-                                                for (span in spans) {
-                                                    val overlapStart = maxOf(pieceStartGlobal, span.startOffset)
-                                                    val overlapEnd = minOf(pieceEndGlobal, span.endOffset)
-                                                    if (overlapEnd > overlapStart) {
-                                                        val stagedFile = TorrentPathSafety.resolveStagingFile(torrentFolder, span.entry.index)
-                                                        stagedFile.parentFile?.mkdirs()
-                                                        RandomAccessFile(stagedFile, "rw").use { raf ->
-                                                            raf.seek(overlapStart - span.startOffset)
-                                                            val srcOffset = (overlapStart - pieceStartGlobal).toInt()
-                                                            val writeLen = (overlapEnd - overlapStart).toInt()
-                                                            raf.write(pieceBuffer, srcOffset, writeLen)
-                                                            if (span.selected) {
-                                                                downloadedBytes += writeLen
+                                                if (pieceIdx !in completedPieces) {
+                                                    val pieceEndGlobal = pieceStartGlobal + thisPieceSize
+                                                    for (span in spans) {
+                                                        val overlapStart = maxOf(pieceStartGlobal, span.startOffset)
+                                                        val overlapEnd = minOf(pieceEndGlobal, span.endOffset)
+                                                        if (overlapEnd > overlapStart) {
+                                                            val stagedFile = TorrentPathSafety.resolveStagingFile(torrentFolder, span.entry.index)
+                                                            stagedFile.parentFile?.mkdirs()
+                                                            RandomAccessFile(stagedFile, "rw").use { raf ->
+                                                                raf.seek(overlapStart - span.startOffset)
+                                                                val srcOffset = (overlapStart - pieceStartGlobal).toInt()
+                                                                val writeLen = (overlapEnd - overlapStart).toInt()
+                                                                raf.write(pieceBuffer, srcOffset, writeLen)
+                                                                if (span.selected) {
+                                                                    downloadedBytes += writeLen
+                                                                }
                                                             }
                                                         }
                                                     }
-                                                }
 
-                                                isFirstVerifiedPiece = completedPieces.isEmpty()
-                                                completedPieces.add(pieceIdx)
-                                                val now = System.currentTimeMillis()
-                                                val elapsed = (now - lastReportTime).coerceAtLeast(1L)
-                                                if (completedPieces.size == 1 || elapsed >= 250L || completedPieces.size == neededPiecesList.size) {
-                                                    val speed = ((downloadedBytes - lastReportedBytes) * 1000L) / elapsed
-                                                    val pct = ((completedPieces.size * 100) / neededPiecesList.size).coerceIn(1, 99)
-                                                    val reportedPeers = connectedPeersCount.get().coerceAtLeast(1)
-                                                    val reportedSeeds = if (discoveredSeeders >= 0) discoveredSeeders else -1
-                                                    onProgress(
-                                                        downloadedBytes.coerceAtMost(totalSelectedBytes),
-                                                        totalSelectedBytes,
-                                                        pct,
-                                                        speed.coerceAtLeast(0L),
-                                                        reportedPeers,
-                                                        reportedSeeds,
-                                                        0L
-                                                    )
-                                                    lastReportTime = now
-                                                    lastReportedBytes = downloadedBytes
+                                                    isFirstVerifiedPiece = completedPieces.isEmpty()
+                                                    completedPieces.add(pieceIdx)
+                                                    val now = System.currentTimeMillis()
+                                                    val elapsed = (now - lastReportTime).coerceAtLeast(1L)
+                                                    if (completedPieces.size == 1 || elapsed >= 250L || completedPieces.size == neededPiecesList.size) {
+                                                        val speed = ((downloadedBytes - lastReportedBytes) * 1000L) / elapsed
+                                                        val pct = ((completedPieces.size * 100) / neededPiecesList.size).coerceIn(1, 99)
+                                                        val reportedPeers = connectedPeersCount.get().coerceAtLeast(1)
+                                                        val reportedSeeds = if (discoveredSeeders >= 0) discoveredSeeders else -1
+                                                        onProgress(
+                                                            downloadedBytes.coerceAtMost(totalSelectedBytes),
+                                                            totalSelectedBytes,
+                                                            pct,
+                                                            speed.coerceAtLeast(0L),
+                                                            reportedPeers,
+                                                            reportedSeeds,
+                                                            0L
+                                                        )
+                                                        lastReportTime = now
+                                                        lastReportedBytes = downloadedBytes
+                                                    }
                                                 }
                                             }
-                                        }
-                                        if (isFirstVerifiedPiece) {
-                                            runCatching {
-                                                val current = repository.getDownloadById(item.id)
-                                                if (current != null && current.status == DownloadStatus.DOWNLOADING) {
-                                                    repository.update(current.copy(errorMessage = STATUS_DOWNLOADING))
+                                            if (isFirstVerifiedPiece) {
+                                                runCatching {
+                                                    val current = repository.getDownloadById(item.id)
+                                                    if (current != null && current.status == DownloadStatus.DOWNLOADING) {
+                                                        repository.update(current.copy(errorMessage = STATUS_DOWNLOADING))
+                                                    }
                                                 }
                                             }
+                                        } finally {
+                                            inFlightPieces.remove(pieceIdx)
                                         }
-                                    } finally {
-                                        inFlightPieces.remove(pieceIdx)
                                     }
+                                } finally {
+                                    connectedPeersCount.decrementAndGet()
                                 }
-                            } finally {
-                                connectedPeersCount.decrementAndGet()
                             }
+                        }.onFailure { err ->
+                            if (err is CancellationException || err is SecurityException) throw err
+                            lastPeerSocketError.set("${err.javaClass.simpleName}: ${err.message ?: "connection error"}")
                         }
-                    }.onFailure { err ->
-                        if (err is CancellationException || err is SecurityException) throw err
-                        lastPeerSocketError.set("${err.javaClass.simpleName}: ${err.message ?: "connection error"}")
                     }
                 }
             }
+            workers.awaitAll()
         }
-        workers.awaitAll()
+
+        val initialWorkers = minOf(maxConns, 16, initialCandidates.size.coerceAtLeast(1))
+        runPeerWorkerWave(initialWorkers)
+
+        // One swarm refresh wave if incomplete and not constrained to explicitPeers
+        if (completedPieces.size < neededPiecesList.size && explicitPeers == null) {
+            val stNow = repository.getDownloadById(item.id)?.status
+            if (stNow != DownloadStatus.PAUSED && stNow != DownloadStatus.CANCELLED) {
+                val refreshTrackers = if (extMeta.trackers.isNotEmpty()) extMeta.trackers else defaultTrackers
+                val isLoopback = refreshTrackers.isNotEmpty() && refreshTrackers.all { isLoopbackTracker(it) }
+                val refreshed = mutableListOf<InetSocketAddress>()
+                runCatching {
+                    val trSwarm = discoverSwarmFromTrackers(
+                        infoHashBytes = infoHashBytes,
+                        trackers = refreshTrackers,
+                        peerIdBytes = sessionPeerId,
+                        leftBytes = (totalSelectedBytes - downloadedBytes).coerceAtLeast(0L)
+                    )
+                    refreshed.addAll(trSwarm.peers)
+                    if (trSwarm.seeders > discoveredSeeders) discoveredSeeders = trSwarm.seeders
+                }
+                if (!isLoopback && (context != null || dhtNodesOverrideForTest != null)) {
+                    runCatching { refreshed.addAll(discoverPeersFromDht(infoHashBytes, sessionPeerId)) }
+                }
+                var newlyAdded = 0
+                for (cand in refreshed.distinct()) {
+                    if (seenPeers.add(cand)) {
+                        peerQueue.offer(cand)
+                        newlyAdded++
+                    }
+                }
+                if (newlyAdded > 0) {
+                    runPeerWorkerWave(minOf(maxConns, 12, newlyAdded))
+                }
+            }
+        }
 
         val allDone = completedPieces.size >= neededPiecesList.size
         if (!allDone) {
@@ -2287,7 +2742,11 @@ class TorrentDownloadManager(
         infoHashBytes: ByteArray,
         trackers: List<String>,
         peerIdBytes: ByteArray = generatePeerId(),
-        leftBytes: Long = 0L
+        leftBytes: Long = 0L,
+        port: Int = 6881,
+        uploadedBytes: Long = 0L,
+        downloadedBytes: Long = 0L,
+        event: String? = null
     ): SwarmStats = coroutineScope {
         val uniqueTrackers = trackers.map { it.trim() }.filter { it.isNotBlank() }.distinct()
         if (uniqueTrackers.isEmpty()) {
@@ -2295,30 +2754,59 @@ class TorrentDownloadManager(
         }
         val isLoopbackOnly = uniqueTrackers.all { isLoopbackTracker(it) }
         val allValidResults = mutableListOf<SwarmStats>()
-        val batches = uniqueTrackers.chunked(6)
-        for (batch in batches) {
-            val jobs = batch.map { trackerUrl ->
-                async(Dispatchers.IO) {
-                    withTimeoutOrNull(2200L) {
-                        runCatching {
-                            when {
-                                trackerUrl.startsWith("udp://", ignoreCase = true) ->
-                                    announceUdpTracker(trackerUrl, infoHashBytes, peerIdBytes, leftBytes)
-                                trackerUrl.startsWith("http://", ignoreCase = true) ||
-                                    trackerUrl.startsWith("https://", ignoreCase = true) ->
-                                    announceHttpTracker(trackerUrl, infoHashBytes, peerIdBytes, leftBytes)
-                                else -> null
-                            }
-                        }.getOrNull()
+        val activeUdpSockets = ConcurrentHashMap.newKeySet<DatagramSocket>()
+        val activeHttpCalls = ConcurrentHashMap.newKeySet<Call>()
+        val batches = uniqueTrackers.chunked(14)
+        try {
+            for (batch in batches) {
+                val jobs = batch.map { trackerUrl ->
+                    async(Dispatchers.IO) {
+                        withTimeoutOrNull(2200L) {
+                            runCatching {
+                                when {
+                                    trackerUrl.startsWith("udp://", ignoreCase = true) ->
+                                        announceUdpTracker(
+                                            trackerUrl = trackerUrl,
+                                            infoHashBytes = infoHashBytes,
+                                            peerIdBytes = peerIdBytes,
+                                            leftBytes = leftBytes,
+                                            listenPort = port,
+                                            uploadedBytes = uploadedBytes,
+                                            downloadedBytes = downloadedBytes,
+                                            event = event,
+                                            onSocketCreated = { s -> activeUdpSockets.add(s) }
+                                        )
+                                    trackerUrl.startsWith("http://", ignoreCase = true) ||
+                                        trackerUrl.startsWith("https://", ignoreCase = true) ->
+                                        announceHttpTracker(
+                                            trackerUrl = trackerUrl,
+                                            infoHashBytes = infoHashBytes,
+                                            peerIdBytes = peerIdBytes,
+                                            leftBytes = leftBytes,
+                                            listenPort = port,
+                                            uploadedBytes = uploadedBytes,
+                                            downloadedBytes = downloadedBytes,
+                                            event = event,
+                                            onCallCreated = { c -> activeHttpCalls.add(c) }
+                                        )
+                                    else -> null
+                                }
+                            }.getOrNull()
+                        }
                     }
                 }
+                val batchResults = jobs.awaitAll().filterNotNull().filter { it.respondedTrackers > 0 }
+                allValidResults.addAll(batchResults)
+                val totalDistinctPeersSoFar = allValidResults.flatMap { it.peers }.distinct().size
+                if ((isLoopbackOnly && totalDistinctPeersSoFar > 0) || totalDistinctPeersSoFar >= 40) {
+                    break
+                }
             }
-            val batchResults = jobs.awaitAll().filterNotNull().filter { it.respondedTrackers > 0 }
-            allValidResults.addAll(batchResults)
-            val totalDistinctPeersSoFar = allValidResults.flatMap { it.peers }.distinct().size
-            if ((isLoopbackOnly && totalDistinctPeersSoFar > 0) || totalDistinctPeersSoFar >= 40) {
-                break
-            }
+        } finally {
+            activeUdpSockets.forEach { sock -> runCatching { sock.close() } }
+            activeUdpSockets.clear()
+            activeHttpCalls.forEach { call -> runCatching { call.cancel() } }
+            activeHttpCalls.clear()
         }
         if (allValidResults.isEmpty()) {
             return@coroutineScope SwarmStats(emptyList(), -1, -1, 0)
@@ -2338,7 +2826,12 @@ class TorrentDownloadManager(
         trackerUrl: String,
         infoHashBytes: ByteArray,
         peerIdBytes: ByteArray = generatePeerId(),
-        leftBytes: Long = 0L
+        leftBytes: Long = 0L,
+        listenPort: Int = 6881,
+        uploadedBytes: Long = 0L,
+        downloadedBytes: Long = 0L,
+        event: String? = null,
+        onSocketCreated: ((DatagramSocket) -> Unit)? = null
     ): SwarmStats? {
         val uri = URI(trackerUrl.trim())
         val host = uri.host ?: return null
@@ -2346,6 +2839,7 @@ class TorrentDownloadManager(
         val address = InetAddress.getByName(host)
 
         DatagramSocket().use { socket ->
+            onSocketCreated?.invoke(socket)
             socket.soTimeout = 1800
             val txId = Random.nextInt()
 
@@ -2367,20 +2861,27 @@ class TorrentDownloadManager(
 
             val normalizedPeerId = if (peerIdBytes.size == 20) peerIdBytes else generatePeerId()
             val announceTxId = Random.nextInt()
+            val eventCode = when (event?.lowercase(Locale.US)) {
+                "completed" -> 1
+                "started" -> 2
+                "stopped" -> 3
+                else -> 0
+            }
+            val safePort = if (listenPort in 1..65535) listenPort else 6881
             val announceReq = ByteBuffer.allocate(98).order(ByteOrder.BIG_ENDIAN).apply {
                 putLong(connectionId)
                 putInt(1)
                 putInt(announceTxId)
                 put(infoHashBytes)
                 put(normalizedPeerId)
-                putLong(0L)
+                putLong(downloadedBytes.coerceAtLeast(0L))
                 putLong(leftBytes.coerceAtLeast(0L))
-                putLong(0L)
-                putInt(0)
+                putLong(uploadedBytes.coerceAtLeast(0L))
+                putInt(eventCode)
                 putInt(0)
                 putInt(Random.nextInt())
                 putInt(80)
-                putShort(6881.toShort())
+                putShort(safePort.toShort())
             }.array()
             socket.send(DatagramPacket(announceReq, announceReq.size, address, port))
 
@@ -2415,7 +2916,12 @@ class TorrentDownloadManager(
         trackerUrl: String,
         infoHashBytes: ByteArray,
         peerIdBytes: ByteArray = generatePeerId(),
-        leftBytes: Long = 0L
+        leftBytes: Long = 0L,
+        listenPort: Int = 6881,
+        uploadedBytes: Long = 0L,
+        downloadedBytes: Long = 0L,
+        event: String? = null,
+        onCallCreated: ((Call) -> Unit)? = null
     ): SwarmStats? {
         val cleanTrackerUrl = trackerUrl.trim()
         if (cleanTrackerUrl.isBlank()) return null
@@ -2431,12 +2937,18 @@ class TorrentDownloadManager(
         }
         val sep = if (cleanTrackerUrl.contains("?")) "&" else "?"
         val safeLeft = leftBytes.coerceAtLeast(0L)
-        val fullUrl = "${cleanTrackerUrl}${sep}info_hash=$encodedHash&peer_id=$encodedPeerId&port=6881&uploaded=0&downloaded=0&left=$safeLeft&compact=1&numwant=80"
+        val safePort = if (listenPort in 1..65535) listenPort else 6881
+        val safeUploaded = uploadedBytes.coerceAtLeast(0L)
+        val safeDownloaded = downloadedBytes.coerceAtLeast(0L)
+        val eventSuffix = event?.takeIf { it.isNotBlank() }?.let { "&event=${it.lowercase(Locale.US)}" }.orEmpty()
+        val fullUrl = "${cleanTrackerUrl}${sep}info_hash=$encodedHash&peer_id=$encodedPeerId&port=$safePort&uploaded=$safeUploaded&downloaded=$safeDownloaded&left=$safeLeft&compact=1&numwant=80$eventSuffix"
         val req = Request.Builder()
             .url(fullUrl)
             .header("User-Agent", "Transmission/4.0.5")
             .build()
-        probeHttpClient.newCall(req).execute().use { resp ->
+        val call = probeHttpClient.newCall(req)
+        onCallCreated?.invoke(call)
+        call.execute().use { resp ->
             if (!resp.isSuccessful) return null
             val stream = resp.body?.byteStream() ?: return null
             val rawBytes = readBoundedBytes(stream, MAX_TRACKER_RESPONSE_BYTES)
@@ -2537,7 +3049,7 @@ class TorrentDownloadManager(
     /**
      * Pure-Kotlin BEP-5 Mainline DHT `get_peers` UDP lookup for trackerless magnets or when trackers return 0 peers.
      */
-    private suspend fun discoverPeersFromDht(
+    internal suspend fun discoverPeersFromDht(
         infoHashBytes: ByteArray,
         nodeIdBytes: ByteArray = generatePeerId()
     ): List<InetSocketAddress> = withContext(Dispatchers.IO) {
@@ -2547,7 +3059,8 @@ class TorrentDownloadManager(
         val visitedNodes = ConcurrentHashMap.newKeySet<InetSocketAddress>()
         val candidateNodes = ConcurrentLinkedQueue<InetSocketAddress>()
 
-        for ((host, port) in dhtBootstrapNodes) {
+        val seedsToUse = dhtNodesOverrideForTest ?: dhtBootstrapNodes
+        for ((host, port) in seedsToUse) {
             runCatching {
                 val addr = InetSocketAddress(InetAddress.getByName(host), port)
                 if (visitedNodes.add(addr)) {
@@ -2557,61 +3070,84 @@ class TorrentDownloadManager(
         }
         if (candidateNodes.isEmpty()) return@withContext emptyList()
 
-        val queryPacketBytes = ByteArrayOutputStream().apply {
-            write("d1:ad2:id20:".toByteArray(StandardCharsets.ISO_8859_1))
-            write(ourNodeId)
-            write("9:info_hash20:".toByteArray(StandardCharsets.ISO_8859_1))
-            write(infoHashBytes)
-            write("e1:q9:get_peers1:t2:lu1:y1:qe".toByteArray(StandardCharsets.ISO_8859_1))
-        }.toByteArray()
+        fun buildGetPeersPacket(): ByteArray {
+            val tx = ByteArray(2).also { Random.nextBytes(it) }
+            return ByteArrayOutputStream().apply {
+                write("d1:ad2:id20:".toByteArray(StandardCharsets.ISO_8859_1))
+                write(ourNodeId)
+                write("9:info_hash20:".toByteArray(StandardCharsets.ISO_8859_1))
+                write(infoHashBytes)
+                write("e1:q9:get_peers1:t2:".toByteArray(StandardCharsets.ISO_8859_1))
+                write(tx)
+                write("1:y1:qe".toByteArray(StandardCharsets.ISO_8859_1))
+            }.toByteArray()
+        }
+
+        fun extractCompactPeersFromBytes(compact: ByteArray) {
+            var off = 0
+            while (off + 6 <= compact.size) {
+                val ip = compact.copyOfRange(off, off + 4)
+                val p = ((compact[off + 4].toInt() and 0xFF) shl 8) or (compact[off + 5].toInt() and 0xFF)
+                if (p in 1..65535) {
+                    runCatching {
+                        discoveredPeers.add(InetSocketAddress(InetAddress.getByAddress(ip), p))
+                    }
+                }
+                off += 6
+            }
+        }
 
         runCatching {
             DatagramSocket().use { udpSocket ->
-                udpSocket.soTimeout = 450
-                val deadline = System.currentTimeMillis() + 3200L
+                udpSocket.soTimeout = if (dhtNodesOverrideForTest != null) 250 else 400
+                val deadline = System.currentTimeMillis() + 3500L
                 var queriesSent = 0
-                val recvBuf = ByteArray(2048)
+                val recvBuf = ByteArray(4096)
 
-                while (System.currentTimeMillis() < deadline && discoveredPeers.size < 30 && queriesSent < 36) {
+                while (System.currentTimeMillis() < deadline && discoveredPeers.size < 30 && queriesSent < 48) {
                     var batchSent = 0
-                    while (batchSent < 6 && queriesSent < 36) {
+                    while (batchSent < 8 && queriesSent < 48) {
                         val target = candidateNodes.poll() ?: break
+                        val pktBytes = buildGetPeersPacket()
                         runCatching {
-                            udpSocket.send(DatagramPacket(queryPacketBytes, queryPacketBytes.size, target.address, target.port))
+                            udpSocket.send(DatagramPacket(pktBytes, pktBytes.size, target.address, target.port))
                             batchSent++
                             queriesSent++
                         }
                     }
                     if (batchSent == 0 && candidateNodes.isEmpty()) break
 
-                    for (rx in 0 until batchSent.coerceAtLeast(2)) {
-                        if (System.currentTimeMillis() >= deadline) break
+                    var timeoutsInRow = 0
+                    val rxWindowDeadline = minOf(deadline, System.currentTimeMillis() + 900L)
+                    while (System.currentTimeMillis() < rxWindowDeadline && discoveredPeers.size < 30 && timeoutsInRow < 2) {
                         val pkt = DatagramPacket(recvBuf, recvBuf.size)
                         val received = runCatching {
                             udpSocket.receive(pkt)
                             true
                         }.getOrDefault(false)
-                        if (!received || pkt.length <= 0) break
+                        if (!received || pkt.length <= 0) {
+                            timeoutsInRow++
+                            if (discoveredPeers.isNotEmpty() || candidateNodes.isNotEmpty()) {
+                                break
+                            }
+                            continue
+                        }
+                        timeoutsInRow = 0
 
                         runCatching {
                             val slice = recvBuf.copyOfRange(0, pkt.length)
                             val root = SimpleBencodeDecoder(slice).readValue() as? Map<*, *>
                             val rDict = root?.get("r") as? Map<*, *>
-                            val valuesList = rDict?.get("values") as? List<*>
-                            valuesList?.forEach { item ->
-                                val compact = item as? ByteArray
-                                if (compact != null && compact.size >= 6) {
-                                    val ip = compact.copyOfRange(0, 4)
-                                    val p = ((compact[4].toInt() and 0xFF) shl 8) or (compact[5].toInt() and 0xFF)
-                                    if (p in 1..65535) {
-                                        discoveredPeers.add(InetSocketAddress(InetAddress.getByAddress(ip), p))
-                                    }
+                            when (val rawValues = rDict?.get("values")) {
+                                is List<*> -> rawValues.forEach { item ->
+                                    (item as? ByteArray)?.let { compact -> extractCompactPeersFromBytes(compact) }
                                 }
+                                is ByteArray -> extractCompactPeersFromBytes(rawValues)
                             }
                             val compactNodes = rDict?.get("nodes") as? ByteArray
-                            if (compactNodes != null && visitedNodes.size < 96) {
+                            if (compactNodes != null && visitedNodes.size < 128) {
                                 var offset = 0
-                                while (offset + 26 <= compactNodes.size && visitedNodes.size < 96) {
+                                while (offset + 26 <= compactNodes.size && visitedNodes.size < 128) {
                                     val ip = compactNodes.copyOfRange(offset + 20, offset + 24)
                                     val p = ((compactNodes[offset + 24].toInt() and 0xFF) shl 8) or
                                         (compactNodes[offset + 25].toInt() and 0xFF)
@@ -2634,40 +3170,67 @@ class TorrentDownloadManager(
 
     /**
      * Fetches the raw bencoded `info` dictionary from BitTorrent peers via concurrent BEP-9 (`ut_metadata`)
-     * racing up to 24 peers in parallel and pipelining 16 KB metadata piece requests.
+     * racing peers with bounded worker concurrency and returning immediately when the first valid info dict resolves.
      */
     internal suspend fun fetchMetadataFromPeersBep9(
         infoHashBytes: ByteArray,
         peers: List<InetSocketAddress>,
         peerIdBytes: ByteArray = generatePeerId()
     ): ByteArray? = coroutineScope {
+        if (peers.isEmpty()) return@coroutineScope null
         val normalizedPeerId = if (peerIdBytes.size == 20) peerIdBytes else generatePeerId()
-        val candidateBatches = peers.take(24).chunked(8)
-        for (batch in candidateBatches) {
-            val jobs = batch.map { peer ->
-                async(Dispatchers.IO) {
-                    withTimeoutOrNull(7500L) {
-                        fetchMetadataFromSinglePeerBep9(infoHashBytes, peer, normalizedPeerId)
+        val peerQueue = ConcurrentLinkedQueue(peers.take(24))
+        val winner = Channel<ByteArray>(Channel.CONFLATED)
+        val activeSockets = ConcurrentHashMap.newKeySet<Socket>()
+        val raceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        val raceParentHandle = coroutineContext[Job]?.invokeOnCompletion { cause ->
+            if (cause != null) {
+                activeSockets.forEach { sock -> runCatching { sock.close() } }
+                raceScope.cancel()
+            }
+        }
+        val workerCount = minOf(8, peerQueue.size.coerceAtLeast(1))
+        val workers = (0 until workerCount).map {
+            raceScope.launch {
+                while (isActive) {
+                    val peer = peerQueue.poll() ?: break
+                    val info = withTimeoutOrNull(8500L) {
+                        fetchMetadataFromSinglePeerBep9(infoHashBytes, peer, normalizedPeerId, activeSockets)
+                    }
+                    if (info != null) {
+                        winner.trySend(info)
+                        break
                     }
                 }
             }
-            val results = jobs.awaitAll().filterNotNull()
-            if (results.isNotEmpty()) {
-                return@coroutineScope results.first()
-            }
         }
-        null
+        val result = try {
+            withTimeoutOrNull(14000L) {
+                winner.receive()
+            }
+        } finally {
+            raceParentHandle?.dispose()
+            activeSockets.forEach { sock -> runCatching { sock.close() } }
+            activeSockets.clear()
+            workers.forEach { it.cancel() }
+            raceScope.cancel()
+            winner.close()
+        }
+        result
     }
 
     private fun fetchMetadataFromSinglePeerBep9(
         infoHashBytes: ByteArray,
         peer: InetSocketAddress,
-        normalizedPeerId: ByteArray
+        normalizedPeerId: ByteArray,
+        activeSockets: MutableSet<Socket>? = null
     ): ByteArray? {
         try {
             Socket().use { socket ->
-                socket.connect(peer, 3000)
-                socket.soTimeout = 4000
+                activeSockets?.add(socket)
+                try {
+                    socket.connect(peer, 3000)
+                    socket.soTimeout = 4500
                 val out = DataOutputStream(socket.getOutputStream())
                 val inp = DataInputStream(socket.getInputStream())
 
@@ -2705,7 +3268,8 @@ class TorrentDownloadManager(
                 for (loop in 0 until 160) {
                     if (System.currentTimeMillis() >= hsDeadline) break
                     val len = inp.readInt()
-                    if (len <= 0) continue
+                    if (len < 0) return null
+                    if (len == 0) continue
                     if (len > 2 * 1024 * 1024) return null
                     val msgId = inp.readUnsignedByte()
                     if (msgId == 20 && len >= 2) {
@@ -2717,7 +3281,7 @@ class TorrentDownloadManager(
                             val mMap = hsMap?.get("m") as? Map<*, *>
                             peerUtMetaId = ((mMap?.get("ut_metadata") as? Number)?.toLong() ?: -1L).toInt()
                             metadataSize = ((hsMap?.get("metadata_size") as? Number)?.toLong() ?: 0L).toInt()
-                            break
+                            if (peerUtMetaId > 0 && metadataSize > 0) break
                         }
                     } else if (len > 1) {
                         skipFully(inp, len - 1)
@@ -2728,30 +3292,35 @@ class TorrentDownloadManager(
                 val numPieces = (metadataSize + BLOCK_SIZE - 1) / BLOCK_SIZE
                 val piecesData = arrayOfNulls<ByteArray>(numPieces)
                 var receivedCount = 0
+                var nextPieceToRequest = 0
 
-                // Pipeline all metadata piece requests
-                for (p in 0 until numPieces) {
-                    val reqDict = "d8:msg_typei0e5:piecei${p}ee".toByteArray(StandardCharsets.US_ASCII)
-                    out.writeInt(2 + reqDict.size)
-                    out.writeByte(20)
-                    out.writeByte(peerUtMetaId)
-                    out.write(reqDict)
-                }
-                out.flush()
-
-                val dataDeadline = System.currentTimeMillis() + 6000L
-                val maxWaitLoops = maxOf(160, numPieces * 16)
+                val dataDeadline = System.currentTimeMillis() + minOf(12000L, 4500L + numPieces * 250L)
+                val maxWaitLoops = maxOf(160, numPieces * 24)
                 for (wait in 0 until maxWaitLoops) {
                     if (receivedCount >= numPieces || System.currentTimeMillis() >= dataDeadline) break
+                    // Send requests in bounded pipeline windows of up to 16 metadata blocks
+                    var flushed = false
+                    while (nextPieceToRequest < numPieces && (nextPieceToRequest - receivedCount) < 16) {
+                        val reqDict = "d8:msg_typei0e5:piecei${nextPieceToRequest}ee".toByteArray(StandardCharsets.US_ASCII)
+                        out.writeInt(2 + reqDict.size)
+                        out.writeByte(20)
+                        out.writeByte(peerUtMetaId)
+                        out.write(reqDict)
+                        nextPieceToRequest++
+                        flushed = true
+                    }
+                    if (flushed) out.flush()
+
                     val len = inp.readInt()
-                    if (len <= 0) continue
+                    if (len < 0) return null
+                    if (len == 0) continue
                     if (len > 2 * 1024 * 1024) return null
                     val msgId = inp.readUnsignedByte()
                     if (msgId == 20 && len >= 2) {
                         val extId = inp.readUnsignedByte()
                         val payload = ByteArray(len - 2)
                         inp.readFully(payload)
-                        if (extId == 1) {
+                        if (extId == 1 || extId == peerUtMetaId) {
                             val dec = SimpleBencodeDecoder(payload)
                             val headerMap = runCatching { dec.readValue() as? Map<*, *> }.getOrNull()
                             val msgType = ((headerMap?.get("msg_type") as? Number)?.toLong() ?: -1L).toInt()
@@ -2763,7 +3332,6 @@ class TorrentDownloadManager(
                                     receivedCount++
                                 }
                             } else if (msgType == 2) {
-                                // Peer rejected metadata request
                                 return null
                             }
                         }
@@ -2782,6 +3350,9 @@ class TorrentDownloadManager(
                 val assembled = fullInfo.toByteArray()
                 if (assembled.size == metadataSize && MessageDigest.getInstance("SHA-1").digest(assembled).contentEquals(infoHashBytes)) {
                     return assembled
+                }
+                } finally {
+                    activeSockets?.remove(socket)
                 }
             }
         } catch (_: Exception) {
@@ -2812,7 +3383,10 @@ class TorrentDownloadManager(
         )
     }
 
-    private fun fetchBytesFast(url: String): ByteArray {
+    private fun fetchBytesFast(
+        url: String,
+        onCallCreated: ((Call) -> Unit)? = null
+    ): ByteArray {
         val reqBuilder = Request.Builder()
             .url(url)
             .get()
@@ -2830,7 +3404,9 @@ class TorrentDownloadManager(
                 reqBuilder.header("Cookie", cookie)
             }
         }
-        probeHttpClient.newCall(reqBuilder.build()).execute().use { response ->
+        val call = probeHttpClient.newCall(reqBuilder.build())
+        onCallCreated?.invoke(call)
+        call.execute().use { response ->
             if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
             val stream = response.body?.byteStream() ?: throw IOException("Empty body")
             val raw = readBoundedBytes(stream, MAX_TORRENT_FILE_BYTES)
@@ -3249,6 +3825,606 @@ class TorrentDownloadManager(
     private fun sha1Hex(bytes: ByteArray): String {
         val digest = MessageDigest.getInstance("SHA-1").digest(bytes)
         return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    fun getPeerServerPort(): Int = peerServerSocket?.takeIf { !it.isClosed }?.localPort ?: 0
+
+    fun ensurePeerServerRunning(): Int {
+        peerServerSocket?.takeIf { !it.isClosed }?.let { return it.localPort }
+        synchronized(serverLock) {
+            peerServerSocket?.takeIf { !it.isClosed }?.let { return it.localPort }
+            val srv = ServerSocket(0)
+            srv.reuseAddress = true
+            peerServerSocket = srv
+            peerServerAcceptJob = scope.launch(Dispatchers.IO) {
+                while (isActive && !srv.isClosed) {
+                    val client = runCatching { srv.accept() }.getOrNull() ?: break
+                    scope.launch(Dispatchers.IO) {
+                        handleIncomingPeerConnection(client)
+                    }
+                }
+            }
+            return srv.localPort
+        }
+    }
+
+    fun getSeedSessionStats(downloadId: Long): SeedSessionStats? {
+        val session = seedingSessions[downloadId] ?: return null
+        return SeedSessionStats(
+            downloadId = downloadId,
+            listeningPort = getPeerServerPort(),
+            uploadedBytes = session.uploadedBytes.get(),
+            uploadSpeedBytesPerSec = session.uploadSpeedBytesPerSec.get(),
+            connectedPeers = session.connectedPeers.get(),
+            swarmSeeds = session.swarmSeeds.get(),
+            swarmPeers = session.swarmPeers.get(),
+            availablePieceCount = session.availablePieces.cardinality(),
+            totalPieceCount = session.totalPieces
+        )
+    }
+
+    private suspend fun handleIncomingPeerConnection(socket: Socket) {
+        var attachedSession: SeedSession? = null
+        try {
+            socket.soTimeout = 10000
+            val inp = DataInputStream(socket.getInputStream())
+            val out = DataOutputStream(socket.getOutputStream())
+
+            val pstrlen = inp.readUnsignedByte()
+            if (pstrlen != 19) return
+            val proto = ByteArray(19)
+            inp.readFully(proto)
+            if (!String(proto, StandardCharsets.US_ASCII).equals("BitTorrent protocol", ignoreCase = false)) {
+                return
+            }
+            val remoteReserved = ByteArray(8)
+            inp.readFully(remoteReserved)
+            val peerInfoHash = ByteArray(20)
+            inp.readFully(peerInfoHash)
+            val remotePeerId = ByteArray(20)
+            inp.readFully(remotePeerId)
+
+            val hashHex = peerInfoHash.joinToString("") { "%02x".format(it) }.lowercase(Locale.US)
+            val session = seedingSessionsByHash[hashHex] ?: return
+            if (session.stopRequested.get()) return
+            if (session.connectedPeers.get() >= getMaxConnections()) return
+
+            attachedSession = session
+            session.connectedPeers.incrementAndGet()
+            session.sockets.add(socket)
+            socket.soTimeout = 30000
+
+            // 1. Send our 68-byte BitTorrent handshake with BEP-10 bit enabled
+            out.writeByte(19)
+            out.write("BitTorrent protocol".toByteArray(StandardCharsets.US_ASCII))
+            val ourReserved = ByteArray(8).apply { this[5] = 0x10.toByte() }
+            out.write(ourReserved)
+            out.write(session.infoHashBytes)
+            out.write(session.peerId)
+
+            // 2. Send BITFIELD (msg id = 5)
+            val bfLen = (session.totalPieces + 7) / 8
+            val bfBytes = ByteArray(bfLen)
+            for (p in 0 until session.totalPieces) {
+                if (session.availablePieces.get(p)) {
+                    val byteIdx = p / 8
+                    val bitIdx = 7 - (p % 8)
+                    bfBytes[byteIdx] = (bfBytes[byteIdx].toInt() or (1 shl bitIdx)).toByte()
+                }
+            }
+            out.writeInt(1 + bfBytes.size)
+            out.writeByte(5)
+            out.write(bfBytes)
+
+            // 3. Send BEP-10 extended handshake advertising ut_metadata (id = 1)
+            val rawInfo = session.extMeta.rawInfoBytes
+            if ((remoteReserved[5].toInt() and 0x10) != 0) {
+                val extPayload = if (rawInfo.isNotEmpty()) {
+                    "d1:md11:ut_metadatai1e6:ut_pexi2ee13:metadata_sizei${rawInfo.size}ee"
+                } else {
+                    "d1:md11:ut_metadatai1e6:ut_pexi2eee"
+                }.toByteArray(StandardCharsets.US_ASCII)
+                out.writeInt(2 + extPayload.size)
+                out.writeByte(20)
+                out.writeByte(0)
+                out.write(extPayload)
+            }
+            out.flush()
+
+            var peerUtMetaId = 1
+            var remoteInterested = false
+            var windowStartMs = System.currentTimeMillis()
+            var windowUploadedBytes = 0L
+
+            while (!session.stopRequested.get() && !socket.isClosed) {
+                val msgLen = inp.readInt()
+                if (msgLen < 0) break
+                if (msgLen == 0) continue // keep-alive
+                if (msgLen > 2 * 1024 * 1024) break
+
+                val msgId = inp.readUnsignedByte()
+                val payloadLen = msgLen - 1
+                when (msgId) {
+                    2 -> { // INTERESTED -> Unchoke peer so they can request blocks
+                        if (payloadLen > 0) skipFully(inp, payloadLen)
+                        remoteInterested = true
+                        out.writeInt(1)
+                        out.writeByte(1) // UNCHOKE
+                        out.flush()
+                    }
+                    3 -> { // NOT_INTERESTED
+                        if (payloadLen > 0) skipFully(inp, payloadLen)
+                        remoteInterested = false
+                    }
+                    6 -> { // REQUEST (index, begin, length)
+                        if (payloadLen >= 12) {
+                            val reqIdx = inp.readInt()
+                            val reqBegin = inp.readInt()
+                            val reqLen = inp.readInt()
+                            if (payloadLen > 12) skipFully(inp, payloadLen - 12)
+
+                            val pieceStartGlobal = reqIdx.toLong() * session.pieceLength.toLong()
+                            val pieceActualSize = minOf(
+                                session.pieceLength.toLong(),
+                                session.totalTorrentSize - pieceStartGlobal
+                            ).toInt()
+                            val validReq = remoteInterested &&
+                                reqIdx in 0 until session.totalPieces &&
+                                session.availablePieces.get(reqIdx) &&
+                                reqBegin >= 0 &&
+                                reqLen in 1..(64 * 1024) &&
+                                reqBegin.toLong() + reqLen <= pieceActualSize
+
+                            if (validReq) {
+                                val blockBuf = readSeedBlockFromDisk(session, pieceStartGlobal + reqBegin, reqLen)
+                                if (blockBuf != null) {
+                                    // Honor max upload speed throttle if configured
+                                    val maxUpBps = getMaxUploadSpeedBytesPerSec()
+                                    if (maxUpBps > 0L) {
+                                        windowUploadedBytes += blockBuf.size
+                                        val elapsed = (System.currentTimeMillis() - windowStartMs).coerceAtLeast(1L)
+                                        val targetMs = (windowUploadedBytes * 1000L) / maxUpBps
+                                        if (targetMs > elapsed) {
+                                            delay((targetMs - elapsed).coerceAtMost(2000L))
+                                        }
+                                        if (System.currentTimeMillis() - windowStartMs >= 2000L) {
+                                            windowStartMs = System.currentTimeMillis()
+                                            windowUploadedBytes = 0L
+                                        }
+                                    }
+
+                                    out.writeInt(9 + blockBuf.size)
+                                    out.writeByte(7) // PIECE
+                                    out.writeInt(reqIdx)
+                                    out.writeInt(reqBegin)
+                                    out.write(blockBuf)
+                                    out.flush()
+                                    session.uploadedBytes.addAndGet(blockBuf.size.toLong())
+                                }
+                            }
+                        } else if (payloadLen > 0) {
+                            skipFully(inp, payloadLen)
+                        }
+                    }
+                    20 -> { // BEP-10 / BEP-9 Extended messages
+                        if (payloadLen >= 1) {
+                            val extId = inp.readUnsignedByte()
+                            val extBody = ByteArray(payloadLen - 1)
+                            inp.readFully(extBody)
+                            if (extId == 0) {
+                                val hsMap = runCatching { SimpleBencodeDecoder(extBody).readValue() as? Map<*, *> }.getOrNull()
+                                val mMap = hsMap?.get("m") as? Map<*, *>
+                                val mId = (mMap?.get("ut_metadata") as? Number)?.toInt()
+                                if (mId != null && mId > 0) peerUtMetaId = mId
+                            } else if (extId == 1 && extBody.isNotEmpty()) {
+                                val reqMap = runCatching { SimpleBencodeDecoder(extBody).readValue() as? Map<*, *> }.getOrNull()
+                                val msgType = (reqMap?.get("msg_type") as? Number)?.toInt() ?: -1
+                                val pieceIdx = (reqMap?.get("piece") as? Number)?.toInt() ?: -1
+                                if (msgType == 0) {
+                                    val numMetaPieces = if (rawInfo.isEmpty()) 0 else (rawInfo.size + BLOCK_SIZE - 1) / BLOCK_SIZE
+                                    if (rawInfo.isNotEmpty() && pieceIdx in 0 until numMetaPieces) {
+                                        val start = pieceIdx * BLOCK_SIZE
+                                        val end = minOf(rawInfo.size, start + BLOCK_SIZE)
+                                        val slice = rawInfo.copyOfRange(start, end)
+                                        val hdr = "d8:msg_typei1e5:piecei${pieceIdx}e10:total_sizei${rawInfo.size}ee"
+                                            .toByteArray(StandardCharsets.US_ASCII)
+                                        out.writeInt(2 + hdr.size + slice.size)
+                                        out.writeByte(20)
+                                        out.writeByte(if (peerUtMetaId > 0) peerUtMetaId else 1)
+                                        out.write(hdr)
+                                        out.write(slice)
+                                        out.flush()
+                                    } else {
+                                        val rej = "d8:msg_typei2e5:piecei${pieceIdx.coerceAtLeast(0)}ee"
+                                            .toByteArray(StandardCharsets.US_ASCII)
+                                        out.writeInt(2 + rej.size)
+                                        out.writeByte(20)
+                                        out.writeByte(if (peerUtMetaId > 0) peerUtMetaId else 1)
+                                        out.write(rej)
+                                        out.flush()
+                                    }
+                                }
+                            }
+                        } else if (payloadLen > 0) {
+                            skipFully(inp, payloadLen)
+                        }
+                    }
+                    else -> {
+                        if (payloadLen > 0) skipFully(inp, payloadLen)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        } finally {
+            runCatching { socket.close() }
+            if (attachedSession != null) {
+                attachedSession.sockets.remove(socket)
+                attachedSession.connectedPeers.decrementAndGet()
+            }
+        }
+    }
+
+    private fun readSeedBlockFromDisk(session: SeedSession, globalOffset: Long, length: Int): ByteArray? {
+        if (length <= 0 || globalOffset < 0L || globalOffset + length > session.totalTorrentSize) return null
+        val outBuf = ByteArray(length)
+        var filled = 0
+        val reqEnd = globalOffset + length
+        for (entry in session.extMeta.validatedEntries) {
+            if (entry.length <= 0L) continue
+            val entryStart = entry.offsetInTorrent
+            val entryEnd = entryStart + entry.length
+            val ovStart = maxOf(globalOffset, entryStart)
+            val ovEnd = minOf(reqEnd, entryEnd)
+            if (ovEnd > ovStart) {
+                val file = runCatching {
+                    TorrentPathSafety.resolveContainedFile(session.torrentFolder, entry.relativePath)
+                }.getOrNull() ?: return null
+                if (!file.exists() || !file.isFile || file.length() < (ovEnd - entryStart)) return null
+                val readLen = (ovEnd - ovStart).toInt()
+                val dstPos = (ovStart - globalOffset).toInt()
+                val ok = runCatching {
+                    RandomAccessFile(file, "r").use { raf ->
+                        raf.seek(ovStart - entryStart)
+                        raf.readFully(outBuf, dstPos, readLen)
+                    }
+                    true
+                }.getOrDefault(false)
+                if (!ok) return null
+                filled += readLen
+            }
+        }
+        return if (filled == length) outBuf else null
+    }
+
+    fun startSeeding(
+        downloadItem: DownloadItem,
+        announceTrackers: Boolean = true,
+        enforcePreferences: Boolean = true
+    ): Job {
+        val previous = activeSeedingJobs[downloadItem.id]
+        val job = scope.launch(Dispatchers.IO) {
+            if (previous != null && previous.isActive) {
+                stopSeeding(downloadItem.id)
+            }
+            executeSeedingJob(downloadItem, announceTrackers, enforcePreferences)
+        }
+        activeSeedingJobs[downloadItem.id] = job
+        job.invokeOnCompletion {
+            activeSeedingJobs.remove(downloadItem.id, job)
+        }
+        return job
+    }
+
+    private suspend fun executeSeedingJob(
+        initialItem: DownloadItem,
+        announceTrackers: Boolean,
+        enforcePreferences: Boolean
+    ) {
+        if (initialItem.downloadType != DownloadType.TORRENT && initialItem.downloadType != DownloadType.MAGNET) {
+            return
+        }
+        if (enforcePreferences && !isSeedingEnabled()) {
+            return
+        }
+        val latest = repository.getDownloadById(initialItem.id) ?: initialItem
+        if (latest.status != DownloadStatus.COMPLETED) return
+
+        val sourceUri = (latest.magnetUri ?: latest.url).trim()
+        val hashHint = latest.torrentHash?.trim()?.lowercase(Locale.US).orEmpty()
+        var extMeta = metadataCache[sourceUri]
+            ?: hashHint.takeIf { it.length == 40 }?.let { metadataCache["hash:$it"] }
+        if (extMeta == null && hashHint.length == 40) {
+            val cachedInfo = loadCachedInfoBytes(hashHint)
+            if (cachedInfo != null) {
+                val extraTrackers = if (sourceUri.startsWith("magnet:", ignoreCase = true)) {
+                    runCatching { parseMagnetDetailed(sourceUri).trackers }.getOrDefault(emptyList())
+                } else {
+                    emptyList()
+                }
+                extMeta = runCatching {
+                    parseRawInfoDictionaryBytes(cachedInfo, hashHint, extraTrackers, emptyList())
+                }.getOrNull()
+            }
+        }
+        if (extMeta == null) {
+            extMeta = runCatching { resolveExtendedTorrentMetadata(sourceUri) }.getOrNull()
+        }
+        if (extMeta == null || !extMeta.hasResolvedMetadata || extMeta.validatedEntries.isEmpty()) {
+            Log.w(TAG, "Cannot seed item ${latest.id}: unresolved torrent metadata")
+            return
+        }
+
+        val infoHashLower = extMeta.metadata.hash.lowercase(Locale.US)
+        val infoHashBytes = hexToBytes(infoHashLower)
+        if (infoHashBytes.size != 20) return
+        if (extMeta.rawInfoBytes.isNotEmpty()) {
+            persistResolvedInfoBytes(infoHashLower, extMeta.rawInfoBytes)
+        }
+
+        val baseDir = File(latest.savePath)
+        val folderCandidates = buildList {
+            add(File(baseDir, latest.filename))
+            if (!latest.torrentName.isNullOrBlank()) {
+                add(File(baseDir, TorrentPathSafety.sanitizeRootName(latest.torrentName)))
+            }
+        }.distinctBy { it.absolutePath }
+
+        val torrentFolder = folderCandidates.firstOrNull { dir ->
+            if (!dir.exists() || !dir.isDirectory) return@firstOrNull false
+            if (!runCatching { TorrentPathSafety.ensureNotSymlink(dir); true }.getOrDefault(false)) return@firstOrNull false
+            val marker = File(dir, TorrentPathSafety.TORRENT_IDENTITY_MARKER)
+            if (marker.exists()) {
+                val txt = runCatching { marker.readText(StandardCharsets.UTF_8).trim() }.getOrDefault("")
+                if (txt.startsWith("job:") && txt.substringBefore("|") != "job:${latest.id}") return@firstOrNull false
+            }
+            true
+        } ?: return
+
+        val totalTorrentSize = extMeta.validatedEntries.sumOf { it.length }
+        if (totalTorrentSize <= 0L) return
+        val pieceLength = extMeta.metadata.pieceSize.coerceAtLeast(1)
+        val totalPieces = if (extMeta.pieceHashes.isNotEmpty()) {
+            extMeta.pieceHashes.size
+        } else {
+            ((totalTorrentSize + pieceLength - 1) / pieceLength).toInt()
+        }
+        val availablePieces = BitSet(totalPieces)
+        val pieceHashes = extMeta.pieceHashes
+
+        // Verify which pieces are intact on disk so we never serve incomplete or corrupted pieces
+        for (p in 0 until totalPieces) {
+            val pStart = p.toLong() * pieceLength.toLong()
+            val pSize = minOf(pieceLength.toLong(), totalTorrentSize - pStart).toInt()
+            if (pSize <= 0) continue
+            val pEnd = pStart + pSize
+            val buf = ByteArray(pSize)
+            var pieceComplete = true
+            var bytesRead = 0
+            for (entry in extMeta.validatedEntries) {
+                if (entry.length <= 0L) continue
+                val ovStart = maxOf(pStart, entry.offsetInTorrent)
+                val ovEnd = minOf(pEnd, entry.offsetInTorrent + entry.length)
+                if (ovEnd > ovStart) {
+                    val f = runCatching {
+                        TorrentPathSafety.resolveContainedFile(torrentFolder, entry.relativePath)
+                    }.getOrNull()
+                    if (f == null || !f.exists() || !f.isFile || f.length() < (ovEnd - entry.offsetInTorrent)) {
+                        pieceComplete = false
+                        break
+                    }
+                    val len = (ovEnd - ovStart).toInt()
+                    val dst = (ovStart - pStart).toInt()
+                    val readOk = runCatching {
+                        RandomAccessFile(f, "r").use { raf ->
+                            raf.seek(ovStart - entry.offsetInTorrent)
+                            raf.readFully(buf, dst, len)
+                        }
+                        true
+                    }.getOrDefault(false)
+                    if (!readOk) {
+                        pieceComplete = false
+                        break
+                    }
+                    bytesRead += len
+                }
+            }
+            if (pieceComplete && bytesRead == pSize) {
+                val hashOk = if (p < pieceHashes.size) {
+                    MessageDigest.getInstance("SHA-1").digest(buf).contentEquals(pieceHashes[p])
+                } else {
+                    true
+                }
+                if (hashOk) availablePieces.set(p)
+            }
+        }
+
+        if (availablePieces.cardinality() == 0) {
+            Log.w(TAG, "Cannot seed item ${latest.id}: 0 verified pieces present on disk")
+            return
+        }
+
+        val listenPort = ensurePeerServerRunning()
+        val peerId = generatePeerId()
+        val baselineUploaded = latest.uploadedSize.coerceAtLeast(0L)
+        val ratioDenominator = latest.downloadedSize.takeIf { it > 0L } ?: totalTorrentSize
+        val session = SeedSession(
+            downloadId = latest.id,
+            infoHashHex = infoHashLower,
+            infoHashBytes = infoHashBytes,
+            peerId = peerId,
+            extMeta = extMeta,
+            torrentFolder = torrentFolder,
+            availablePieces = availablePieces,
+            totalPieces = totalPieces,
+            totalTorrentSize = totalTorrentSize,
+            payloadSizeForRatio = ratioDenominator,
+            pieceLength = pieceLength
+        )
+
+        seedingSessions[latest.id] = session
+        seedingSessionsByHash[infoHashLower] = session
+        activeSeedingIds.add(latest.id)
+
+        val trackersToAnnounce = extMeta.trackers.ifEmpty {
+            if (sourceUri.startsWith("magnet:", ignoreCase = true)) {
+                runCatching { parseMagnetDetailed(sourceUri).trackers }.getOrDefault(emptyList())
+            } else {
+                emptyList()
+            }
+        }
+
+        try {
+            if (announceTrackers && trackersToAnnounce.isNotEmpty()) {
+                val swarm = discoverSwarmFromTrackers(
+                    infoHashBytes = infoHashBytes,
+                    trackers = trackersToAnnounce,
+                    peerIdBytes = peerId,
+                    leftBytes = 0L,
+                    port = listenPort,
+                    uploadedBytes = baselineUploaded,
+                    downloadedBytes = ratioDenominator,
+                    event = "started"
+                )
+                if (swarm.respondedTrackers > 0) {
+                    session.swarmSeeds.set(maxOf(swarm.seeders, 1))
+                    session.swarmPeers.set(maxOf(swarm.leechers, swarm.peers.size))
+                }
+            }
+
+            var lastAnnounceMs = System.currentTimeMillis()
+            while (kotlinx.coroutines.currentCoroutineContext().isActive && !session.stopRequested.get()) {
+                val row = repository.getDownloadById(latest.id) ?: break
+                if (row.status != DownloadStatus.COMPLETED) break
+
+                if (enforcePreferences) {
+                    if (!isSeedingEnabled()) break
+                    val ratioLimit = getTargetSeedRatio()
+                    if (ratioLimit > 0.0 && session.payloadSizeForRatio > 0L) {
+                        val targetUpload = (session.payloadSizeForRatio.toDouble() * ratioLimit).toLong()
+                        if (session.uploadedBytes.get() >= targetUpload) break
+                    }
+                    val durationLimitSec = getSeedUntilSeconds()
+                    if (durationLimitSec > 0L) {
+                        val elapsedSec = (System.currentTimeMillis() - session.startedAtMs) / 1000L
+                        if (elapsedSec >= durationLimitSec) break
+                    }
+                }
+
+                val now = System.currentTimeMillis()
+                val curBytes = session.uploadedBytes.get()
+                val dt = (now - session.lastStatsSampleMs).coerceAtLeast(1L)
+                val speed = ((curBytes - session.lastStatsSampleBytes).coerceAtLeast(0L) * 1000L) / dt
+                session.uploadSpeedBytesPerSec.set(speed)
+                session.lastStatsSampleMs = now
+                session.lastStatsSampleBytes = curBytes
+
+                val totalUploaded = baselineUploaded + curBytes
+                val reportedPeers = maxOf(session.swarmPeers.get(), session.connectedPeers.get())
+                val reportedSeeds = maxOf(session.swarmSeeds.get(), 1)
+                repository.update(
+                    row.copy(
+                        uploadSpeed = speed,
+                        uploadedSize = totalUploaded,
+                        peers = reportedPeers,
+                        seeds = reportedSeeds
+                    )
+                )
+
+                if (announceTrackers && trackersToAnnounce.isNotEmpty() && now - lastAnnounceMs >= 30_000L) {
+                    lastAnnounceMs = now
+                    val swarm = runCatching {
+                        discoverSwarmFromTrackers(
+                            infoHashBytes = infoHashBytes,
+                            trackers = trackersToAnnounce,
+                            peerIdBytes = peerId,
+                            leftBytes = 0L,
+                            port = listenPort,
+                            uploadedBytes = totalUploaded,
+                            downloadedBytes = ratioDenominator
+                        )
+                    }.getOrNull()
+                    if (swarm != null && swarm.respondedTrackers > 0) {
+                        session.swarmSeeds.set(maxOf(swarm.seeders, 1))
+                        session.swarmPeers.set(maxOf(swarm.leechers, swarm.peers.size))
+                    }
+                }
+
+                delay(1000L)
+            }
+        } catch (_: CancellationException) {
+        } finally {
+            session.stopRequested.set(true)
+            session.uploadSpeedBytesPerSec.set(0L)
+            session.sockets.forEach { sock -> runCatching { sock.close() } }
+            session.sockets.clear()
+            activeSeedingIds.remove(latest.id)
+            seedingSessions.remove(latest.id, session)
+            seedingSessionsByHash.remove(infoHashLower, session)
+
+            withContext(NonCancellable) {
+                runCatching {
+                    val finalRow = repository.getDownloadById(latest.id)
+                    if (finalRow != null && finalRow.status == DownloadStatus.COMPLETED) {
+                        repository.update(
+                            finalRow.copy(
+                                uploadSpeed = 0L,
+                                uploadedSize = maxOf(finalRow.uploadedSize, baselineUploaded + session.uploadedBytes.get())
+                            )
+                        )
+                    }
+                }
+
+                if (announceTrackers && trackersToAnnounce.isNotEmpty()) {
+                    withTimeoutOrNull(2500L) {
+                        runCatching {
+                            discoverSwarmFromTrackers(
+                                infoHashBytes = infoHashBytes,
+                                trackers = trackersToAnnounce,
+                                peerIdBytes = peerId,
+                                leftBytes = 0L,
+                                port = listenPort,
+                                uploadedBytes = baselineUploaded + session.uploadedBytes.get(),
+                                downloadedBytes = ratioDenominator,
+                                event = "stopped"
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    suspend fun stopSeeding(downloadId: Long) {
+        seedingSessions[downloadId]?.let { session ->
+            session.stopRequested.set(true)
+            session.sockets.forEach { sock -> runCatching { sock.close() } }
+        }
+        val job = activeSeedingJobs.remove(downloadId)
+        if (job != null && job.isActive) {
+            job.cancelAndJoin()
+        }
+        activeSeedingIds.remove(downloadId)
+    }
+
+    fun shutdownSeeding() {
+        val ids = (activeSeedingJobs.keys + seedingSessions.keys).toSet()
+        for (id in ids) {
+            seedingSessions[id]?.let { session ->
+                session.stopRequested.set(true)
+                session.sockets.forEach { sock -> runCatching { sock.close() } }
+            }
+            activeSeedingJobs.remove(id)?.cancel()
+            seedingSessions.remove(id)?.let { s ->
+                seedingSessionsByHash.remove(s.infoHashHex, s)
+            }
+            activeSeedingIds.remove(id)
+        }
+        synchronized(serverLock) {
+            peerServerAcceptJob?.cancel()
+            peerServerAcceptJob = null
+            runCatching { peerServerSocket?.close() }
+            peerServerSocket = null
+        }
     }
 
     fun pauseTorrentDownload(downloadItem: DownloadItem) {

@@ -158,6 +158,10 @@
     <string name="peers_unavailable">Peers: Unavailable</string>
     <string name="seeds_unavailable">Seeds: Unavailable</string>
     <string name="upload_speed">Upload: %s/s</string>
+    <string name="uploaded_total">Uploaded: %s</string>
+    <string name="seed">Seed</string>
+    <string name="stop_seeding">Stop Seed</string>
+    <string name="seeding_status">Seeding</string>
     <string name="download_progress">%d%%</string>
     <string name="status">Status: %s</string>
     <string name="file_size">Size: %s</string>

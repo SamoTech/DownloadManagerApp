@@ -219,6 +219,7 @@ class AddDownloadActivity : AppCompatActivity() {
         binding.rvTorrentFiles.layoutManager = object : LinearLayoutManager(this) {
             override fun canScrollVertically(): Boolean = false
         }
+        binding.rvTorrentFiles.setHasFixedSize(false)
         binding.rvTorrentFiles.isNestedScrollingEnabled = false
         binding.rvTorrentFiles.itemAnimator = null
     }
@@ -354,9 +355,27 @@ class AddDownloadActivity : AppCompatActivity() {
 
         binding.btnFetchTorrentFiles.setOnClickListener {
             val raw = binding.etUrl.text?.toString()?.trim().orEmpty()
-            if (raw.isNotEmpty()) {
+            val valid = normalizeAndValidateUrl(raw) ?: raw
+            if (valid.isNotEmpty()) {
+                val targetType = if (valid.startsWith("magnet:", ignoreCase = true)) {
+                    DownloadType.MAGNET
+                } else {
+                    DownloadType.TORRENT
+                }
+                if (downloadType != targetType) {
+                    isUpdatingChipsProgrammatically = true
+                    binding.chipTypeTorrent.isChecked = true
+                    isUpdatingChipsProgrammatically = false
+                    downloadType = targetType
+                    binding.musicOptions.visibility = View.GONE
+                    binding.videoOptions.visibility = View.GONE
+                    binding.torrentOptions.visibility = View.VISIBLE
+                }
+                metadataExtractJob?.cancel()
+                torrentDownloadManager.invalidateMetadataCache(raw)
+                torrentDownloadManager.invalidateMetadataCache(valid)
                 val token = probeRequestToken.incrementAndGet()
-                extractMagnetInfo(raw, token)
+                extractMagnetInfo(valid, token)
             } else {
                 Toast.makeText(this, R.string.error_invalid_url, Toast.LENGTH_SHORT).show()
             }
@@ -641,7 +660,7 @@ class AddDownloadActivity : AppCompatActivity() {
                 binding.rvTorrentFiles.adapter = null
                 binding.rvTorrentFiles.visibility = View.GONE
                 binding.tvSelectedFilesCount.text =
-                    "All files will be downloaded when metadata resolves (or tap Fetch Files to retry)"
+                    "All files will download once peers provide metadata (tap Fetch Files to re-query trackers & DHT)"
                 binding.tvTorrentMetaSummary.text =
                     "$fallbackName • $seedsLabel • $peersLabel$trackerNote"
             }
