@@ -1803,8 +1803,13 @@ class MusicDownloadManager(
 
                 for (attempt in 0..1) {
                     if (attempt == 1) {
+                        val errMsg = lastErr?.message.orEmpty()
+                        val shouldReExtract = candidateUrls.isEmpty() ||
+                            errMsg.contains("403") || errMsg.contains("401") || errMsg.contains("410") || errMsg.contains("416")
+                        if (!shouldReExtract) break
                         // Evict cached track info and re-extract fresh signed CDN URLs once if initial stream URL expired
                         trackInfoCache.keys.filter { it.startsWith("$lookupUrl|") }.forEach { trackInfoCache.remove(it) }
+                        YouTubeExtractor.invalidateCache(lookupUrl)
                         val freshInfo = runCatching { extractMusicInfo(lookupUrl, formatHint, allowAlternate) }.getOrNull()
                         candidateUrls.clear()
                         freshInfo?.directAudioUrl?.let { candidateUrls.add(it) }

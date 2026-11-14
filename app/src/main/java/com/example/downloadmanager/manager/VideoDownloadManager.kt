@@ -65,7 +65,8 @@ class VideoDownloadManager(
     companion object {
         private const val TAG = "VideoDownloadManager"
         private const val BUFFER_SIZE = 32 * 1024
-        private const val YOUTUBE_RANGE_CHUNK_SIZE = 9L * 1024L * 1024L
+        private const val YOUTUBE_RANGE_CHUNK_SIZE = 2L * 1024L * 1024L
+        private const val MAX_STREAM_RESUME_RETRIES = 5
 
         const val DESKTOP_USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -1732,16 +1733,21 @@ class VideoDownloadManager(
                         var lastAudioErr: Exception? = null
                         for (attempt in 0..1) {
                             if (attempt > 0) {
+                                val msg = lastAudioErr?.message.orEmpty()
+                                val shouldReExtract = streamInfo?.formats.isNullOrEmpty() ||
+                                    msg.contains("403") || msg.contains("401") || msg.contains("410") || msg.contains("416")
+                                if (!shouldReExtract) break
                                 streamInfoCache.remove(lookupUrl)
+                                YouTubeExtractor.invalidateCache(lookupUrl)
                                 streamInfo = extractVideoInfo(lookupUrl)
                             }
                             val audioCandidates = buildList {
                                 val bestAudio = streamInfo?.formats?.let { selectBestFormat(it, "audio") }
                                 if (bestAudio != null) add(bestAudio)
-                                streamInfo?.formats?.filter { it.isAudioOnly }?.forEach { fmt ->
+                                streamInfo?.formats?.filter { it.isAudioOnly }?.take(2)?.forEach { fmt ->
                                     if (none { it.url == fmt.url }) add(fmt)
                                 }
-                                streamInfo?.formats?.filter { !it.isAudioOnly }?.forEach { fmt ->
+                                streamInfo?.formats?.filter { !it.isAudioOnly && it.formatId.startsWith("muxed_") }?.take(1)?.forEach { fmt ->
                                     if (none { it.url == fmt.url }) add(fmt)
                                 }
                                 val fallbackDirect = currentStreamUrl ?: lookupUrl
@@ -1756,7 +1762,7 @@ class VideoDownloadManager(
                                         )
                                     )
                                 }
-                            }
+                            }.take(3)
                             if (audioCandidates.isEmpty()) {
                                 lastAudioErr = IOException("Could not extract playable audio stream from $lookupUrl")
                                 continue
@@ -1813,13 +1819,29 @@ class VideoDownloadManager(
                     var videoSuccess = false
                     var lastError: Exception? = null
 
+                    val requestedQuality = when {
+                        activeItem.videoQuality?.contains("360", ignoreCase = true) == true ||
+                            activeItem.videoQuality?.equals("low", ignoreCase = true) == true -> "low"
+                        activeItem.videoQuality?.contains("480", ignoreCase = true) == true ||
+                            activeItem.videoQuality?.equals("medium", ignoreCase = true) == true -> "medium"
+                        activeItem.videoQuality?.contains("720", ignoreCase = true) == true ||
+                            activeItem.videoQuality?.equals("high", ignoreCase = true) == true -> "high"
+                        else -> "best"
+                    }
+
                     for (attempt in 0..1) {
                         if (attempt > 0) {
+                            val errMsg = lastError?.message.orEmpty()
+                            val shouldReExtract = streamInfo?.formats.isNullOrEmpty() ||
+                                errMsg.contains("403") || errMsg.contains("401") || errMsg.contains("410") || errMsg.contains("416")
+                            if (!shouldReExtract) break
                             streamInfoCache.remove(lookupUrl)
+                            YouTubeExtractor.invalidateCache(lookupUrl)
                             streamInfo = extractVideoInfo(lookupUrl)
                         }
-                        val chosenFormat = streamInfo?.formats?.let { selectBestFormat(it, "best") }
+                        val chosenFormat = streamInfo?.formats?.let { selectBestFormat(it, requestedQuality) }
                         val videoStreamUrl = chosenFormat?.url ?: currentStreamUrl ?: lookupUrl
+                        val triedUrls = LinkedHashSet<String>()
 
                         val isAdaptiveVideoOnly = chosenFormat?.formatId?.startsWith("adaptive_") == true
                         val currentFormats = streamInfo?.formats
@@ -1830,6 +1852,7 @@ class VideoDownloadManager(
                         }
 
                         if (isAdaptiveVideoOnly && companionAudioFormat != null) {
+                            triedUrls.add(videoStreamUrl)
                             val tempVideoFile = File(dir, ".tmp_vid_${downloadItem.id}.${chosenFormat?.container ?: "mp4"}")
                             val tempAudioFile = File(dir, ".tmp_aud_${downloadItem.id}.${companionAudioFormat.container}")
                             try {
@@ -1885,12 +1908,19 @@ class VideoDownloadManager(
                             }
 
                             // Prioritize muxed/progressive/HLS formats (which already have BOTH video and audio)
-                            // before adaptive video-only formats so video playback never lacks audio.
+                            // and limit fallback candidates so failed streams never loop through 10+ adaptive tracks.
                             val candidateFormats = buildList {
-                                val nonAudioFormats = streamInfo?.formats?.filter { !it.isAudioOnly }.orEmpty()
-                                addAll(nonAudioFormats.filter { !it.formatId.startsWith("adaptive_") })
-                                addAll(nonAudioFormats.filter { it.formatId.startsWith("adaptive_") })
-                                if (isEmpty() && !isWatchPageUrl(videoStreamUrl)) {
+                                val nonAudioFormats = streamInfo?.formats
+                                    ?.filter { !it.isAudioOnly && it.url !in triedUrls }
+                                    .orEmpty()
+                                addAll(nonAudioFormats.filter { !it.formatId.startsWith("adaptive_") }.take(2))
+                                val adaptiveH264 = nonAudioFormats.firstOrNull {
+                                    it.formatId.startsWith("adaptive_") && it.container == "mp4" && it.codec != "AV1" && it.codec != "HEVC"
+                                }
+                                if (adaptiveH264 != null && size < 2) {
+                                    add(adaptiveH264)
+                                }
+                                if (isEmpty() && !isWatchPageUrl(videoStreamUrl) && videoStreamUrl !in triedUrls) {
                                     add(
                                         VideoFormat(
                                             formatId = "direct",
@@ -1901,10 +1931,10 @@ class VideoDownloadManager(
                                         )
                                     )
                                 }
-                            }
+                            }.take(3)
 
                             if (candidateFormats.isEmpty()) {
-                                lastError = IOException("Could not extract playable video stream from $lookupUrl")
+                                lastError = lastError ?: IOException("Could not extract playable video stream from $lookupUrl")
                                 continue
                             }
 
@@ -1913,6 +1943,7 @@ class VideoDownloadManager(
                             for (cand in candidateFormats) {
                                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
                                 if (isWatchPageUrl(cand.url)) continue
+                                triedUrls.add(cand.url)
                                 try {
                                     if (stagingTarget.exists()) stagingTarget.delete()
                                     val isCandAdaptiveOnly = cand.formatId.startsWith("adaptive_")
@@ -2058,6 +2089,16 @@ class VideoDownloadManager(
         reqBuilder.header("User-Agent", userAgent)
         val parsed = url.toHttpUrlOrNull()
         val host = parsed?.host?.lowercase(Locale.US).orEmpty()
+        val isGoogleVideoHost = UrlClassifier.matchesDomain(host, "googlevideo.com") ||
+            (parsed?.encodedPath?.startsWith("/videoplayback") == true && url.contains("c="))
+        if (isGoogleVideoHost) {
+            val clientParam = Regex("[?&]c=([^&]+)").find(url)?.groupValues?.getOrNull(1)?.uppercase(Locale.US)
+            if (clientParam == "WEB" || clientParam == "MWEB" || clientParam == "TVHTML5" || clientParam == "TVHTML5_SIMPLY_EMBEDDED_PLAYER") {
+                reqBuilder.header("Referer", "https://www.youtube.com/")
+                reqBuilder.header("Origin", "https://www.youtube.com")
+            }
+            return
+        }
         val referer = when {
             host.contains("sndcdn.com") || host.contains("soundcloud.com") -> "https://soundcloud.com/"
             host.contains("tiktok") || host.contains("tikwm") || host.contains("musical.ly") || host.contains("byteoversea") -> "https://www.tiktok.com/"
@@ -2110,9 +2151,11 @@ class VideoDownloadManager(
         }
 
         val ua = YouTubeExtractor.getUserAgentForStreamUrl(effectiveUrl)
-        val isGoogleVideo = effectiveUrl.toHttpUrlOrNull()?.host?.let {
+        val parsedEffective = effectiveUrl.toHttpUrlOrNull()
+        val isGoogleVideo = parsedEffective?.host?.let {
             UrlClassifier.matchesDomain(it, "googlevideo.com")
-        } == true
+        } == true || (parsedEffective?.encodedPath?.startsWith("/videoplayback") == true &&
+            (effectiveUrl.contains("clen=") || effectiveUrl.contains("itag=")))
 
         if (effectiveUrl.substringBefore("?").endsWith(".m3u8", ignoreCase = true) ||
             effectiveUrl.contains(".m3u8?", ignoreCase = true)
@@ -2122,11 +2165,12 @@ class VideoDownloadManager(
 
         val exactGoogleVideoClen = if (isGoogleVideo) {
             YouTubeExtractor.extractClenFromUrl(effectiveUrl)
-                ?: if (expectedSize > YOUTUBE_RANGE_CHUNK_SIZE) expectedSize else -1L
+                ?: expectedSize.takeIf { it > 0L }
+                ?: probeGoogleVideoTotalSize(effectiveUrl, ua)
         } else {
             -1L
         }
-        if (isGoogleVideo && exactGoogleVideoClen > YOUTUBE_RANGE_CHUNK_SIZE) {
+        if (isGoogleVideo && exactGoogleVideoClen > 0L) {
             return downloadGoogleVideoChunked(downloadId, effectiveUrl, ua, destFile, exactGoogleVideoClen, onProgress)
         }
 
@@ -2138,6 +2182,9 @@ class VideoDownloadManager(
         val request = reqBuilder.build()
 
         var unwrappedJsonStreamUrl: String? = null
+        var initialReadBytes = 0L
+        var initialDeclaredLength = -1L
+        var initialReadThrew: IOException? = null
 
         okHttpClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
@@ -2159,6 +2206,7 @@ class VideoDownloadManager(
             } else {
                 -1L
             }
+            initialDeclaredLength = declaredLength
             val progressTotal = when {
                 declaredLength > 0L -> declaredLength
                 expectedSize > 0L -> expectedSize
@@ -2223,40 +2271,41 @@ class VideoDownloadManager(
                     var lastUpdateTime = System.currentTimeMillis()
                     var lastRead = 0L
 
-                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                        val currentStatus = repository.getDownloadById(downloadId)?.status
-                        if (currentStatus == DownloadStatus.PAUSED || currentStatus == DownloadStatus.CANCELLED) {
-                            throw CancellationException()
-                        }
-                        totalRead += bytesRead
-                        if (declaredLength > 0L && totalRead > declaredLength) {
-                            throw IOException("Stream exceeded declared Content-Length ($declaredLength bytes)")
-                        }
-                        outputStream.write(buffer, 0, bytesRead)
-
-                        val now = System.currentTimeMillis()
-                        if (now - lastUpdateTime >= 350) {
-                            val timeDiff = (now - lastUpdateTime) / 1000.0
-                            val speed = if (timeDiff > 0) ((totalRead - lastRead) / timeDiff).toLong() else 0L
-                            val progress = if (progressTotal > 0L) {
-                                ((totalRead * 100.0) / progressTotal).toInt().coerceIn(0, 99)
-                            } else {
-                                0
+                    try {
+                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                            val currentStatus = repository.getDownloadById(downloadId)?.status
+                            if (currentStatus == DownloadStatus.PAUSED || currentStatus == DownloadStatus.CANCELLED) {
+                                throw CancellationException()
                             }
-                            onProgress(totalRead, progressTotal.coerceAtLeast(totalRead), progress, speed)
-                            lastUpdateTime = now
-                            lastRead = totalRead
+                            totalRead += bytesRead
+                            if (declaredLength > 0L && totalRead > declaredLength) {
+                                throw IOException("Stream exceeded declared Content-Length ($declaredLength bytes)")
+                            }
+                            outputStream.write(buffer, 0, bytesRead)
+
+                            val now = System.currentTimeMillis()
+                            if (now - lastUpdateTime >= 350) {
+                                val timeDiff = (now - lastUpdateTime) / 1000.0
+                                val speed = if (timeDiff > 0) ((totalRead - lastRead) / timeDiff).toLong() else 0L
+                                val progress = if (progressTotal > 0L) {
+                                    ((totalRead * 100.0) / progressTotal).toInt().coerceIn(0, 99)
+                                } else {
+                                    0
+                                }
+                                onProgress(totalRead, progressTotal.coerceAtLeast(totalRead), progress, speed)
+                                lastUpdateTime = now
+                                lastRead = totalRead
+                            }
                         }
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (ioe: IOException) {
+                        initialReadThrew = ioe
+                    } finally {
+                        outputStream.flush()
+                        runCatching { outputStream.fd.sync() }
+                        initialReadBytes = totalRead
                     }
-                    outputStream.flush()
-                    runCatching { outputStream.fd.sync() }
-
-                    if (declaredLength > 0L && totalRead != declaredLength) {
-                        destFile.delete()
-                        throw IOException("Truncated media stream: expected $declaredLength bytes, received $totalRead bytes")
-                    }
-
-                    onProgress(totalRead, totalRead, 100, 0L)
                 }
             }
         }
@@ -2265,7 +2314,145 @@ class VideoDownloadManager(
             return streamUrlToFile(downloadId, unwrappedJsonStreamUrl!!, destFile, expectedSize, onProgress)
         }
 
+        if (initialDeclaredLength > 0L && initialReadBytes != initialDeclaredLength) {
+            if (initialReadBytes in 1L until initialDeclaredLength) {
+                // Attempt in-place HTTP Range resume from initialReadBytes without resetting to 0%
+                val resumedOk = resumeInterruptedStreamInPlace(
+                    downloadId = downloadId,
+                    streamUrl = effectiveUrl,
+                    userAgent = ua,
+                    destFile = destFile,
+                    startOffset = initialReadBytes,
+                    totalSize = initialDeclaredLength,
+                    onProgress = onProgress
+                )
+                if (resumedOk && destFile.exists() && destFile.length() == initialDeclaredLength) {
+                    onProgress(initialDeclaredLength, initialDeclaredLength, 100, 0L)
+                    return true
+                }
+            }
+            destFile.delete()
+            throw initialReadThrew
+                ?: IOException("Truncated media stream: expected $initialDeclaredLength bytes, received $initialReadBytes bytes")
+        }
+
+        if (initialReadThrew != null) {
+            destFile.delete()
+            throw initialReadThrew!!
+        }
+
+        onProgress(initialReadBytes, initialReadBytes, 100, 0L)
         return destFile.exists() && destFile.length() > 0L
+    }
+
+    private fun probeGoogleVideoTotalSize(streamUrl: String, userAgent: String): Long {
+        return try {
+            val reqBuilder = Request.Builder()
+                .url(streamUrl)
+                .header("Range", "bytes=0-1023")
+                .header("Accept", "*/*")
+                .header("Accept-Encoding", "identity")
+            applyStreamHeaders(reqBuilder, streamUrl, userAgent)
+            okHttpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                if (!resp.isSuccessful) return -1L
+                val cr = HttpRangeValidator.parseContentRange(resp.header("Content-Range"))
+                if (cr?.total != null && cr.total > 0L) {
+                    return cr.total
+                }
+                if (resp.code == 200) {
+                    val cl = resp.header("Content-Length")?.toLongOrNull() ?: -1L
+                    if (cl > 1024L) return cl
+                }
+                -1L
+            }
+        } catch (_: Exception) {
+            -1L
+        }
+    }
+
+    private suspend fun resumeInterruptedStreamInPlace(
+        downloadId: Long,
+        streamUrl: String,
+        userAgent: String,
+        destFile: File,
+        startOffset: Long,
+        totalSize: Long,
+        onProgress: (Long, Long, Int, Long) -> Unit
+    ): Boolean {
+        var offset = startOffset
+        var consecutiveStalls = 0
+        val buffer = ByteArray(BUFFER_SIZE)
+        var lastUpdateTime = System.currentTimeMillis()
+        var lastRead = offset
+
+        FileOutputStream(destFile, true).use { outputStream ->
+            while (offset < totalSize && consecutiveStalls < MAX_STREAM_RESUME_RETRIES) {
+                val currentStatus = repository.getDownloadById(downloadId)?.status
+                if (currentStatus == DownloadStatus.PAUSED || currentStatus == DownloadStatus.CANCELLED) {
+                    throw CancellationException()
+                }
+                val endByte = totalSize - 1L
+                val reqBuilder = Request.Builder()
+                    .url(streamUrl)
+                    .header("Range", "bytes=$offset-$endByte")
+                    .header("Accept", "*/*")
+                    .header("Accept-Encoding", "identity")
+                applyStreamHeaders(reqBuilder, streamUrl, userAgent)
+
+                var madeProgress = false
+                try {
+                    okHttpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                        if (resp.code != 206) {
+                            return false
+                        }
+                        HttpRangeValidator.validate206Range(
+                            contentRangeHeader = resp.header("Content-Range"),
+                            contentLengthHeader = resp.header("Content-Length")?.toLongOrNull() ?: -1L,
+                            expectedStart = offset,
+                            expectedEndInclusive = endByte,
+                            expectedTotal = totalSize
+                        )
+                        val bodyStream = resp.body?.byteStream() ?: return false
+                        var read: Int
+                        while (bodyStream.read(buffer).also { read = it } != -1) {
+                            val st = repository.getDownloadById(downloadId)?.status
+                            if (st == DownloadStatus.PAUSED || st == DownloadStatus.CANCELLED) {
+                                throw CancellationException()
+                            }
+                            outputStream.write(buffer, 0, read)
+                            offset += read
+                            madeProgress = true
+                            val now = System.currentTimeMillis()
+                            if (now - lastUpdateTime >= 350) {
+                                val timeDiff = (now - lastUpdateTime) / 1000.0
+                                val speed = if (timeDiff > 0) ((offset - lastRead) / timeDiff).toLong() else 0L
+                                val progress = ((offset * 100.0) / totalSize).toInt().coerceIn(0, 99)
+                                onProgress(offset, totalSize, progress, speed)
+                                lastUpdateTime = now
+                                lastRead = offset
+                            }
+                        }
+                    }
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (_: Exception) {
+                } finally {
+                    outputStream.flush()
+                }
+
+                if (madeProgress) {
+                    consecutiveStalls = 0
+                } else {
+                    consecutiveStalls++
+                    if (consecutiveStalls < MAX_STREAM_RESUME_RETRIES) {
+                        kotlinx.coroutines.delay(200L * consecutiveStalls)
+                    }
+                }
+            }
+            outputStream.flush()
+            runCatching { outputStream.fd.sync() }
+        }
+        return offset == totalSize
     }
 
     /**
@@ -2449,7 +2636,7 @@ class VideoDownloadManager(
         }
     }
 
-    private suspend fun downloadGoogleVideoChunked(
+    internal suspend fun downloadGoogleVideoChunked(
         downloadId: Long,
         streamUrl: String,
         userAgent: String,
@@ -2459,62 +2646,103 @@ class VideoDownloadManager(
     ): Boolean {
         FileOutputStream(destFile, false).use { outputStream ->
             var offset = 0L
+            var consecutiveStalls = 0
+            var lastChunkErr: Exception? = null
             var lastUpdateTime = System.currentTimeMillis()
             var lastRead = 0L
             val buffer = ByteArray(BUFFER_SIZE)
 
             while (offset < totalSize) {
+                val currentStatus = repository.getDownloadById(downloadId)?.status
+                if (currentStatus == DownloadStatus.PAUSED || currentStatus == DownloadStatus.CANCELLED) {
+                    throw CancellationException()
+                }
+
                 val endByte = minOf(offset + YOUTUBE_RANGE_CHUNK_SIZE - 1L, totalSize - 1L)
                 val expectedChunkLen = endByte - offset + 1L
-                val req = Request.Builder()
-                    .url(streamUrl)
+                val useQueryRangeFallback = consecutiveStalls >= 2
+                val requestUrl = if (useQueryRangeFallback) {
+                    val cleaned = streamUrl.replace(Regex("([?&])range=[^&]+&?"), "$1")
+                        .trimEnd('?', '&')
+                    val sep = if (cleaned.contains("?")) "&" else "?"
+                    "${cleaned}${sep}range=$offset-$endByte"
+                } else {
+                    streamUrl
+                }
+
+                val reqBuilder = Request.Builder()
+                    .url(requestUrl)
                     .header("User-Agent", userAgent)
-                    .header("Range", "bytes=$offset-$endByte")
                     .header("Accept", "*/*")
                     .header("Accept-Encoding", "identity")
-                    .build()
+                if (!useQueryRangeFallback) {
+                    reqBuilder.header("Range", "bytes=$offset-$endByte")
+                }
+                applyStreamHeaders(reqBuilder, requestUrl, userAgent)
 
-                okHttpClient.newCall(req).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        throw IOException("HTTP ${response.code}: ${response.message}")
-                    }
-                    if (response.code == 206) {
-                        HttpRangeValidator.validate206Range(
-                            contentRangeHeader = response.header("Content-Range"),
-                            contentLengthHeader = response.header("Content-Length")?.toLongOrNull() ?: -1L,
-                            expectedStart = offset,
-                            expectedEndInclusive = endByte,
-                            expectedTotal = totalSize
-                        )
-                    } else if (response.code == 200 && offset > 0L) {
-                        throw IOException("Chunked stream ignored Range at offset $offset (returned HTTP 200)")
-                    }
-
-                    val input = response.body?.byteStream() ?: throw IOException("Empty chunk stream")
-                    var chunkBytes = 0L
-                    var read: Int
-                    while (input.read(buffer).also { read = it } != -1) {
-                        val currentStatus = repository.getDownloadById(downloadId)?.status
-                        if (currentStatus == DownloadStatus.PAUSED || currentStatus == DownloadStatus.CANCELLED) {
-                            throw CancellationException()
+                var chunkBytes = 0L
+                try {
+                    okHttpClient.newCall(reqBuilder.build()).execute().use { response ->
+                        if (!response.isSuccessful) {
+                            throw IOException("HTTP ${response.code}: ${response.message}")
                         }
-                        outputStream.write(buffer, 0, read)
-                        offset += read
-                        chunkBytes += read
+                        if (response.code == 206) {
+                            val spec = HttpRangeValidator.parseContentRange(response.header("Content-Range"))
+                            if (spec != null && spec.start != null && spec.start != offset) {
+                                throw IOException("Content-Range start (${spec.start}) does not match requested offset ($offset)")
+                            }
+                        } else if (response.code == 200 && offset > 0L && !useQueryRangeFallback) {
+                            throw IOException("Chunked stream ignored Range at offset $offset (returned HTTP 200)")
+                        }
 
-                        val now = System.currentTimeMillis()
-                        if (now - lastUpdateTime >= 350) {
-                            val timeDiff = (now - lastUpdateTime) / 1000.0
-                            val speed = if (timeDiff > 0) ((offset - lastRead) / timeDiff).toLong() else 0L
-                            val progress = ((offset * 100.0) / totalSize).toInt().coerceIn(0, 99)
-                            onProgress(offset, totalSize, progress, speed)
-                            lastUpdateTime = now
-                            lastRead = offset
+                        val input = response.body?.byteStream() ?: throw IOException("Empty chunk stream")
+                        var read: Int
+                        val maxToRead = if (response.code == 200 && !useQueryRangeFallback) {
+                            totalSize - offset
+                        } else {
+                            expectedChunkLen
+                        }
+                        while (chunkBytes < maxToRead &&
+                            input.read(buffer, 0, minOf(buffer.size.toLong(), maxToRead - chunkBytes).toInt()).also { read = it } != -1
+                        ) {
+                            val st = repository.getDownloadById(downloadId)?.status
+                            if (st == DownloadStatus.PAUSED || st == DownloadStatus.CANCELLED) {
+                                throw CancellationException()
+                            }
+                            outputStream.write(buffer, 0, read)
+                            offset += read
+                            chunkBytes += read
+
+                            val now = System.currentTimeMillis()
+                            if (now - lastUpdateTime >= 350) {
+                                val timeDiff = (now - lastUpdateTime) / 1000.0
+                                val speed = if (timeDiff > 0) ((offset - lastRead) / timeDiff).toLong() else 0L
+                                val progress = ((offset * 100.0) / totalSize).toInt().coerceIn(0, 99)
+                                onProgress(offset, totalSize, progress, speed)
+                                lastUpdateTime = now
+                                lastRead = offset
+                            }
                         }
                     }
-                    if (response.code == 206 && chunkBytes != expectedChunkLen) {
-                        throw IOException("Chunk truncated: expected $expectedChunkLen bytes, got $chunkBytes bytes")
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (e: Exception) {
+                    lastChunkErr = e
+                } finally {
+                    outputStream.flush()
+                }
+
+                if (chunkBytes > 0L) {
+                    // Forward progress was made and written to outputStream at the updated offset;
+                    // continue seamlessly from the new offset without resetting to 0%!
+                    consecutiveStalls = 0
+                } else {
+                    consecutiveStalls++
+                    if (consecutiveStalls >= MAX_STREAM_RESUME_RETRIES) {
+                        destFile.delete()
+                        throw lastChunkErr ?: IOException("GoogleVideo chunked stream stalled at byte $offset of $totalSize")
                     }
+                    kotlinx.coroutines.delay(250L * consecutiveStalls)
                 }
             }
             outputStream.flush()

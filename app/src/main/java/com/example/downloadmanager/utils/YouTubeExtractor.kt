@@ -43,6 +43,9 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
         const val ANDROID_TESTSUITE_USER_AGENT =
             "com.google.android.youtube/1.9 (Linux; U; Android 12; US) gzip"
 
+        const val ANDROID_APP_USER_AGENT =
+            "com.google.android.youtube/19.44.38 (Linux; U; Android 14; US) gzip"
+
         const val DEFAULT_MOBILE_USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
@@ -52,6 +55,12 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
         private val YOUTUBE_VIDEO_ID_PATTERN = Pattern.compile(
             "(?:(?:music\\.|www\\.|m\\.)?youtube\\.com/(?:[^/]+/.+/(?:shorts/)?|embed/|v/|shorts/|live/|watch\\?v=|watch\\?.+&v=)|youtu\\.be/)([a-zA-Z0-9_-]{11})"
         )
+
+        fun invalidateCache(urlOrVideoId: String) {
+            val trimmed = urlOrVideoId.trim()
+            cache.remove(trimmed)
+            extractVideoIdFromUrl(trimmed)?.let { cache.remove(it) }
+        }
 
         fun extractVideoIdFromUrl(url: String): String? {
             val matcher = YOUTUBE_VIDEO_ID_PATTERN.matcher(url.trim())
@@ -74,7 +83,9 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
             return when (clientParam) {
                 "IOS" -> IOS_USER_AGENT
                 "ANDROID_TESTSUITE" -> ANDROID_TESTSUITE_USER_AGENT
+                "ANDROID" -> ANDROID_APP_USER_AGENT
                 "ANDROID_VR" -> VR_USER_AGENT
+                "WEB", "MWEB", "TVHTML5", "TVHTML5_SIMPLY_EMBEDDED_PLAYER" -> DEFAULT_MOBILE_USER_AGENT
                 else -> VR_USER_AGENT
             }
         }
@@ -110,11 +121,14 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
         val formats: List<VideoFormat>
     )
 
-    fun extract(url: String): YouTubeVideoInfo? {
+    fun extract(url: String, forceRefresh: Boolean = false): YouTubeVideoInfo? {
         return try {
             val videoId = extractVideoIdFromUrl(url) ?: return null
+            if (forceRefresh) {
+                cache.remove(videoId)
+            }
             val cached = cache[videoId]
-            if (cached != null && System.currentTimeMillis() - cached.first < CACHE_TTL_MS && cached.second.formats.isNotEmpty()) {
+            if (!forceRefresh && cached != null && System.currentTimeMillis() - cached.first < CACHE_TTL_MS && cached.second.formats.isNotEmpty()) {
                 return cached.second
             }
 
@@ -263,14 +277,19 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                 IOS_USER_AGENT
             ),
             Triple(
-                "ANDROID_VR",
-                "1.56.21",
-                VR_USER_AGENT
-            ),
-            Triple(
                 "ANDROID_TESTSUITE",
                 "1.9",
                 ANDROID_TESTSUITE_USER_AGENT
+            ),
+            Triple(
+                "ANDROID",
+                "19.44.38",
+                ANDROID_APP_USER_AGENT
+            ),
+            Triple(
+                "ANDROID_VR",
+                "1.56.21",
+                VR_USER_AGENT
             )
         )
 
@@ -328,6 +347,24 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                           }
                         }
                     """.trimIndent()
+                    "ANDROID" -> """
+                        {
+                          "videoId": "$videoId",
+                          "contentCheckOk": true,
+                          "racyCheckOk": true,
+                          "context": {
+                            "client": {
+                              "clientName": "ANDROID",
+                              "clientVersion": "$clientVersion",
+                              "androidSdkVersion": 34,
+                              "osName": "Android",
+                              "osVersion": "14",
+                              "hl": "en",
+                              "gl": "US"$visitorField
+                            }
+                          }
+                        }
+                    """.trimIndent()
                     else -> """
                         {
                           "videoId": "$videoId",
@@ -352,6 +389,7 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                     "ANDROID_VR" -> "28"
                     "IOS" -> "5"
                     "ANDROID_TESTSUITE" -> "30"
+                    "ANDROID" -> "3"
                     else -> "28"
                 }
 
@@ -404,6 +442,7 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                         for (i in 0 until muxedArray.length()) {
                             val fmtObj = muxedArray.optJSONObject(i) ?: continue
                             val directUrl = fmtObj.optString("url").takeIf { it.startsWith("http") } ?: continue
+                            if (allFormats.any { it.url == directUrl }) continue
                             val itag = fmtObj.optInt("itag", 18)
                             val mime = fmtObj.optString("mimeType", "video/mp4")
                             val qualityLabel = fmtObj.optString("qualityLabel").ifBlank { "360p" }
@@ -415,9 +454,14 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                                 ?: extractClenFromUrl(directUrl)
                                 ?: 0L
 
+                            val fmtId = if (allFormats.none { it.formatId == "muxed_$itag" }) {
+                                "muxed_$itag"
+                            } else {
+                                "muxed_${itag}_${clientName.lowercase()}"
+                            }
                             allFormats.add(
                                 VideoFormat(
-                                    formatId = "muxed_$itag",
+                                    formatId = fmtId,
                                     url = directUrl,
                                     quality = "$qualityLabel (Video+Audio)",
                                     resolution = "${width}x${height}",
@@ -438,6 +482,7 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                         for (i in 0 until adaptiveArray.length()) {
                             val fmtObj = adaptiveArray.optJSONObject(i) ?: continue
                             val directUrl = fmtObj.optString("url").takeIf { it.startsWith("http") } ?: continue
+                            if (allFormats.any { it.url == directUrl }) continue
                             val itag = fmtObj.optInt("itag", 0)
                             val mime = fmtObj.optString("mimeType", "")
                             val isAudio = mime.startsWith("audio/")
@@ -455,21 +500,25 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                                     mime.contains("ac-3") || mime.contains("ec-3") -> "AC-3"
                                     else -> "Audio"
                                 }
+                                // Skip AC-3 / E-AC-3 surround tracks when standard AAC/Opus is needed
+                                if (audioCodec == "AC-3") continue
                                 val audioKbps = (bitrate / 1000).coerceAtLeast(48)
                                 val sampleRate = fmtObj.optString("audioSampleRate", "44100").toIntOrNull() ?: 44100
-                                allFormats.add(
-                                    VideoFormat(
-                                        formatId = "audio_$itag",
-                                        url = directUrl,
-                                        quality = "${audioKbps}kbps ${if (isM4a) "M4A/AAC" else "WebM/$audioCodec"}",
-                                        codec = audioCodec,
-                                        container = if (isM4a) "m4a" else "webm",
-                                        fileSize = clen,
-                                        isAudioOnly = true,
-                                        audioBitrate = audioKbps,
-                                        sampleRate = sampleRate
+                                if (allFormats.none { it.formatId == "audio_$itag" }) {
+                                    allFormats.add(
+                                        VideoFormat(
+                                            formatId = "audio_$itag",
+                                            url = directUrl,
+                                            quality = "${audioKbps}kbps ${if (isM4a) "M4A/AAC" else "WebM/$audioCodec"}",
+                                            codec = audioCodec,
+                                            container = if (isM4a) "m4a" else "webm",
+                                            fileSize = clen,
+                                            isAudioOnly = true,
+                                            audioBitrate = audioKbps,
+                                            sampleRate = sampleRate
+                                        )
                                     )
-                                )
+                                }
                             } else if (mime.startsWith("video/")) {
                                 val isMp4 = mime.contains("mp4")
                                 val isWebm = mime.contains("webm")
@@ -482,24 +531,29 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                                         mime.contains("av01") -> "AV1"
                                         else -> if (isMp4) "H.264" else "VP9"
                                     }
+                                    // Skip AV1 and HEVC adaptive video-only streams because MediaMuxer
+                                    // cannot reliably mux fragmented DASH AV1/HEVC across Android versions.
+                                    if (videoCodec == "AV1" || videoCodec == "HEVC") continue
                                     val qualityLabel = fmtObj.optString("qualityLabel").ifBlank { "720p" }
                                     val width = fmtObj.optInt("width", 1280)
                                     val height = fmtObj.optInt("height", 720)
                                     val fps = fmtObj.optInt("fps", 30)
-                                    allFormats.add(
-                                        VideoFormat(
-                                            formatId = "adaptive_$itag",
-                                            url = directUrl,
-                                            quality = qualityLabel,
-                                            resolution = "${width}x${height}",
-                                            fps = fps,
-                                            bitrate = bitrate,
-                                            codec = videoCodec,
-                                            container = if (isMp4) "mp4" else "webm",
-                                            fileSize = clen,
-                                            isAudioOnly = false
+                                    if (allFormats.none { it.formatId == "adaptive_$itag" }) {
+                                        allFormats.add(
+                                            VideoFormat(
+                                                formatId = "adaptive_$itag",
+                                                url = directUrl,
+                                                quality = qualityLabel,
+                                                resolution = "${width}x${height}",
+                                                fps = fps,
+                                                bitrate = bitrate,
+                                                codec = videoCodec,
+                                                container = if (isMp4) "mp4" else "webm",
+                                                fileSize = clen,
+                                                isAudioOnly = false
+                                            )
                                         )
-                                    )
+                                    }
                                 }
                             }
                         }
@@ -525,7 +579,12 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                     }
                 }
 
-                if (allFormats.isNotEmpty()) {
+                val hasMuxedVideo = allFormats.any { it.formatId.startsWith("muxed_") }
+                val hasAudioOnly = allFormats.any { it.isAudioOnly }
+                if (hasMuxedVideo && hasAudioOnly) {
+                    break
+                }
+                if (allFormats.isNotEmpty() && index >= 1) {
                     break
                 }
             } catch (e: Exception) {
