@@ -1,11 +1,14 @@
 package com.example.downloadmanager.activity
 
 import android.annotation.SuppressLint
+import android.content.ComponentCallbacks2
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.View
@@ -14,19 +17,20 @@ import android.view.inputmethod.EditorInfo
 import android.webkit.CookieManager
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
-import android.webkit.ServiceWorkerController
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import java.io.ByteArrayInputStream
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -38,6 +42,7 @@ import com.example.downloadmanager.manager.VideoDownloadManager
 import com.example.downloadmanager.model.DownloadDatabase
 import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadType
+import com.example.downloadmanager.utils.EdgeToEdgeHelper
 import com.example.downloadmanager.utils.FilenameResolver
 import com.example.downloadmanager.utils.UrlClassifier
 import com.google.android.material.bottomsheet.BottomSheetDialog
@@ -73,6 +78,11 @@ class BrowserActivity : AppCompatActivity() {
     private var lastScannedUrl: String = ""
     private var activeScanJob: Job? = null
     private var activeWebView: WebView? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var isWebViewPendingRecovery: Boolean = false
+    private var pendingRecoveryUrl: String? = null
+    private var pendingRecoveryWasCrash: Boolean = false
+    private var rendererCrashCount: Int = 0
 
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -106,6 +116,28 @@ class BrowserActivity : AppCompatActivity() {
             "js", "mjs", "cjs", "css", "png", "jpg", "jpeg", "gif", "webp", "svg", "ico",
             "woff", "woff2", "ttf", "otf", "eot", "json", "xml", "map", "wasm"
         )
+        internal const val MAX_RENDERER_CRASH_RECOVERIES = 3
+
+        internal enum class RendererRecoveryAction {
+            DEFER_UNTIL_RESUME,
+            SHOW_RECOVERY_OVERLAY,
+            CIRCUIT_BREAKER_LIMIT
+        }
+
+        internal fun resolveRendererRecoveryAction(
+            isForegroundResumed: Boolean,
+            crashCount: Int,
+            maxCrashRecoveries: Int = MAX_RENDERER_CRASH_RECOVERIES
+        ): RendererRecoveryAction {
+            if (!isForegroundResumed) {
+                return RendererRecoveryAction.DEFER_UNTIL_RESUME
+            }
+            return if (crashCount >= maxCrashRecoveries) {
+                RendererRecoveryAction.CIRCUIT_BREAKER_LIMIT
+            } else {
+                RendererRecoveryAction.SHOW_RECOVERY_OVERLAY
+            }
+        }
 
         /**
          * Classifies a candidate resource or page URL into a downloadable item if it matches an audio site,
@@ -355,9 +387,15 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        EdgeToEdgeHelper.enableWithDarkHeader(this, darkNavigationBar = true)
         super.onCreate(savedInstanceState)
         binding = ActivityBrowserBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        EdgeToEdgeHelper.applyTopHeaderInsets(binding.browserHeaderContainer)
+        EdgeToEdgeHelper.applyHorizontalCutoutInsets(binding.browserContentContainer)
+        EdgeToEdgeHelper.applyBottomBarInsets(binding.browserBottomBar)
+        EdgeToEdgeHelper.applyBottomFabMarginInsets(binding.fabDetectedLinks)
 
         val database = DownloadDatabase.getDatabase(application)
         repository = DownloadRepository(database.downloadDao())
@@ -366,10 +404,9 @@ class BrowserActivity : AppCompatActivity() {
 
         val versionBadge = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
         binding.tvBrowserHeaderVersion.text = "Smart Browser • $versionBadge"
+        binding.tvOverlayBadge.text = versionBadge
         binding.tvSnifferStatus.text = "$versionBadge • Enter a website URL above"
 
-        activeWebView = binding.webView
-        setupWebView(binding.webView)
         setupListeners()
         setupBackNavigation()
 
@@ -381,97 +418,120 @@ class BrowserActivity : AppCompatActivity() {
         }
     }
 
+    private fun ensureWebView(): WebView? {
+        if (isFinishing || isDestroyed) return null
+        activeWebView?.let { existing ->
+            binding.browserEmptyOverlay.visibility = View.GONE
+            existing.visibility = View.VISIBLE
+            return existing
+        }
+        val created = WebView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        binding.webViewContainer.addView(created, 0)
+        binding.browserEmptyOverlay.visibility = View.GONE
+        activeWebView = created
+        setupWebView(created)
+        updateNavButtonStates()
+        return created
+    }
+
+    private fun destroyActiveWebView(target: WebView? = activeWebView) {
+        val wv = target ?: return
+        if (wv === activeWebView) {
+            activeWebView = null
+        }
+        runCatching {
+            wv.stopLoading()
+            wv.onPause()
+            wv.setDownloadListener(null)
+            wv.webChromeClient = null
+            wv.webViewClient = WebViewClient()
+            (wv.parent as? ViewGroup)?.removeView(wv)
+            wv.removeAllViews()
+            wv.clearHistory()
+            wv.destroy()
+        }
+    }
+
     private fun showBlankBrowserReadyState() {
+        destroyActiveWebView()
         currentUrl = ""
         currentPageTitle = ""
         lastScannedUrl = ""
         detectedLinks.clear()
         binding.etBrowserUrl.setText("")
         binding.pageSummaryCard.visibility = View.GONE
+        binding.progressBarWeb.visibility = View.GONE
         binding.fabDetectedLinks.text = "Detected (0)"
         val versionBadge = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
         binding.tvBrowserHeaderVersion.text = "Smart Browser • $versionBadge"
         binding.tvSnifferStatus.text = "$versionBadge • Enter a website URL above"
-        val readyHtml = """
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <style>
-                    body {
-                        margin: 0;
-                        padding: 32px 20px;
-                        background: #0F172A;
-                        color: #F8FAFC;
-                        font-family: sans-serif;
-                        display: flex;
-                        flex-direction: column;
-                        align-items: center;
-                        justify-content: center;
-                        min-height: 75vh;
-                        text-align: center;
-                    }
-                    .badge {
-                        display: inline-block;
-                        padding: 6px 14px;
-                        border-radius: 999px;
-                        background: #1E293B;
-                        color: #38BDF8;
-                        font-size: 13px;
-                        font-weight: bold;
-                        margin-bottom: 14px;
-                        border: 1px solid #334155;
-                    }
-                    h2 {
-                        margin: 0 0 10px 0;
-                        font-size: 20px;
-                        color: #FFFFFF;
-                    }
-                    p {
-                        margin: 0;
-                        max-width: 360px;
-                        font-size: 14px;
-                        line-height: 1.5;
-                        color: #94A3B8;
-                    }
-                </style>
-            </head>
-            <body>
-                <div class="badge">$versionBadge</div>
-                <h2>Real Web Browser &amp; Media Detector</h2>
-                <p>Type or paste any website URL in the address bar above to visit the site and detect downloadable audio, video, torrents, or files.</p>
-            </body>
-            </html>
-        """.trimIndent()
-        runCatching {
-            (activeWebView ?: binding.webView).loadDataWithBaseURL(
-                null,
-                readyHtml,
-                "text/html",
-                "UTF-8",
-                null
-            )
-        }
+        binding.tvOverlayBadge.text = versionBadge
+        binding.tvOverlayTitle.text = "Real Web Browser & Media Detector"
+        binding.tvOverlaySubtitle.text =
+            "Type or paste any website URL in the address bar above to visit the site and detect downloadable audio, video, torrents, or files."
+        binding.btnOverlayRetry.visibility = View.GONE
+        binding.browserEmptyOverlay.visibility = View.VISIBLE
+        updateNavButtonStates()
     }
 
-    private fun injectDrmDisableScript(view: WebView?) {
+    private fun showRendererRecoveryOverlay(
+        failedUrl: String?,
+        wasCrash: Boolean,
+        limitReached: Boolean
+    ) {
+        val versionBadge = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
+        binding.progressBarWeb.visibility = View.GONE
+        binding.tvOverlayBadge.text = versionBadge
+        binding.tvOverlayTitle.text = if (limitReached) {
+            "Page Paused for Stability"
+        } else if (wasCrash) {
+            "Browser Tab Recovered"
+        } else {
+            "Tab Suspended to Save Memory"
+        }
+        binding.tvOverlaySubtitle.text = when {
+            limitReached ->
+                "This page repeatedly closed the web renderer. Try a lighter URL or use Direct Download on the main screen."
+            !failedUrl.isNullOrBlank() ->
+                "The web page renderer closed cleanly without interrupting the app. Tap Retry to reload ${failedUrl.take(80)}"
+            else ->
+                "The browser tab recovered cleanly. Enter a URL above to continue browsing."
+        }
+        if (!failedUrl.isNullOrBlank()) {
+            binding.btnOverlayRetry.visibility = View.VISIBLE
+            binding.btnOverlayRetry.setOnClickListener {
+                rendererCrashCount = 0
+                navigateTo(failedUrl)
+            }
+        } else {
+            binding.btnOverlayRetry.visibility = View.GONE
+        }
+        binding.browserEmptyOverlay.visibility = View.VISIBLE
+        binding.tvSnifferStatus.text = "$versionBadge • Browser recovered"
+        updateNavButtonStates()
+    }
+
+    private fun injectSafeMediaShims(view: WebView?) {
+        if (isFinishing || isDestroyed) return
         val wv = view ?: return
+        if (wv !== activeWebView) return
         val script = """
             (function() {
+                if (window.__lucaMediaShimmed) return;
+                window.__lucaMediaShimmed = true;
                 try {
                     if (navigator && navigator.requestMediaKeySystemAccess) {
                         navigator.requestMediaKeySystemAccess = function() {
                             return Promise.reject(new DOMException('NotSupportedError', 'NotSupportedError'));
                         };
                     }
-                    if (window.MediaKeys) {
-                        window.MediaKeys = undefined;
-                    }
-                    if (navigator && navigator.serviceWorker) {
-                        navigator.serviceWorker.register = function() {
-                            return Promise.reject(new DOMException('SecurityError', 'ServiceWorker disabled'));
-                        };
-                    }
+                } catch (e) {}
+                try {
                     if (window.HTMLCanvasElement && HTMLCanvasElement.prototype.getContext) {
                         var origGetContext = HTMLCanvasElement.prototype.getContext;
                         HTMLCanvasElement.prototype.getContext = function(type, attrs) {
@@ -488,24 +548,11 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun setupWebView(webView: WebView = activeWebView ?: binding.webView) {
-        activeWebView = webView
-        // Use software layer rendering to prevent emulator GPU / WebGL renderer crashes (aw_browser_terminator code -1)
-        runCatching {
-            webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
-        }
-        runCatching {
-            val swSettings = ServiceWorkerController.getInstance().serviceWorkerWebSettings
-            swSettings.allowContentAccess = false
-            swSettings.allowFileAccess = false
-            swSettings.blockNetworkLoads = true
-        }
-
+    private fun setupWebView(webView: WebView) {
         val webSettings = webView.settings
         webSettings.javaScriptEnabled = true
         webSettings.domStorageEnabled = true
-        webSettings.databaseEnabled = false
-        webSettings.cacheMode = WebSettings.LOAD_NO_CACHE
+        webSettings.cacheMode = WebSettings.LOAD_DEFAULT
         webSettings.loadsImagesAutomatically = true
         webSettings.useWideViewPort = true
         webSettings.loadWithOverviewMode = true
@@ -523,8 +570,8 @@ class BrowserActivity : AppCompatActivity() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             runCatching {
-                // Keep renderer priority important and do NOT waive priority when covered by AddDownloadActivity
-                webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+                // Bind renderer priority to app when visible and allow waiving when backgrounded
+                webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_BOUND, true)
             }
         }
 
@@ -536,7 +583,7 @@ class BrowserActivity : AppCompatActivity() {
 
         // Handle standard browser file downloads triggered by clicking download links on any website
         webView.setDownloadListener { url, _, contentDisposition, mimeType, _ ->
-            if (url.isNullOrBlank()) return@setDownloadListener
+            if (isFinishing || isDestroyed || url.isNullOrBlank()) return@setDownloadListener
             val cleanMime = (mimeType ?: "").lowercase(Locale.US)
             val dispositionName = FilenameResolver.parseContentDisposition(contentDisposition)
             val resolvedName = FilenameResolver.resolveEffectiveFilename(
@@ -565,6 +612,7 @@ class BrowserActivity : AppCompatActivity() {
 
         webView.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                if (isFinishing || isDestroyed || view !== activeWebView) return
                 if (newProgress in 1..99) {
                     binding.progressBarWeb.visibility = View.VISIBLE
                     binding.progressBarWeb.progress = newProgress
@@ -574,6 +622,7 @@ class BrowserActivity : AppCompatActivity() {
             }
 
             override fun onReceivedTitle(view: WebView?, title: String?) {
+                if (isFinishing || isDestroyed || view !== activeWebView) return
                 val cleanTitle = title?.trim().orEmpty()
                 if (cleanTitle.isNotEmpty() && !cleanTitle.startsWith("http")) {
                     currentPageTitle = cleanTitle
@@ -602,7 +651,7 @@ class BrowserActivity : AppCompatActivity() {
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
-                injectDrmDisableScript(view)
+                if (isFinishing || isDestroyed || view !== activeWebView) return
                 val validUrl = url ?: return
                 if (validUrl.startsWith("about:") || validUrl.startsWith("data:")) {
                     updateNavButtonStates()
@@ -619,12 +668,13 @@ class BrowserActivity : AppCompatActivity() {
 
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 super.doUpdateVisitedHistory(view, url, isReload)
-                injectDrmDisableScript(view)
+                if (isFinishing || isDestroyed || view !== activeWebView) return
                 val validUrl = url ?: return
                 if (validUrl.startsWith("about:") || validUrl.startsWith("data:")) {
                     updateNavButtonStates()
                     return
                 }
+                injectSafeMediaShims(view)
                 val urlChanged = validUrl != currentUrl
                 currentUrl = validUrl
                 binding.etBrowserUrl.setText(validUrl)
@@ -640,12 +690,13 @@ class BrowserActivity : AppCompatActivity() {
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                injectDrmDisableScript(view)
+                if (isFinishing || isDestroyed || view !== activeWebView) return
                 val validUrl = url ?: currentUrl
                 if (validUrl.isBlank() || validUrl.startsWith("about:") || validUrl.startsWith("data:")) {
                     updateNavButtonStates()
                     return
                 }
+                injectSafeMediaShims(view)
                 currentUrl = validUrl
                 currentPageTitle = view?.title?.trim().orEmpty()
                 binding.etBrowserUrl.setText(validUrl)
@@ -658,6 +709,9 @@ class BrowserActivity : AppCompatActivity() {
                 view: WebView?,
                 request: WebResourceRequest?
             ): WebResourceResponse? {
+                if (isFinishing || isDestroyed) {
+                    return super.shouldInterceptRequest(view, request)
+                }
                 val reqUri = request?.url
                 val reqUrl = reqUri?.toString()
                 if (!reqUrl.isNullOrBlank()) {
@@ -699,8 +753,10 @@ class BrowserActivity : AppCompatActivity() {
                                 detectedLinks.any { it.url == item.url && it.downloadType == item.downloadType }
                             }
                             if (!alreadyPresent) {
-                                runOnUiThread {
-                                    addDetectedItemIfNew(item)
+                                mainHandler.post {
+                                    if (!isFinishing && !isDestroyed) {
+                                        addDetectedItemIfNew(item)
+                                    }
                                 }
                             }
                         }
@@ -713,26 +769,49 @@ class BrowserActivity : AppCompatActivity() {
                 view: WebView?,
                 detail: RenderProcessGoneDetail?
             ): Boolean {
-                // Returning true prevents Chromium aw_browser_terminator.cc from crashing the host app
-                runCatching {
-                    val deadView = view ?: activeWebView
-                    val parentGroup = deadView?.parent as? ViewGroup
-                    val layoutParams = deadView?.layoutParams
-                    if (deadView != null && parentGroup != null) {
-                        parentGroup.removeView(deadView)
-                        runCatching { deadView.destroy() }
-                        val replacement = WebView(this@BrowserActivity)
-                        if (layoutParams != null) {
-                            replacement.layoutParams = layoutParams
-                        }
-                        parentGroup.addView(replacement, 0)
-                        activeWebView = replacement
-                        setupWebView(replacement)
-                        showBlankBrowserReadyState()
+                if (view != null && activeWebView != null && view !== activeWebView) {
+                    return true
+                }
+                val wasCrash = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    detail?.didCrash() == true
+                } else {
+                    true
+                }
+                val failedUrl = currentUrl.takeIf {
+                    it.startsWith("http://", ignoreCase = true) ||
+                        it.startsWith("https://", ignoreCase = true)
+                }
+
+                // Immediately detach & destroy the dead WebView; never reuse or reload synchronously here
+                destroyActiveWebView(view ?: activeWebView)
+                binding.progressBarWeb.visibility = View.GONE
+                updateNavButtonStates()
+
+                val recoveryAction = resolveRendererRecoveryAction(
+                    isForegroundResumed = lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED),
+                    crashCount = rendererCrashCount,
+                    maxCrashRecoveries = MAX_RENDERER_CRASH_RECOVERIES
+                )
+                when (recoveryAction) {
+                    RendererRecoveryAction.DEFER_UNTIL_RESUME -> {
+                        isWebViewPendingRecovery = true
+                        pendingRecoveryUrl = failedUrl
+                        pendingRecoveryWasCrash = wasCrash
                     }
-                    binding.progressBarWeb.visibility = View.GONE
-                    binding.tvSnifferStatus.text =
-                        "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE}) • Browser recovered"
+                    RendererRecoveryAction.SHOW_RECOVERY_OVERLAY,
+                    RendererRecoveryAction.CIRCUIT_BREAKER_LIMIT -> {
+                        rendererCrashCount++
+                        val limitReached = recoveryAction == RendererRecoveryAction.CIRCUIT_BREAKER_LIMIT
+                        mainHandler.post {
+                            if (!isFinishing && !isDestroyed) {
+                                showRendererRecoveryOverlay(
+                                    failedUrl = failedUrl,
+                                    wasCrash = wasCrash,
+                                    limitReached = limitReached
+                                )
+                            }
+                        }
+                    }
                 }
                 return true
             }
@@ -782,8 +861,8 @@ class BrowserActivity : AppCompatActivity() {
     private fun setupBackNavigation() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                val wv = activeWebView ?: binding.webView
-                if (wv.canGoBack()) {
+                val wv = activeWebView
+                if (wv != null && wv.canGoBack()) {
                     wv.goBack()
                 } else {
                     finish()
@@ -820,11 +899,11 @@ class BrowserActivity : AppCompatActivity() {
         }
 
         binding.btnBrowserReload.setOnClickListener {
-            val wv = activeWebView ?: binding.webView
-            if (wv.url.isNullOrBlank() && currentUrl.isNotBlank()) {
-                wv.loadUrl(currentUrl)
-            } else {
-                wv.reload()
+            val wv = activeWebView
+            when {
+                wv != null && !wv.url.isNullOrBlank() -> wv.reload()
+                currentUrl.isNotBlank() -> navigateTo(currentUrl)
+                else -> showBlankBrowserReadyState()
             }
             scanCurrentPageAsync(currentUrl, force = true)
         }
@@ -841,8 +920,8 @@ class BrowserActivity : AppCompatActivity() {
         }
 
         binding.btnNavBack.setOnClickListener {
-            val wv = activeWebView ?: binding.webView
-            if (wv.canGoBack()) {
+            val wv = activeWebView
+            if (wv != null && wv.canGoBack()) {
                 wv.goBack()
             } else {
                 finish()
@@ -850,8 +929,8 @@ class BrowserActivity : AppCompatActivity() {
         }
 
         binding.btnNavForward.setOnClickListener {
-            val wv = activeWebView ?: binding.webView
-            if (wv.canGoForward()) {
+            val wv = activeWebView
+            if (wv != null && wv.canGoForward()) {
                 wv.goForward()
             }
         }
@@ -862,9 +941,9 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     private fun updateNavButtonStates() {
-        val wv = activeWebView ?: binding.webView
-        binding.btnNavBack.alpha = if (wv.canGoBack()) 1.0f else 0.45f
-        binding.btnNavForward.alpha = if (wv.canGoForward()) 1.0f else 0.45f
+        val wv = activeWebView
+        binding.btnNavBack.alpha = if (wv?.canGoBack() == true) 1.0f else 0.45f
+        binding.btnNavForward.alpha = if (wv?.canGoForward() == true) 1.0f else 0.45f
     }
 
     private fun navigateTo(rawInput: String) {
@@ -896,12 +975,14 @@ class BrowserActivity : AppCompatActivity() {
             }
         }
 
+        isWebViewPendingRecovery = false
+        pendingRecoveryUrl = null
         currentUrl = targetUrl
         lastScannedUrl = ""
         binding.etBrowserUrl.setText(targetUrl)
         detectedLinks.clear()
         refreshOfferForCurrentPage(targetUrl, "")
-        (activeWebView ?: binding.webView).loadUrl(targetUrl)
+        ensureWebView()?.loadUrl(targetUrl)
     }
 
     /**
@@ -922,6 +1003,8 @@ class BrowserActivity : AppCompatActivity() {
      * `magnet:?`, `.torrent`, and direct file links generated dynamically by client-side scripts.
      */
     private fun extractDomMediaAndLinksFromWebView() {
+        val wv = activeWebView ?: return
+        if (isFinishing || isDestroyed) return
         val js = """
             (function() {
                 var results = [];
@@ -941,30 +1024,31 @@ class BrowserActivity : AppCompatActivity() {
             })();
         """.trimIndent()
 
-        val wv = activeWebView ?: binding.webView
-        wv.evaluateJavascript(js) { rawJson ->
-            if (rawJson.isNullOrBlank() || rawJson == "null") return@evaluateJavascript
-            runCatching {
-                val decodedJson = if (rawJson.startsWith("\"") && rawJson.endsWith("\"")) {
-                    org.json.JSONTokener(rawJson).nextValue().toString()
-                } else {
-                    rawJson
-                }
-                val arr = JSONArray(decodedJson)
-                var addedAny = false
-                for (i in 0 until arr.length()) {
-                    val obj = arr.optJSONObject(i) ?: continue
-                    val u = obj.optString("url").trim()
-                    val label = obj.optString("label").trim().ifBlank { currentPageTitle }
-                    val classified = classifyDiscoveredResourceUrl(u, label)
-                    if (classified != null) {
-                        if (insertDetectedItemInternal(classified, insertAtFront = false)) {
-                            addedAny = true
+        runCatching {
+            wv.evaluateJavascript(js) { rawJson ->
+                if (isFinishing || isDestroyed || rawJson.isNullOrBlank() || rawJson == "null") return@evaluateJavascript
+                runCatching {
+                    val decodedJson = if (rawJson.startsWith("\"") && rawJson.endsWith("\"")) {
+                        org.json.JSONTokener(rawJson).nextValue().toString()
+                    } else {
+                        rawJson
+                    }
+                    val arr = JSONArray(decodedJson)
+                    var addedAny = false
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(i) ?: continue
+                        val u = obj.optString("url").trim()
+                        val label = obj.optString("label").trim().ifBlank { currentPageTitle }
+                        val classified = classifyDiscoveredResourceUrl(u, label)
+                        if (classified != null) {
+                            if (insertDetectedItemInternal(classified, insertAtFront = false)) {
+                                addedAny = true
+                            }
                         }
                     }
-                }
-                if (addedAny) {
-                    syncDetectedUiState()
+                    if (addedAny) {
+                        syncDetectedUiState()
+                    }
                 }
             }
         }
@@ -1453,13 +1537,11 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     private fun openInAddDownload(item: DetectedLinkItem) {
-        // Pause active WebView loading and timers before transitioning to AddDownloadActivity
-        // so heavy page scripts do not crash the backgrounded Chromium renderer process
+        // Pause active WebView loading before transitioning to AddDownloadActivity
+        // without calling global pauseTimers() which affects all WebViews process-wide
         runCatching {
-            val wv = activeWebView ?: binding.webView
-            wv.stopLoading()
-            wv.onPause()
-            wv.pauseTimers()
+            activeWebView?.stopLoading()
+            activeWebView?.onPause()
         }
         val intent = Intent(this, AddDownloadActivity::class.java).apply {
             putExtra("download_type", item.downloadType.name)
@@ -1471,53 +1553,53 @@ class BrowserActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (isWebViewPendingRecovery) {
+            isWebViewPendingRecovery = false
+            val failedUrl = pendingRecoveryUrl
+            val wasCrash = pendingRecoveryWasCrash
+            pendingRecoveryUrl = null
+            rendererCrashCount++
+            showRendererRecoveryOverlay(
+                failedUrl = failedUrl,
+                wasCrash = wasCrash,
+                limitReached = rendererCrashCount >= MAX_RENDERER_CRASH_RECOVERIES
+            )
+            return
+        }
         runCatching {
-            val wv = activeWebView ?: binding.webView
-            wv.onResume()
-            wv.resumeTimers()
+            activeWebView?.onResume()
         }
     }
 
     override fun onPause() {
         runCatching {
-            val wv = activeWebView ?: binding.webView
-            wv.stopLoading()
-            wv.onPause()
-            wv.pauseTimers()
+            activeWebView?.onPause()
         }
         super.onPause()
     }
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        runCatching {
-            val wv = activeWebView
-            wv?.clearCache(false)
-            wv?.freeMemory()
+        if (isFinishing || isDestroyed) return
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
+            runCatching {
+                activeWebView?.clearCache(false)
+            }
         }
     }
 
     override fun onLowMemory() {
         super.onLowMemory()
+        if (isFinishing || isDestroyed) return
         runCatching {
-            val wv = activeWebView
-            wv?.clearCache(false)
-            wv?.freeMemory()
+            activeWebView?.clearCache(false)
         }
     }
 
     override fun onDestroy() {
         activeScanJob?.cancel()
-        runCatching {
-            val wv = activeWebView ?: binding.webView
-            wv.stopLoading()
-            wv.onPause()
-            wv.webChromeClient = null
-            (wv.parent as? ViewGroup)?.removeView(wv)
-            wv.removeAllViews()
-            wv.destroy()
-            activeWebView = null
-        }
+        mainHandler.removeCallbacksAndMessages(null)
+        destroyActiveWebView()
         super.onDestroy()
     }
 

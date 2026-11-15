@@ -32,6 +32,7 @@ import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -291,15 +292,21 @@ class VideoDownloadManager(
         return activeJobs[downloadId]?.isActive == true
     }
 
-    suspend fun extractVideoInfo(url: String): VideoStreamInfo? = withContext(Dispatchers.IO) {
+    suspend fun extractVideoInfo(
+        url: String,
+        forceRefresh: Boolean = false,
+        excludedClients: Set<String> = emptySet()
+    ): VideoStreamInfo? = withContext(Dispatchers.IO) {
         val validUrl = normalizeHttpUrl(url) ?: return@withContext null
         if (isTwitchUrl(validUrl)) {
             return@withContext null
         }
-        streamInfoCache[validUrl]?.let { return@withContext it }
+        if (!forceRefresh && excludedClients.isEmpty()) {
+            streamInfoCache[validUrl]?.let { return@withContext it }
+        }
         try {
             val info = when {
-                isYouTubeUrl(validUrl) -> extractYouTubeInfo(validUrl)
+                isYouTubeUrl(validUrl) -> extractYouTubeInfo(validUrl, forceRefresh, excludedClients)
                 isArchiveDetailsUrl(validUrl) -> extractArchiveOrgVideoInfo(validUrl)
                 isTikTokUrl(validUrl) -> extractTikTokVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
                 isTwitterUrl(validUrl) -> extractTwitterVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
@@ -311,7 +318,7 @@ class VideoDownloadManager(
                 isPinterestUrl(validUrl) -> extractPinterestVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
                 else -> extractGenericOrWebVideoInfo(validUrl)
             }
-            if (info != null && info.formats.isNotEmpty()) {
+            if (info != null && info.formats.isNotEmpty() && excludedClients.isEmpty()) {
                 streamInfoCache[validUrl] = info
             }
             info
@@ -321,10 +328,18 @@ class VideoDownloadManager(
         }
     }
 
-    private fun extractYouTubeInfo(url: String): VideoStreamInfo? {
+    private fun extractYouTubeInfo(
+        url: String,
+        forceRefresh: Boolean = false,
+        excludedClients: Set<String> = emptySet()
+    ): VideoStreamInfo? {
         return try {
             val youTubeExtractor = YouTubeExtractor(context)
-            val videoInfo = youTubeExtractor.extract(url) ?: return null
+            val videoInfo = youTubeExtractor.extract(
+                url = url,
+                forceRefresh = forceRefresh,
+                excludedClients = excludedClients
+            ) ?: return null
             if (videoInfo.formats.isEmpty()) return null
 
             VideoStreamInfo(
@@ -1595,27 +1610,42 @@ class VideoDownloadManager(
         }
 
         val videoFormats = formats.filter { !it.isAudioOnly }
-        val muxedFormats = videoFormats.filter { it.formatId.startsWith("muxed_") }
+        val progressiveMuxed = videoFormats.filter {
+            it.formatId.startsWith("muxed_") && !it.formatId.equals("muxed_hls", ignoreCase = true)
+        }
+        val hlsMuxed = videoFormats.filter { it.formatId.equals("muxed_hls", ignoreCase = true) }
+        val muxedFormats = progressiveMuxed + hlsMuxed
         val adaptiveMp4Formats = videoFormats.filter { it.formatId.startsWith("adaptive_") && it.container == "mp4" }
+
+        fun resolutionScore(fmt: VideoFormat): Int {
+            val digits = Regex("""(\d{3,4})p""").find(fmt.quality)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            return digits ?: if (fmt.formatId == "muxed_22") 720 else if (fmt.formatId == "muxed_18") 360 else 0
+        }
+
+        val sortedProgressive = progressiveMuxed.sortedByDescending { resolutionScore(it) }
 
         return when (q) {
             "best", "high" -> {
-                muxedFormats.firstOrNull()
+                sortedProgressive.firstOrNull()
+                    ?: hlsMuxed.firstOrNull()
                     ?: adaptiveMp4Formats.firstOrNull { it.quality.contains("720p") }
                     ?: adaptiveMp4Formats.firstOrNull { it.quality.contains("1080p") }
                     ?: videoFormats.firstOrNull()
             }
             "medium" -> {
-                muxedFormats.getOrNull(1)
-                    ?: muxedFormats.firstOrNull()
+                sortedProgressive.firstOrNull { resolutionScore(it) in 360..480 }
+                    ?: sortedProgressive.getOrNull(1)
+                    ?: sortedProgressive.firstOrNull()
+                    ?: hlsMuxed.firstOrNull()
                     ?: adaptiveMp4Formats.firstOrNull { it.quality.contains("480p") || it.quality.contains("360p") }
                     ?: videoFormats.minByOrNull { abs((it.fileSize ?: 0L) - 15L * 1024 * 1024) }
             }
             "low" -> {
-                muxedFormats.lastOrNull()
+                sortedProgressive.lastOrNull()
+                    ?: muxedFormats.lastOrNull()
                     ?: videoFormats.minByOrNull { it.fileSize ?: Long.MAX_VALUE }
             }
-            else -> muxedFormats.firstOrNull() ?: videoFormats.firstOrNull()
+            else -> sortedProgressive.firstOrNull() ?: hlsMuxed.firstOrNull() ?: videoFormats.firstOrNull()
         }
     }
 
@@ -1724,6 +1754,40 @@ class VideoDownloadManager(
             }
 
             val stagingTarget = File(dir, ".tmp_stage_vid_${downloadItem.id}")
+            val failedClients = LinkedHashSet<String>()
+
+            suspend fun refreshStreamUrlForClient(
+                currentFailingUrl: String,
+                preferredFormatId: String?,
+                fallbackQuality: String,
+                audioOnly: Boolean
+            ): String? {
+                YouTubeExtractor.extractClientNameFromUrl(currentFailingUrl)?.let { failedClients.add(it) }
+                streamInfoCache.remove(lookupUrl)
+                YouTubeExtractor.invalidateCache(lookupUrl)
+                val refreshed = extractVideoInfo(
+                    url = lookupUrl,
+                    forceRefresh = true,
+                    excludedClients = failedClients
+                )
+                if (refreshed != null) {
+                    streamInfo = refreshed
+                }
+                val formats = refreshed?.formats.orEmpty()
+                val baseId = preferredFormatId?.substringBeforeLast('_', preferredFormatId)
+                return formats.firstOrNull {
+                    it.url != currentFailingUrl &&
+                        YouTubeExtractor.extractClientNameFromUrl(it.url) !in failedClients &&
+                        (it.formatId == preferredFormatId || (baseId != null && it.formatId.startsWith(baseId)))
+                }?.url
+                    ?: formats.firstOrNull {
+                        it.url != currentFailingUrl &&
+                            YouTubeExtractor.extractClientNameFromUrl(it.url) !in failedClients &&
+                            it.isAudioOnly == audioOnly
+                    }?.url
+                    ?: formats.let { selectBestFormat(it, fallbackQuality)?.url }
+                        ?.takeIf { it != currentFailingUrl }
+            }
 
             try {
                 if (wantAudio) {
@@ -1739,15 +1803,19 @@ class VideoDownloadManager(
                                 if (!shouldReExtract) break
                                 streamInfoCache.remove(lookupUrl)
                                 YouTubeExtractor.invalidateCache(lookupUrl)
-                                streamInfo = extractVideoInfo(lookupUrl)
+                                streamInfo = extractVideoInfo(
+                                    url = lookupUrl,
+                                    forceRefresh = true,
+                                    excludedClients = failedClients
+                                )
                             }
                             val audioCandidates = buildList {
                                 val bestAudio = streamInfo?.formats?.let { selectBestFormat(it, "audio") }
                                 if (bestAudio != null) add(bestAudio)
-                                streamInfo?.formats?.filter { it.isAudioOnly }?.take(2)?.forEach { fmt ->
+                                streamInfo?.formats?.filter { it.isAudioOnly }?.take(3)?.forEach { fmt ->
                                     if (none { it.url == fmt.url }) add(fmt)
                                 }
-                                streamInfo?.formats?.filter { !it.isAudioOnly && it.formatId.startsWith("muxed_") }?.take(1)?.forEach { fmt ->
+                                streamInfo?.formats?.filter { !it.isAudioOnly && it.formatId.startsWith("muxed_") }?.take(2)?.forEach { fmt ->
                                     if (none { it.url == fmt.url }) add(fmt)
                                 }
                                 val fallbackDirect = currentStreamUrl ?: lookupUrl
@@ -1762,7 +1830,7 @@ class VideoDownloadManager(
                                         )
                                     )
                                 }
-                            }.take(3)
+                            }.take(4)
                             if (audioCandidates.isEmpty()) {
                                 lastAudioErr = IOException("Could not extract playable audio stream from $lookupUrl")
                                 continue
@@ -1770,6 +1838,8 @@ class VideoDownloadManager(
                             for (cand in audioCandidates) {
                                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
                                 if (isWatchPageUrl(cand.url)) continue
+                                if (YouTubeExtractor.extractClientNameFromUrl(cand.url) in failedClients) continue
+                                var activeCandUrl = cand.url
                                 try {
                                     if (tempRawAudio.exists()) tempRawAudio.delete()
                                     val streamOk = streamUrlToFile(
@@ -1777,7 +1847,15 @@ class VideoDownloadManager(
                                         streamUrl = cand.url,
                                         destFile = tempRawAudio,
                                         expectedSize = cand.fileSize ?: 0L,
-                                        onProgress = onProgress
+                                        onProgress = onProgress,
+                                        onRefreshUrl = {
+                                            refreshStreamUrlForClient(
+                                                currentFailingUrl = activeCandUrl,
+                                                preferredFormatId = cand.formatId,
+                                                fallbackQuality = "audio",
+                                                audioOnly = cand.isAudioOnly
+                                            )?.also { activeCandUrl = it }
+                                        }
                                     )
                                     if (streamOk && tempRawAudio.exists() && tempRawAudio.length() > 0L) {
                                         MediaAssetHelper.sanitizeMp3StreamIfNeeded(tempRawAudio)
@@ -1795,6 +1873,9 @@ class VideoDownloadManager(
                                 } catch (e: Exception) {
                                     lastAudioErr = e
                                     downloadedOk = false
+                                    if (e.message?.contains("403") == true || e.message?.contains("401") == true) {
+                                        YouTubeExtractor.extractClientNameFromUrl(activeCandUrl)?.let { failedClients.add(it) }
+                                    }
                                 }
                             }
                             if (downloadedOk && tempRawAudio.exists() && tempRawAudio.length() > 0L) {
@@ -1837,26 +1918,32 @@ class VideoDownloadManager(
                             if (!shouldReExtract) break
                             streamInfoCache.remove(lookupUrl)
                             YouTubeExtractor.invalidateCache(lookupUrl)
-                            streamInfo = extractVideoInfo(lookupUrl)
+                            streamInfo = extractVideoInfo(
+                                url = lookupUrl,
+                                forceRefresh = true,
+                                excludedClients = failedClients
+                            )
                         }
-                        val chosenFormat = streamInfo?.formats?.let { selectBestFormat(it, requestedQuality) }
+                        val currentFormats = streamInfo?.formats.orEmpty()
+                        val chosenFormat = selectBestFormat(currentFormats, requestedQuality)
                         val videoStreamUrl = chosenFormat?.url ?: currentStreamUrl ?: lookupUrl
                         val triedUrls = LinkedHashSet<String>()
 
                         val isAdaptiveVideoOnly = chosenFormat?.formatId?.startsWith("adaptive_") == true
-                        val currentFormats = streamInfo?.formats
-                        val companionAudioFormat = if (isAdaptiveVideoOnly && chosenFormat != null && currentFormats != null) {
+                        val companionAudioFormat = if (chosenFormat != null && isAdaptiveVideoOnly) {
                             selectCompanionAudioFormat(currentFormats, chosenFormat)
                         } else {
                             null
                         }
 
-                        if (isAdaptiveVideoOnly && companionAudioFormat != null) {
+                        if (chosenFormat != null && isAdaptiveVideoOnly && companionAudioFormat != null) {
                             triedUrls.add(videoStreamUrl)
-                            val tempVideoFile = File(dir, ".tmp_vid_${downloadItem.id}.${chosenFormat?.container ?: "mp4"}")
-                            val tempAudioFile = File(dir, ".tmp_aud_${downloadItem.id}.${companionAudioFormat.container}")
+                            val tempVideoFile = File(dir, ".tmp_vid_${downloadItem.id}.${chosenFormat.container ?: "mp4"}")
+                            val tempAudioFile = File(dir, ".tmp_aud_${downloadItem.id}.${companionAudioFormat.container ?: "m4a"}")
+                            var activeVidUrl = videoStreamUrl
+                            var activeAudUrl = companionAudioFormat.url
                             try {
-                                val vSize = chosenFormat?.fileSize ?: 0L
+                                val vSize = chosenFormat.fileSize ?: 0L
                                 val aSize = companionAudioFormat.fileSize ?: 0L
                                 val combinedTotal = (vSize + aSize).coerceAtLeast(1L)
 
@@ -1864,7 +1951,15 @@ class VideoDownloadManager(
                                     downloadId = downloadItem.id,
                                     streamUrl = videoStreamUrl,
                                     destFile = tempVideoFile,
-                                    expectedSize = vSize
+                                    expectedSize = vSize,
+                                    onRefreshUrl = {
+                                        refreshStreamUrlForClient(
+                                            currentFailingUrl = activeVidUrl,
+                                            preferredFormatId = chosenFormat.formatId,
+                                            fallbackQuality = requestedQuality,
+                                            audioOnly = false
+                                        )?.also { activeVidUrl = it }
+                                    }
                                 ) { read, total, _, speed ->
                                     val grandTotal = if (vSize > 0) combinedTotal else (total + aSize).coerceAtLeast(read)
                                     val pct = ((read * 80.0) / grandTotal.coerceAtLeast(1L)).toInt().coerceIn(0, 80)
@@ -1875,7 +1970,15 @@ class VideoDownloadManager(
                                         downloadId = downloadItem.id,
                                         streamUrl = companionAudioFormat.url,
                                         destFile = tempAudioFile,
-                                        expectedSize = aSize
+                                        expectedSize = aSize,
+                                        onRefreshUrl = {
+                                            refreshStreamUrlForClient(
+                                                currentFailingUrl = activeAudUrl,
+                                                preferredFormatId = companionAudioFormat.formatId,
+                                                fallbackQuality = "audio",
+                                                audioOnly = true
+                                            )?.also { activeAudUrl = it }
+                                        }
                                     ) { read, _, _, speed ->
                                         val doneBytes = tempVideoFile.length() + read
                                         val grandTotal = (tempVideoFile.length() + aSize.coerceAtLeast(read)).coerceAtLeast(1L)
@@ -1894,6 +1997,9 @@ class VideoDownloadManager(
                                 throw ce
                             } catch (e: Exception) {
                                 lastError = e
+                                if (e.message?.contains("403") == true || e.message?.contains("401") == true) {
+                                    YouTubeExtractor.extractClientNameFromUrl(activeVidUrl)?.let { failedClients.add(it) }
+                                }
                                 Log.w(TAG, "Adaptive video+audio muxing failed: ${e.message}")
                             } finally {
                                 tempVideoFile.delete()
@@ -1907,17 +2013,26 @@ class VideoDownloadManager(
                                 return
                             }
 
-                            // Prioritize muxed/progressive/HLS formats (which already have BOTH video and audio)
-                            // and limit fallback candidates so failed streams never loop through 10+ adaptive tracks.
+                            // Prioritize progressive/HLS formats from distinct healthy clients before adaptive fallback
                             val candidateFormats = buildList {
                                 val nonAudioFormats = streamInfo?.formats
-                                    ?.filter { !it.isAudioOnly && it.url !in triedUrls }
+                                    ?.filter {
+                                        !it.isAudioOnly &&
+                                            it.url !in triedUrls &&
+                                            YouTubeExtractor.extractClientNameFromUrl(it.url) !in failedClients
+                                    }
                                     .orEmpty()
-                                addAll(nonAudioFormats.filter { !it.formatId.startsWith("adaptive_") }.take(2))
+                                val progressiveNonHls = nonAudioFormats.filter {
+                                    it.formatId.startsWith("muxed_") && !it.formatId.startsWith("muxed_hls", ignoreCase = true)
+                                }
+                                val otherMuxed = nonAudioFormats.filter {
+                                    !it.formatId.startsWith("adaptive_") && !it.formatId.startsWith("muxed_")
+                                } + nonAudioFormats.filter { it.formatId.startsWith("muxed_hls", ignoreCase = true) }
+                                addAll((progressiveNonHls + otherMuxed).take(3))
                                 val adaptiveH264 = nonAudioFormats.firstOrNull {
                                     it.formatId.startsWith("adaptive_") && it.container == "mp4" && it.codec != "AV1" && it.codec != "HEVC"
                                 }
-                                if (adaptiveH264 != null && size < 2) {
+                                if (adaptiveH264 != null && size < 3) {
                                     add(adaptiveH264)
                                 }
                                 if (isEmpty() && !isWatchPageUrl(videoStreamUrl) && videoStreamUrl !in triedUrls) {
@@ -1931,7 +2046,7 @@ class VideoDownloadManager(
                                         )
                                     )
                                 }
-                            }.take(3)
+                            }.take(4)
 
                             if (candidateFormats.isEmpty()) {
                                 lastError = lastError ?: IOException("Could not extract playable video stream from $lookupUrl")
@@ -1944,6 +2059,7 @@ class VideoDownloadManager(
                                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
                                 if (isWatchPageUrl(cand.url)) continue
                                 triedUrls.add(cand.url)
+                                var activeCandUrl = cand.url
                                 try {
                                     if (stagingTarget.exists()) stagingTarget.delete()
                                     val isCandAdaptiveOnly = cand.formatId.startsWith("adaptive_")
@@ -1953,21 +2069,38 @@ class VideoDownloadManager(
                                         null
                                     }
                                     if (isCandAdaptiveOnly && candidateAudio != null) {
-                                        val tmpVid = File(dir, ".tmp_fb_vid_${downloadItem.id}.${cand.container}")
-                                        val tmpAud = File(dir, ".tmp_fb_aud_${downloadItem.id}.${candidateAudio.container}")
+                                        val tmpVid = File(dir, ".tmp_fb_vid_${downloadItem.id}.${cand.container ?: "mp4"}")
+                                        val tmpAud = File(dir, ".tmp_fb_aud_${downloadItem.id}.${candidateAudio.container ?: "m4a"}")
+                                        var activeCandAudUrl = candidateAudio.url
                                         try {
                                             val vOk = streamUrlToFile(
                                                 downloadId = downloadItem.id,
                                                 streamUrl = cand.url,
                                                 destFile = tmpVid,
                                                 expectedSize = cand.fileSize ?: 0L,
+                                                onRefreshUrl = {
+                                                    refreshStreamUrlForClient(
+                                                        currentFailingUrl = activeCandUrl,
+                                                        preferredFormatId = cand.formatId,
+                                                        fallbackQuality = requestedQuality,
+                                                        audioOnly = false
+                                                    )?.also { activeCandUrl = it }
+                                                },
                                                 onProgress = onProgress
                                             )
                                             val aOk = vOk && streamUrlToFile(
                                                 downloadId = downloadItem.id,
                                                 streamUrl = candidateAudio.url,
                                                 destFile = tmpAud,
-                                                expectedSize = candidateAudio.fileSize ?: 0L
+                                                expectedSize = candidateAudio.fileSize ?: 0L,
+                                                onRefreshUrl = {
+                                                    refreshStreamUrlForClient(
+                                                        currentFailingUrl = activeCandAudUrl,
+                                                        preferredFormatId = candidateAudio.formatId,
+                                                        fallbackQuality = "audio",
+                                                        audioOnly = true
+                                                    )?.also { activeCandAudUrl = it }
+                                                }
                                             ) { _, _, _, _ -> }
                                             if (aOk && MediaAssetHelper.muxMp4VideoAndM4aAudio(tmpVid, tmpAud, stagingTarget)) {
                                                 videoSuccess = true
@@ -1985,7 +2118,15 @@ class VideoDownloadManager(
                                         streamUrl = cand.url,
                                         destFile = stagingTarget,
                                         expectedSize = cand.fileSize ?: 0L,
-                                        onProgress = onProgress
+                                        onProgress = onProgress,
+                                        onRefreshUrl = {
+                                            refreshStreamUrlForClient(
+                                                currentFailingUrl = activeCandUrl,
+                                                preferredFormatId = cand.formatId,
+                                                fallbackQuality = requestedQuality,
+                                                audioOnly = false
+                                            )?.also { activeCandUrl = it }
+                                        }
                                     )
                                     if (streamOk && stagingTarget.exists() && stagingTarget.length() > 0L) {
                                         if (MediaAssetHelper.detectActualMimeType(stagingTarget, fallbackIsVideo = true) != null) {
@@ -2002,6 +2143,9 @@ class VideoDownloadManager(
                                 } catch (e: Exception) {
                                     lastError = e
                                     videoSuccess = false
+                                    if (e.message?.contains("403") == true || e.message?.contains("401") == true) {
+                                        YouTubeExtractor.extractClientNameFromUrl(activeCandUrl)?.let { failedClients.add(it) }
+                                    }
                                 }
                             }
                         }
@@ -2135,6 +2279,7 @@ class VideoDownloadManager(
         streamUrl: String,
         destFile: File,
         expectedSize: Long = 0L,
+        onRefreshUrl: (suspend () -> String?)? = null,
         onProgress: (Long, Long, Int, Long) -> Unit
     ): Boolean {
         var effectiveUrl = streamUrl.trim()
@@ -2160,7 +2305,18 @@ class VideoDownloadManager(
         if (effectiveUrl.substringBefore("?").endsWith(".m3u8", ignoreCase = true) ||
             effectiveUrl.contains(".m3u8?", ignoreCase = true)
         ) {
-            return downloadHlsStreamToFile(downloadId, effectiveUrl, ua, destFile, onProgress)
+            return try {
+                downloadHlsStreamToFile(downloadId, effectiveUrl, ua, destFile, onProgress)
+            } catch (e: IOException) {
+                val msg = e.message.orEmpty()
+                if ((msg.contains("403") || msg.contains("401") || msg.contains("410")) && onRefreshUrl != null) {
+                    val freshUrl = runCatching { onRefreshUrl.invoke() }.getOrNull()
+                    if (!freshUrl.isNullOrBlank() && freshUrl != effectiveUrl) {
+                        return streamUrlToFile(downloadId, freshUrl, destFile, expectedSize, onRefreshUrl, onProgress)
+                    }
+                }
+                throw e
+            }
         }
 
         val exactGoogleVideoClen = if (isGoogleVideo) {
@@ -2171,7 +2327,15 @@ class VideoDownloadManager(
             -1L
         }
         if (isGoogleVideo && exactGoogleVideoClen > 0L) {
-            return downloadGoogleVideoChunked(downloadId, effectiveUrl, ua, destFile, exactGoogleVideoClen, onProgress)
+            return downloadGoogleVideoChunked(
+                downloadId = downloadId,
+                streamUrl = effectiveUrl,
+                userAgent = ua,
+                destFile = destFile,
+                totalSize = exactGoogleVideoClen,
+                onRefreshUrl = onRefreshUrl,
+                onProgress = onProgress
+            )
         }
 
         val reqBuilder = Request.Builder()
@@ -2188,6 +2352,12 @@ class VideoDownloadManager(
 
         okHttpClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
+                if ((response.code == 403 || response.code == 401 || response.code == 410) && onRefreshUrl != null) {
+                    val freshUrl = runCatching { onRefreshUrl.invoke() }.getOrNull()
+                    if (!freshUrl.isNullOrBlank() && freshUrl != effectiveUrl) {
+                        return streamUrlToFile(downloadId, freshUrl, destFile, expectedSize, null, onProgress)
+                    }
+                }
                 throw IOException("HTTP ${response.code}: ${response.message}")
             }
             val contentType = (response.header("Content-Type") ?: "").lowercase(Locale.US)
@@ -2311,7 +2481,7 @@ class VideoDownloadManager(
         }
 
         if (unwrappedJsonStreamUrl != null) {
-            return streamUrlToFile(downloadId, unwrappedJsonStreamUrl!!, destFile, expectedSize, onProgress)
+            return streamUrlToFile(downloadId, unwrappedJsonStreamUrl!!, destFile, expectedSize, onRefreshUrl, onProgress)
         }
 
         if (initialDeclaredLength > 0L && initialReadBytes != initialDeclaredLength) {
@@ -2486,15 +2656,64 @@ class VideoDownloadManager(
         onProgress: (Long, Long, Int, Long) -> Unit
     ): Boolean {
         var parsed = HlsPlaylistParser.parse(m3u8Text, playlistUrl)
+        var linkedAudioUrl: String? = null
 
         if (parsed is HlsPlaylistParser.ParsedPlaylist.Master) {
             val bestVariant = HlsPlaylistParser.selectBestVariant(parsed.variants)
+            linkedAudioUrl = bestVariant.audioUrl
             val mediaText = fetchTextStrict(bestVariant.url, userAgent)
             parsed = HlsPlaylistParser.parse(mediaText, bestVariant.url)
         }
 
         val mediaPlaylist = parsed as? HlsPlaylistParser.ParsedPlaylist.Media
             ?: throw IOException("Resolved HLS playlist is not a media playlist")
+
+        // If Master playlist references a separate #EXT-X-MEDIA AUDIO group (e.g. YouTube iOS HLS),
+        // download video and audio playlists separately and mux into a combined MP4 cleanly.
+        if (!linkedAudioUrl.isNullOrBlank()) {
+            val parentDir = destFile.parentFile
+            val tmpVid = File(parentDir, "${destFile.name}.hlsvid.tmp")
+            val tmpAud = File(parentDir, "${destFile.name}.hlsaud.tmp")
+            try {
+                val vidOk = downloadMediaPlaylistToFile(downloadId, mediaPlaylist, userAgent, tmpVid) { r, t, pct, spd ->
+                    onProgress(r, t, (pct * 80) / 100, spd)
+                }
+                if (vidOk) {
+                    val audioText = fetchTextStrict(linkedAudioUrl, userAgent)
+                    val audioParsed = HlsPlaylistParser.parse(audioText, linkedAudioUrl) as? HlsPlaylistParser.ParsedPlaylist.Media
+                    val audOk = audioParsed != null && downloadMediaPlaylistToFile(
+                        downloadId,
+                        audioParsed,
+                        userAgent,
+                        tmpAud
+                    ) { r, t, pct, spd ->
+                        onProgress(tmpVid.length() + r, tmpVid.length() + t, 80 + (pct * 15) / 100, spd)
+                    }
+                    if (audOk && MediaAssetHelper.muxMp4VideoAndM4aAudio(tmpVid, tmpAud, destFile)) {
+                        onProgress(destFile.length(), destFile.length(), 100, 0L)
+                        return destFile.exists() && destFile.length() > 0L
+                    }
+                    // Fallback: keep video track if muxer rejects TS segments
+                    tmpVid.copyTo(destFile, overwrite = true)
+                    onProgress(destFile.length(), destFile.length(), 100, 0L)
+                    return destFile.exists() && destFile.length() > 0L
+                }
+            } finally {
+                tmpVid.delete()
+                tmpAud.delete()
+            }
+        }
+
+        return downloadMediaPlaylistToFile(downloadId, mediaPlaylist, userAgent, destFile, onProgress)
+    }
+
+    private suspend fun downloadMediaPlaylistToFile(
+        downloadId: Long,
+        mediaPlaylist: HlsPlaylistParser.ParsedPlaylist.Media,
+        userAgent: String,
+        destFile: File,
+        onProgress: (Long, Long, Int, Long) -> Unit
+    ): Boolean {
 
         val segments = mediaPlaylist.segments
         if (segments.isEmpty()) {
@@ -2556,72 +2775,82 @@ class VideoDownloadManager(
         return destFile.exists() && destFile.length() > 0L
     }
 
-    private fun fetchHlsPartToStream(
+    private suspend fun fetchHlsPartToStream(
         url: String,
         byteRange: HlsPlaylistParser.ByteRange?,
         userAgent: String,
         out: FileOutputStream,
         buf: ByteArray
     ): Long {
-        val reqBuilder = Request.Builder()
-            .url(url)
-            .header("Accept-Encoding", "identity")
-        applyStreamHeaders(reqBuilder, url, userAgent)
-        if (byteRange != null) {
-            reqBuilder.header("Range", byteRange.toRangeHeader())
-        }
-
-        okHttpClient.newCall(reqBuilder.build()).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                throw IOException("HLS segment failed with HTTP ${resp.code}: $url")
-            }
+        var lastError: Exception? = null
+        for (attempt in 1..3) {
+            val reqBuilder = Request.Builder()
+                .url(url)
+                .header("Accept-Encoding", "identity")
+            applyStreamHeaders(reqBuilder, url, userAgent)
             if (byteRange != null) {
-                if (resp.code != 206) {
-                    throw IOException("HLS #EXT-X-BYTERANGE segment returned HTTP ${resp.code} instead of 206 Partial Content")
-                }
-                HttpRangeValidator.validate206Range(
-                    contentRangeHeader = resp.header("Content-Range"),
-                    contentLengthHeader = resp.header("Content-Length")?.toLongOrNull() ?: -1L,
-                    expectedStart = byteRange.offset,
-                    expectedEndInclusive = byteRange.endInclusive
-                )
+                reqBuilder.header("Range", byteRange.toRangeHeader())
             }
 
-            val expectedPartLen = byteRange?.length
-                ?: resp.header("Content-Length")?.toLongOrNull()
-                ?: -1L
-
-            val bodyStream = resp.body?.byteStream() ?: throw IOException("Empty HLS segment body: $url")
-            var partBytes = 0L
-            var isFirstChunk = true
-            var read: Int
-            while (bodyStream.read(buf).also { read = it } != -1) {
-                partBytes += read
-                if (expectedPartLen > 0L && partBytes > expectedPartLen) {
-                    throw IOException("HLS segment exceeded expected byte length ($expectedPartLen)")
-                }
-                if (isFirstChunk) {
-                    isFirstChunk = false
-                    // Strip segment-level ID3v2 PRIV timestamp headers prepended to HLS MP3 segments (e.g. SoundCloud)
-                    // so concatenated segments form a contiguous MPEG audio stream without mid-file ID3 interruptions.
-                    val skipOffset = MediaAssetHelper.stripLeadingId3Tags(buf, read)
-                    if (skipOffset in 1 until read) {
-                        out.write(buf, skipOffset, read - skipOffset)
-                    } else {
-                        out.write(buf, 0, read)
+            try {
+                val segmentBuffer = ByteArrayOutputStream()
+                okHttpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        throw IOException("HLS segment failed with HTTP ${resp.code}: $url")
                     }
-                } else {
-                    out.write(buf, 0, read)
+                    if (byteRange != null) {
+                        if (resp.code != 206) {
+                            throw IOException("HLS #EXT-X-BYTERANGE segment returned HTTP ${resp.code} instead of 206 Partial Content")
+                        }
+                        HttpRangeValidator.validate206Range(
+                            contentRangeHeader = resp.header("Content-Range"),
+                            contentLengthHeader = resp.header("Content-Length")?.toLongOrNull() ?: -1L,
+                            expectedStart = byteRange.offset,
+                            expectedEndInclusive = byteRange.endInclusive
+                        )
+                    }
+
+                    val expectedPartLen = byteRange?.length
+                        ?: resp.header("Content-Length")?.toLongOrNull()
+                        ?: -1L
+
+                    val bodyStream = resp.body?.byteStream() ?: throw IOException("Empty HLS segment body: $url")
+                    var partBytes = 0L
+                    var read: Int
+                    while (bodyStream.read(buf).also { read = it } != -1) {
+                        partBytes += read
+                        if (expectedPartLen > 0L && partBytes > expectedPartLen) {
+                            throw IOException("HLS segment exceeded expected byte length ($expectedPartLen)")
+                        }
+                        segmentBuffer.write(buf, 0, read)
+                    }
+                    if (expectedPartLen > 0L && partBytes != expectedPartLen) {
+                        throw IOException("HLS segment truncated: expected $expectedPartLen bytes, got $partBytes bytes")
+                    }
+                    if (partBytes == 0L) {
+                        throw IOException("HLS segment returned 0 bytes: $url")
+                    }
+                    val rawBytes = segmentBuffer.toByteArray()
+                    val skipOffset = MediaAssetHelper.stripLeadingId3Tags(rawBytes, rawBytes.size)
+                    if (skipOffset in 1 until rawBytes.size) {
+                        out.write(rawBytes, skipOffset, rawBytes.size - skipOffset)
+                    } else {
+                        out.write(rawBytes, 0, rawBytes.size)
+                    }
+                    return partBytes
                 }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (e: Exception) {
+                lastError = e
+                val msg = e.message.orEmpty()
+                if (attempt >= 3 || msg.contains("HTTP 403") || msg.contains("HTTP 404") || msg.contains("HTTP 410")) {
+                    break
+                }
+                kotlinx.coroutines.delay(250L * attempt)
             }
-            if (expectedPartLen > 0L && partBytes != expectedPartLen) {
-                throw IOException("HLS segment truncated: expected $expectedPartLen bytes, got $partBytes bytes")
-            }
-            if (partBytes == 0L) {
-                throw IOException("HLS segment returned 0 bytes: $url")
-            }
-            return partBytes
         }
+        throw lastError ?: IOException("HLS segment failed: $url")
     }
 
     private fun fetchTextStrict(url: String, userAgent: String): String {
@@ -2642,48 +2871,60 @@ class VideoDownloadManager(
         userAgent: String,
         destFile: File,
         totalSize: Long,
+        onRefreshUrl: (suspend () -> String?)? = null,
         onProgress: (Long, Long, Int, Long) -> Unit
     ): Boolean {
-        FileOutputStream(destFile, false).use { outputStream ->
-            var offset = 0L
-            var consecutiveStalls = 0
-            var lastChunkErr: Exception? = null
-            var lastUpdateTime = System.currentTimeMillis()
-            var lastRead = 0L
-            val buffer = ByteArray(BUFFER_SIZE)
+        var activeUrl = streamUrl
+        var activeUserAgent = userAgent
+        var activeTotalSize = totalSize
+        var refreshAttemptsRemaining = 3
+        var offset = 0L
+        var consecutiveStalls = 0
+        var lastChunkErr: Exception? = null
+        var lastUpdateTime = System.currentTimeMillis()
+        var lastRead = 0L
+        val buffer = ByteArray(BUFFER_SIZE)
 
-            while (offset < totalSize) {
+        var outputStream = FileOutputStream(destFile, false)
+        try {
+            while (offset < activeTotalSize) {
                 val currentStatus = repository.getDownloadById(downloadId)?.status
                 if (currentStatus == DownloadStatus.PAUSED || currentStatus == DownloadStatus.CANCELLED) {
                     throw CancellationException()
                 }
 
-                val endByte = minOf(offset + YOUTUBE_RANGE_CHUNK_SIZE - 1L, totalSize - 1L)
+                val endByte = minOf(offset + YOUTUBE_RANGE_CHUNK_SIZE - 1L, activeTotalSize - 1L)
                 val expectedChunkLen = endByte - offset + 1L
-                val useQueryRangeFallback = consecutiveStalls >= 2
+                val useQueryRangeFallback = consecutiveStalls >= 1
                 val requestUrl = if (useQueryRangeFallback) {
-                    val cleaned = streamUrl.replace(Regex("([?&])range=[^&]+&?"), "$1")
+                    val cleaned = activeUrl.replace(Regex("([?&])range=[^&]+&?"), "$1")
                         .trimEnd('?', '&')
                     val sep = if (cleaned.contains("?")) "&" else "?"
                     "${cleaned}${sep}range=$offset-$endByte"
                 } else {
-                    streamUrl
+                    activeUrl
                 }
 
                 val reqBuilder = Request.Builder()
                     .url(requestUrl)
-                    .header("User-Agent", userAgent)
+                    .header("User-Agent", activeUserAgent)
                     .header("Accept", "*/*")
                     .header("Accept-Encoding", "identity")
                 if (!useQueryRangeFallback) {
                     reqBuilder.header("Range", "bytes=$offset-$endByte")
                 }
-                applyStreamHeaders(reqBuilder, requestUrl, userAgent)
+                applyStreamHeaders(reqBuilder, requestUrl, activeUserAgent)
 
                 var chunkBytes = 0L
+                var refreshNeeded = false
                 try {
                     okHttpClient.newCall(reqBuilder.build()).execute().use { response ->
                         if (!response.isSuccessful) {
+                            if ((response.code == 403 || response.code == 401 || response.code == 410) &&
+                                refreshAttemptsRemaining > 0 && onRefreshUrl != null
+                            ) {
+                                refreshNeeded = true
+                            }
                             throw IOException("HTTP ${response.code}: ${response.message}")
                         }
                         if (response.code == 206) {
@@ -2696,15 +2937,15 @@ class VideoDownloadManager(
                         }
 
                         val input = response.body?.byteStream() ?: throw IOException("Empty chunk stream")
-                        var read: Int
                         val maxToRead = if (response.code == 200 && !useQueryRangeFallback) {
-                            totalSize - offset
+                            activeTotalSize - offset
                         } else {
                             expectedChunkLen
                         }
-                        while (chunkBytes < maxToRead &&
-                            input.read(buffer, 0, minOf(buffer.size.toLong(), maxToRead - chunkBytes).toInt()).also { read = it } != -1
-                        ) {
+                        while (chunkBytes < maxToRead) {
+                            val toRead = minOf(buffer.size.toLong(), maxToRead - chunkBytes).toInt()
+                            val read = input.read(buffer, 0, toRead)
+                            if (read == -1) break
                             val st = repository.getDownloadById(downloadId)?.status
                             if (st == DownloadStatus.PAUSED || st == DownloadStatus.CANCELLED) {
                                 throw CancellationException()
@@ -2717,8 +2958,8 @@ class VideoDownloadManager(
                             if (now - lastUpdateTime >= 350) {
                                 val timeDiff = (now - lastUpdateTime) / 1000.0
                                 val speed = if (timeDiff > 0) ((offset - lastRead) / timeDiff).toLong() else 0L
-                                val progress = ((offset * 100.0) / totalSize).toInt().coerceIn(0, 99)
-                                onProgress(offset, totalSize, progress, speed)
+                                val progress = ((offset * 100.0) / activeTotalSize).toInt().coerceIn(0, 99)
+                                onProgress(offset, activeTotalSize, progress, speed)
                                 lastUpdateTime = now
                                 lastRead = offset
                             }
@@ -2732,24 +2973,44 @@ class VideoDownloadManager(
                     outputStream.flush()
                 }
 
+                if (refreshNeeded && onRefreshUrl != null && refreshAttemptsRemaining > 0) {
+                    refreshAttemptsRemaining--
+                    val freshUrl = runCatching { onRefreshUrl.invoke() }.getOrNull()
+                    if (!freshUrl.isNullOrBlank() && freshUrl != activeUrl) {
+                        val newClen = YouTubeExtractor.extractClenFromUrl(freshUrl)
+                        if (newClen != null && newClen > 0L && newClen != activeTotalSize) {
+                            // Switched to a different format/client stream; restart clean to avoid mixing encodings
+                            outputStream.close()
+                            outputStream = FileOutputStream(destFile, false)
+                            offset = 0L
+                            lastRead = 0L
+                            activeTotalSize = newClen
+                        }
+                        activeUrl = freshUrl
+                        activeUserAgent = YouTubeExtractor.getUserAgentForStreamUrl(freshUrl)
+                        consecutiveStalls = 0
+                        continue
+                    }
+                }
+
                 if (chunkBytes > 0L) {
-                    // Forward progress was made and written to outputStream at the updated offset;
-                    // continue seamlessly from the new offset without resetting to 0%!
                     consecutiveStalls = 0
                 } else {
                     consecutiveStalls++
                     if (consecutiveStalls >= MAX_STREAM_RESUME_RETRIES) {
                         destFile.delete()
-                        throw lastChunkErr ?: IOException("GoogleVideo chunked stream stalled at byte $offset of $totalSize")
+                        throw lastChunkErr ?: IOException("GoogleVideo chunked stream stalled at byte $offset of $activeTotalSize")
                     }
                     kotlinx.coroutines.delay(250L * consecutiveStalls)
                 }
             }
             outputStream.flush()
             runCatching { outputStream.fd.sync() }
-            onProgress(totalSize, totalSize, 100, 0L)
+            onProgress(activeTotalSize, activeTotalSize, 100, 0L)
+        } finally {
+            runCatching { outputStream.close() }
         }
-        return destFile.exists() && destFile.length() == totalSize
+        return destFile.exists() && destFile.length() == activeTotalSize
     }
 
     fun pauseVideoDownload(downloadItem: DownloadItem) {

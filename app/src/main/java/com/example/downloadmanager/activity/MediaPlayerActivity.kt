@@ -42,6 +42,7 @@ import com.example.downloadmanager.model.DownloadDatabase
 import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
+import com.example.downloadmanager.utils.EdgeToEdgeHelper
 import com.example.downloadmanager.utils.MediaAssetHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -116,9 +117,15 @@ class MediaPlayerActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        EdgeToEdgeHelper.enableWithDarkHeader(this)
         super.onCreate(savedInstanceState)
         binding = ActivityMediaPlayerBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        EdgeToEdgeHelper.applyTopHeaderInsets(binding.toolbar)
+        EdgeToEdgeHelper.applyHorizontalCutoutMargins(binding.playerStageCard)
+        EdgeToEdgeHelper.applyHorizontalCutoutMargins(binding.controlsCard)
+        EdgeToEdgeHelper.applyScrollingBottomInsets(binding.rvMediaQueue)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         volumeControlStream = AudioManager.STREAM_MUSIC

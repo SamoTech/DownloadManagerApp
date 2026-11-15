@@ -15,6 +15,7 @@
 
         <!-- Top Browser Header & Address Bar -->
         <LinearLayout
+            android:id="@+id/browserHeaderContainer"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:background="@color/colorHeaderBg"
@@ -22,7 +23,7 @@
             android:orientation="vertical"
             android:paddingHorizontal="10dp"
             android:paddingTop="8dp"
-            android:paddingBottom="8dp">
+            android:paddingBottom="10dp">
 
             <TextView
                 android:id="@+id/tvBrowserHeaderVersion"
@@ -30,7 +31,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="4dp"
                 android:paddingHorizontal="4dp"
-                android:text="Smart Browser • Luca v20.0 (Build 20)"
+                android:text="Smart Browser • Luca v21.0 (Build 21)"
                 android:textColor="#38BDF8"
                 android:textSize="11sp"
                 android:textStyle="bold" />
@@ -43,8 +44,8 @@
 
                 <ImageButton
                     android:id="@+id/btnCloseBrowser"
-                    android:layout_width="40dp"
-                    android:layout_height="40dp"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
                     android:background="?attr/selectableItemBackgroundBorderless"
                     android:contentDescription="@string/exit"
                     android:src="@drawable/ic_back"
@@ -53,7 +54,7 @@
                 <EditText
                     android:id="@+id/etBrowserUrl"
                     android:layout_width="0dp"
-                    android:layout_height="40dp"
+                    android:layout_height="42dp"
                     android:layout_marginHorizontal="6dp"
                     android:layout_weight="1"
                     android:background="@drawable/card_background"
@@ -70,8 +71,8 @@
 
                 <ImageButton
                     android:id="@+id/btnBrowserGo"
-                    android:layout_width="40dp"
-                    android:layout_height="40dp"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
                     android:background="?attr/selectableItemBackgroundBorderless"
                     android:contentDescription="@string/search_hint"
                     android:src="@drawable/ic_search"
@@ -79,8 +80,8 @@
 
                 <ImageButton
                     android:id="@+id/btnBrowserReload"
-                    android:layout_width="40dp"
-                    android:layout_height="40dp"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
                     android:background="?attr/selectableItemBackgroundBorderless"
                     android:contentDescription="@string/retry"
                     android:src="@drawable/ic_retry"
@@ -100,17 +101,75 @@
 
         <!-- Real Web Browser Viewport + Contextual Media & File Offer Banner -->
         <LinearLayout
+            android:id="@+id/browserContentContainer"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
             android:orientation="vertical">
 
-            <!-- Real Android WebView for visiting any website -->
-            <android.webkit.WebView
-                android:id="@+id/webView"
+            <!-- Managed WebView Container + Native Ready/Recovery Overlay (avoids idle Chromium renderer process crashes) -->
+            <FrameLayout
+                android:id="@+id/webViewContainer"
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
-                android:layout_weight="1" />
+                android:layout_weight="1"
+                android:background="#0F172A">
+
+                <LinearLayout
+                    android:id="@+id/browserEmptyOverlay"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:gravity="center"
+                    android:orientation="vertical"
+                    android:padding="24dp">
+
+                    <TextView
+                        android:id="@+id/tvOverlayBadge"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="14dp"
+                        android:background="@drawable/card_background"
+                        android:backgroundTint="#1E293B"
+                        android:paddingHorizontal="14dp"
+                        android:paddingVertical="6dp"
+                        android:text="Luca v21.0 (Build 21)"
+                        android:textColor="#38BDF8"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tvOverlayTitle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="10dp"
+                        android:gravity="center"
+                        android:text="Real Web Browser &amp; Media Detector"
+                        android:textColor="@android:color/white"
+                        android:textSize="19sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tvOverlaySubtitle"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center"
+                        android:maxWidth="360dp"
+                        android:text="Type or paste any website URL in the address bar above to visit the site and detect downloadable audio, video, torrents, or files."
+                        android:textColor="#94A3B8"
+                        android:textSize="14sp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnOverlayRetry"
+                        style="@style/Widget.Material3.Button"
+                        android:layout_width="wrap_content"
+                        android:layout_height="44dp"
+                        android:layout_marginTop="16dp"
+                        android:text="@string/retry"
+                        android:visibility="gone"
+                        app:cornerRadius="10dp"
+                        app:icon="@drawable/ic_retry" />
+                </LinearLayout>
+            </FrameLayout>
 
             <!-- Contextual Detected Download Offer Banner (Audio / Video / Files) -->
             <LinearLayout
@@ -222,6 +281,7 @@
 
         <!-- Bottom Browser Navigation & Link Sniffer Status Bar -->
         <LinearLayout
+            android:id="@+id/browserBottomBar"
             android:layout_width="match_parent"
             android:layout_height="52dp"
             android:background="@color/colorHeaderBg"
@@ -255,7 +315,7 @@
                 android:layout_weight="1"
                 android:ellipsize="end"
                 android:maxLines="1"
-                android:text="Luca v20.0 (Build 20) • Ready"
+                android:text="Luca v21.0 (Build 21) • Ready"
                 android:textColor="#94A3B8"
                 android:textSize="12sp" />
 

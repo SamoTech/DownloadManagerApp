@@ -32,6 +32,7 @@ import com.example.downloadmanager.model.DownloadType
 import com.example.downloadmanager.model.TorrentFileInfo
 import com.example.downloadmanager.model.VideoFormat
 import com.example.downloadmanager.service.DownloadService
+import com.example.downloadmanager.utils.EdgeToEdgeHelper
 import com.example.downloadmanager.utils.FilenameResolver
 import com.example.downloadmanager.utils.UrlClassifier
 import com.google.android.material.checkbox.MaterialCheckBox
@@ -43,6 +44,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 class AddDownloadActivity : AppCompatActivity() {
@@ -64,7 +66,10 @@ class AddDownloadActivity : AppCompatActivity() {
     private var metadataExtractJob: Job? = null
     private var isUpdatingChipsProgrammatically = false
     private var isSettingFilenameProgrammatically = false
+    private var isUpdatingUrlProgrammatically = false
     private var userManuallyEditedFilename = false
+    private var lastProbedKey: String? = null
+    private val isSubmitting = AtomicBoolean(false)
     private val probeRequestToken = AtomicLong(0L)
 
     private val pickTorrentLauncher = registerForActivityResult(
@@ -78,10 +83,17 @@ class AddDownloadActivity : AppCompatActivity() {
                 )
             }
             userManuallyEditedFilename = false
-            switchDownloadType(DownloadType.TORRENT)
+            switchDownloadType(DownloadType.TORRENT, triggerExtraction = false)
             val cachedOrUriString = torrentDownloadManager.cachePickedTorrentUri(uri) ?: uri.toString()
-            binding.etUrl.setText(cachedOrUriString)
+            isUpdatingUrlProgrammatically = true
+            try {
+                binding.etUrl.setText(cachedOrUriString)
+            } finally {
+                isUpdatingUrlProgrammatically = false
+            }
+            metadataExtractJob?.cancel()
             val token = probeRequestToken.incrementAndGet()
+            lastProbedKey = "${DownloadType.TORRENT.name}|false|$cachedOrUriString"
             extractMagnetInfo(cachedOrUriString, token)
         }
     }
@@ -158,9 +170,14 @@ class AddDownloadActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        EdgeToEdgeHelper.enableWithDarkHeader(this)
         super.onCreate(savedInstanceState)
         binding = ActivityAddDownloadBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        EdgeToEdgeHelper.applyTopHeaderInsets(binding.toolbar)
+        EdgeToEdgeHelper.applyScrollingBottomInsets(binding.scrollContainer, includeIme = true)
+        EdgeToEdgeHelper.applyBottomBarInsets(binding.bottomActionContainer, includeIme = false)
 
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
@@ -189,8 +206,7 @@ class AddDownloadActivity : AppCompatActivity() {
         torrentDownloadManager = TorrentDownloadManager(application, repository)
 
         val defaultPath = downloadManager.getDefaultDownloadPath()
-        binding.etSavePath.setText(defaultPath)
-        binding.etTorrentSavePath.setText(defaultPath)
+        applySavePath(defaultPath)
 
         val prefs = PreferenceManager.getDefaultSharedPreferences(this)
         binding.cbAllowAlternateSource.isChecked = prefs.getBoolean("allow_alternate_music_source", false)
@@ -273,7 +289,27 @@ class AddDownloadActivity : AppCompatActivity() {
         }
     }
 
-    private fun switchDownloadType(type: DownloadType, updateChip: Boolean = true) {
+    private fun applySavePath(chosenPath: String) {
+        binding.etSavePath.setText(chosenPath)
+        binding.etTorrentSavePath.setText(chosenPath)
+        val baseDir = downloadManager.getDefaultDownloadPath()
+        val musicDir = File(baseDir, "Music").absolutePath
+        val videosDir = File(baseDir, "Videos").absolutePath
+        val torrentsDir = File(baseDir, "Torrents").absolutePath
+        when (chosenPath) {
+            baseDir -> binding.chipFolderDownloads.isChecked = true
+            videosDir -> binding.chipFolderVideos.isChecked = true
+            musicDir -> binding.chipFolderMusic.isChecked = true
+            torrentsDir -> binding.chipFolderTorrents.isChecked = true
+            else -> binding.chipGroupFolders.clearCheck()
+        }
+    }
+
+    private fun switchDownloadType(
+        type: DownloadType,
+        updateChip: Boolean = true,
+        triggerExtraction: Boolean = true
+    ) {
         downloadType = type
         if (updateChip) {
             isUpdatingChipsProgrammatically = true
@@ -291,9 +327,11 @@ class AddDownloadActivity : AppCompatActivity() {
         binding.torrentOptions.visibility =
             if (type == DownloadType.TORRENT || type == DownloadType.MAGNET) View.VISIBLE else View.GONE
 
-        val currentUrl = binding.etUrl.text?.toString()?.trim().orEmpty()
-        if (currentUrl.isNotEmpty()) {
-            triggerMetadataExtractionDebounced(currentUrl)
+        if (triggerExtraction) {
+            val currentUrl = binding.etUrl.text?.toString()?.trim().orEmpty()
+            if (currentUrl.isNotEmpty()) {
+                triggerMetadataExtractionDebounced(currentUrl)
+            }
         }
     }
 
@@ -303,8 +341,22 @@ class AddDownloadActivity : AppCompatActivity() {
             val clipText = clipboard.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()?.trim()
             if (!clipText.isNullOrEmpty()) {
                 val cleaned = normalizeAndValidateUrl(clipText) ?: clipText
-                binding.etUrl.setText(cleaned)
-                binding.etUrl.setSelection(cleaned.length)
+                val currentText = binding.etUrl.text?.toString()?.trim().orEmpty()
+                if (cleaned.equals(currentText, ignoreCase = true)) {
+                    binding.etUrl.setSelection(currentText.length)
+                    return@setOnClickListener
+                }
+                userManuallyEditedFilename = false
+                isUpdatingUrlProgrammatically = true
+                try {
+                    binding.etUrl.setText(cleaned)
+                    binding.etUrl.setSelection(cleaned.length)
+                } finally {
+                    isUpdatingUrlProgrammatically = false
+                }
+                binding.etUrl.error = null
+                autoDetectTypeFromUrl(cleaned, triggerExtraction = false)
+                triggerMetadataExtractionDebounced(cleaned)
             } else {
                 Toast.makeText(this, R.string.clipboard_empty_or_invalid, Toast.LENGTH_SHORT).show()
             }
@@ -324,14 +376,16 @@ class AddDownloadActivity : AppCompatActivity() {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) {
+                if (isUpdatingUrlProgrammatically) return
                 val raw = s?.toString()?.trim().orEmpty()
                 if (raw.isEmpty()) {
+                    lastProbedKey = null
                     probeRequestToken.incrementAndGet()
                     metadataExtractJob?.cancel()
                     return
                 }
                 binding.etUrl.error = null
-                autoDetectTypeFromUrl(raw)
+                autoDetectTypeFromUrl(raw, triggerExtraction = false)
                 triggerMetadataExtractionDebounced(raw)
             }
         })
@@ -349,6 +403,19 @@ class AddDownloadActivity : AppCompatActivity() {
             showSavePathSelectorDialog(isTorrent = true)
         }
 
+        binding.chipFolderDownloads.setOnClickListener {
+            applySavePath(downloadManager.getDefaultDownloadPath())
+        }
+        binding.chipFolderVideos.setOnClickListener {
+            applySavePath(File(downloadManager.getDefaultDownloadPath(), "Videos").apply { mkdirs() }.absolutePath)
+        }
+        binding.chipFolderMusic.setOnClickListener {
+            applySavePath(File(downloadManager.getDefaultDownloadPath(), "Music").apply { mkdirs() }.absolutePath)
+        }
+        binding.chipFolderTorrents.setOnClickListener {
+            applySavePath(File(downloadManager.getDefaultDownloadPath(), "Torrents").apply { mkdirs() }.absolutePath)
+        }
+
         binding.btnPickTorrentFile.setOnClickListener {
             pickTorrentLauncher.launch(arrayOf("application/x-bittorrent", "application/octet-stream", "*/*"))
         }
@@ -363,17 +430,12 @@ class AddDownloadActivity : AppCompatActivity() {
                     DownloadType.TORRENT
                 }
                 if (downloadType != targetType) {
-                    isUpdatingChipsProgrammatically = true
-                    binding.chipTypeTorrent.isChecked = true
-                    isUpdatingChipsProgrammatically = false
-                    downloadType = targetType
-                    binding.musicOptions.visibility = View.GONE
-                    binding.videoOptions.visibility = View.GONE
-                    binding.torrentOptions.visibility = View.VISIBLE
+                    switchDownloadType(targetType, triggerExtraction = false)
                 }
                 metadataExtractJob?.cancel()
                 torrentDownloadManager.invalidateMetadataCache(raw)
                 torrentDownloadManager.invalidateMetadataCache(valid)
+                lastProbedKey = null
                 val token = probeRequestToken.incrementAndGet()
                 extractMagnetInfo(valid, token)
             } else {
@@ -394,6 +456,7 @@ class AddDownloadActivity : AppCompatActivity() {
                 .apply()
             val currentUrl = binding.etUrl.text?.toString()?.trim().orEmpty()
             if (currentUrl.isNotEmpty() && downloadType == DownloadType.MUSIC) {
+                lastProbedKey = null
                 triggerMetadataExtractionDebounced(currentUrl)
             }
         }
@@ -442,7 +505,7 @@ class AddDownloadActivity : AppCompatActivity() {
                 else -> runCatching { DownloadType.valueOf(typeExtra.uppercase(Locale.US)) }
                     .getOrDefault(DownloadType.DIRECT)
             }
-            switchDownloadType(resolvedType)
+            switchDownloadType(resolvedType, triggerExtraction = false)
         }
 
         val presetTitle = intent.getStringExtra("preset_title") ?: intent.getStringExtra("title")
@@ -467,41 +530,47 @@ class AddDownloadActivity : AppCompatActivity() {
             } else {
                 cleaned
             }
-            binding.etUrl.setText(effectiveUrl)
-            autoDetectTypeFromUrl(effectiveUrl)
+            isUpdatingUrlProgrammatically = true
+            try {
+                binding.etUrl.setText(effectiveUrl)
+                binding.etUrl.setSelection(effectiveUrl.length)
+            } finally {
+                isUpdatingUrlProgrammatically = false
+            }
+            autoDetectTypeFromUrl(effectiveUrl, triggerExtraction = false)
             triggerMetadataExtractionDebounced(effectiveUrl)
         }
     }
 
-    private fun autoDetectTypeFromUrl(rawUrl: String) {
+    private fun autoDetectTypeFromUrl(rawUrl: String, triggerExtraction: Boolean = true) {
         val valid = normalizeAndValidateUrl(rawUrl) ?: rawUrl.trim()
         val classification = UrlClassifier.classify(valid)
 
         when (classification.kind) {
             UrlClassifier.SourceKind.MAGNET -> {
                 if (downloadType != DownloadType.MAGNET && downloadType != DownloadType.TORRENT) {
-                    switchDownloadType(DownloadType.MAGNET)
+                    switchDownloadType(DownloadType.MAGNET, triggerExtraction = triggerExtraction)
                 } else {
                     downloadType = DownloadType.MAGNET
                 }
             }
             UrlClassifier.SourceKind.TORRENT_FILE -> {
                 if (downloadType != DownloadType.TORRENT && downloadType != DownloadType.MAGNET) {
-                    switchDownloadType(DownloadType.TORRENT)
+                    switchDownloadType(DownloadType.TORRENT, triggerExtraction = triggerExtraction)
                 } else {
                     downloadType = DownloadType.TORRENT
                 }
             }
             UrlClassifier.SourceKind.MUSIC_PLATFORM, UrlClassifier.SourceKind.DIRECT_AUDIO -> {
                 if (downloadType == DownloadType.DIRECT) {
-                    switchDownloadType(DownloadType.MUSIC)
+                    switchDownloadType(DownloadType.MUSIC, triggerExtraction = triggerExtraction)
                 }
             }
             UrlClassifier.SourceKind.VIDEO_PLATFORM,
             UrlClassifier.SourceKind.DIRECT_VIDEO,
             UrlClassifier.SourceKind.HLS_PLAYLIST -> {
                 if (downloadType == DownloadType.DIRECT) {
-                    switchDownloadType(DownloadType.VIDEO)
+                    switchDownloadType(DownloadType.VIDEO, triggerExtraction = triggerExtraction)
                 }
             }
             UrlClassifier.SourceKind.UNSUPPORTED -> {
@@ -523,8 +592,13 @@ class AddDownloadActivity : AppCompatActivity() {
     }
 
     private fun triggerMetadataExtractionDebounced(rawUrl: String) {
-        metadataExtractJob?.cancel()
         val valid = normalizeAndValidateUrl(rawUrl) ?: return
+        val probeKey = "${downloadType.name}|${binding.cbAllowAlternateSource.isChecked}|$valid"
+        if (probeKey == lastProbedKey && metadataExtractJob?.isActive == true) {
+            return
+        }
+        lastProbedKey = probeKey
+        metadataExtractJob?.cancel()
         val token = probeRequestToken.incrementAndGet()
 
         val classification = UrlClassifier.classify(valid)
@@ -561,7 +635,7 @@ class AddDownloadActivity : AppCompatActivity() {
                         fastTorrentMeta.hasResolvedMetadata &&
                         fastTorrentMeta.files.isNotEmpty()
                     ) {
-                        switchDownloadType(DownloadType.TORRENT)
+                        switchDownloadType(DownloadType.TORRENT, triggerExtraction = false)
                         extractMagnetInfo(valid, token)
                     } else if (isProbeStillCurrent(token, valid) && binding.etFilename.text.isNullOrBlank()) {
                         setSuggestedFilenameIfNotEdited(downloadManager.getFilenameFromUrl(valid))
@@ -847,7 +921,7 @@ class AddDownloadActivity : AppCompatActivity() {
         }
     }
 
-    private fun showSavePathSelectorDialog(isTorrent: Boolean) {
+    private fun showSavePathSelectorDialog(@Suppress("UNUSED_PARAMETER") isTorrent: Boolean) {
         val baseDir = downloadManager.getDefaultDownloadPath()
         val options = arrayOf(
             "Default Downloads ($baseDir)",
@@ -865,21 +939,19 @@ class AddDownloadActivity : AppCompatActivity() {
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.select_file)
             .setItems(options) { _, which ->
-                val chosen = paths[which]
-                if (isTorrent) {
-                    binding.etTorrentSavePath.setText(chosen)
-                } else {
-                    binding.etSavePath.setText(chosen)
-                }
+                applySavePath(paths[which])
             }
             .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
     private fun startDownloadNow() {
+        if (!isSubmitting.compareAndSet(false, true)) return
+
         val rawUrl = binding.etUrl.text?.toString()?.trim().orEmpty()
         val validUrl = normalizeAndValidateUrl(rawUrl)
         if (validUrl == null) {
+            isSubmitting.set(false)
             binding.etUrl.error = getString(R.string.error_invalid_url)
             Toast.makeText(this, R.string.error_invalid_url, Toast.LENGTH_SHORT).show()
             return
@@ -887,6 +959,7 @@ class AddDownloadActivity : AppCompatActivity() {
 
         val classification = UrlClassifier.classify(validUrl)
         if (classification.kind == UrlClassifier.SourceKind.UNSUPPORTED) {
+            isSubmitting.set(false)
             val reason = classification.unsupportedReason ?: "Unsupported platform: ${classification.platformName}"
             binding.etUrl.error = reason
             Toast.makeText(this, reason, Toast.LENGTH_LONG).show()
@@ -908,14 +981,8 @@ class AddDownloadActivity : AppCompatActivity() {
         probeRequestToken.incrementAndGet()
         metadataExtractJob?.cancel()
 
-        val savePath = if (downloadType == DownloadType.TORRENT || downloadType == DownloadType.MAGNET) {
-            binding.etTorrentSavePath.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-                ?: binding.etSavePath.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-                ?: downloadManager.getDefaultDownloadPath()
-        } else {
-            binding.etSavePath.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-                ?: downloadManager.getDefaultDownloadPath()
-        }
+        val savePath = binding.etSavePath.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+            ?: downloadManager.getDefaultDownloadPath()
 
         val inputFilename = binding.etFilename.text?.toString()?.trim().orEmpty()
         val finalFilename = inputFilename.ifEmpty {
@@ -929,6 +996,7 @@ class AddDownloadActivity : AppCompatActivity() {
             try {
                 resolveSubmittedTorrentSelection(torrentFilesAdapter, userModifiedTorrentSelection)
             } catch (iae: IllegalArgumentException) {
+                isSubmitting.set(false)
                 Toast.makeText(this, iae.message ?: "Please select at least one file to download", Toast.LENGTH_SHORT).show()
                 return
             }
@@ -950,34 +1018,47 @@ class AddDownloadActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             try {
-                val baseItem = DownloadItem(
-                    url = effectiveUrl,
-                    filename = finalFilename,
-                    savePath = savePath,
-                    downloadType = downloadType,
-                    status = DownloadStatus.QUEUED,
-                    isAudioOnly = isAudioOnly,
-                    magnetUri = if (effectiveUrl.startsWith("magnet:", ignoreCase = true)) effectiveUrl else null,
-                    selectedFiles = selectedIndices
-                )
-
-                val downloadId = when (downloadType) {
-                    DownloadType.VIDEO -> videoDownloadManager.startVideoDownload(
-                        downloadItem = baseItem,
-                        videoFormat = selectedVideoFormat,
-                        quality = getSelectedVideoQuality()
-                    )
-                    DownloadType.MUSIC -> musicDownloadManager.startMusicDownload(
-                        downloadItem = baseItem,
-                        formatCode = getSelectedMusicFormatCode(),
-                        artistName = binding.etArtist.text?.toString()?.trim(),
-                        allowAlternateSource = binding.cbAllowAlternateSource.isChecked
-                    )
-                    DownloadType.TORRENT, DownloadType.MAGNET -> torrentDownloadManager.startTorrentDownload(
-                        downloadItem = baseItem,
+                val existingActive = withContext(Dispatchers.IO) {
+                    repository.getAllDownloadsList().firstOrNull { existing ->
+                        (existing.status == DownloadStatus.QUEUED || existing.status == DownloadStatus.DOWNLOADING) &&
+                            existing.isAudioOnly == isAudioOnly &&
+                            existing.savePath == savePath &&
+                            ((existing.videoUrl ?: existing.url).trim().equals(effectiveUrl, ignoreCase = true) ||
+                                existing.url.trim().equals(effectiveUrl, ignoreCase = true))
+                    }
+                }
+                val downloadId = if (existingActive != null) {
+                    existingActive.id
+                } else {
+                    val baseItem = DownloadItem(
+                        url = effectiveUrl,
+                        filename = finalFilename,
+                        savePath = savePath,
+                        downloadType = downloadType,
+                        status = DownloadStatus.QUEUED,
+                        isAudioOnly = isAudioOnly,
+                        magnetUri = if (effectiveUrl.startsWith("magnet:", ignoreCase = true)) effectiveUrl else null,
                         selectedFiles = selectedIndices
                     )
-                    DownloadType.DIRECT -> downloadManager.startDownload(baseItem)
+
+                    when (downloadType) {
+                        DownloadType.VIDEO -> videoDownloadManager.startVideoDownload(
+                            downloadItem = baseItem,
+                            videoFormat = selectedVideoFormat,
+                            quality = getSelectedVideoQuality()
+                        )
+                        DownloadType.MUSIC -> musicDownloadManager.startMusicDownload(
+                            downloadItem = baseItem,
+                            formatCode = getSelectedMusicFormatCode(),
+                            artistName = binding.etArtist.text?.toString()?.trim(),
+                            allowAlternateSource = binding.cbAllowAlternateSource.isChecked
+                        )
+                        DownloadType.TORRENT, DownloadType.MAGNET -> torrentDownloadManager.startTorrentDownload(
+                            downloadItem = baseItem,
+                            selectedFiles = selectedIndices
+                        )
+                        DownloadType.DIRECT -> downloadManager.startDownload(baseItem)
+                    }
                 }
 
                 val serviceIntent = Intent(this@AddDownloadActivity, DownloadService::class.java).apply {
@@ -986,9 +1067,14 @@ class AddDownloadActivity : AppCompatActivity() {
                 }
                 startService(serviceIntent)
 
-                Toast.makeText(this@AddDownloadActivity, R.string.download_started, Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    this@AddDownloadActivity,
+                    if (existingActive != null) "Download is already active" else getString(R.string.download_started),
+                    Toast.LENGTH_SHORT
+                ).show()
                 finish()
             } catch (e: Exception) {
+                isSubmitting.set(false)
                 binding.btnStartDownload.isEnabled = true
                 Toast.makeText(
                     this@AddDownloadActivity,

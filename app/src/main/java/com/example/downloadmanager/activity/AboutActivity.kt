@@ -7,16 +7,21 @@ import androidx.appcompat.app.AppCompatActivity
 import com.example.downloadmanager.BuildConfig
 import com.example.downloadmanager.R
 import com.example.downloadmanager.databinding.ActivityAboutBinding
+import com.example.downloadmanager.utils.EdgeToEdgeHelper
 
 class AboutActivity : AppCompatActivity() {
     
     private lateinit var binding: ActivityAboutBinding
     
     override fun onCreate(savedInstanceState: Bundle?) {
+        EdgeToEdgeHelper.enableWithDarkHeader(this)
         super.onCreate(savedInstanceState)
         
         binding = ActivityAboutBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        EdgeToEdgeHelper.applyTopHeaderInsets(binding.toolbar)
+        EdgeToEdgeHelper.applyScrollingBottomInsets(binding.scrollAboutContainer)
         
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)

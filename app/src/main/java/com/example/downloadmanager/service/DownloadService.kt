@@ -383,9 +383,24 @@ class DownloadService : Service() {
             } else {
                 item.downloadType
             }
+            val normalizedIsAudio = item.isAudioOnly || resolvedType == DownloadType.MUSIC
+            val targetUrlNorm = (item.videoUrl ?: item.url).trim()
+            val existingActive = repository.getAllDownloadsList().firstOrNull { existing ->
+                (existing.status == DownloadStatus.QUEUED || existing.status == DownloadStatus.DOWNLOADING) &&
+                    existing.isAudioOnly == normalizedIsAudio &&
+                    existing.savePath == item.savePath &&
+                    ((existing.videoUrl ?: existing.url).trim().equals(targetUrlNorm, ignoreCase = true) ||
+                        existing.url.trim().equals(targetUrlNorm, ignoreCase = true))
+            }
+            if (existingActive != null) {
+                onIdCreated?.invoke(existingActive.id)
+                processQueue()
+                return@launch
+            }
+
             val queuedItem = item.copy(
                 downloadType = resolvedType,
-                isAudioOnly = item.isAudioOnly || resolvedType == DownloadType.MUSIC,
+                isAudioOnly = normalizedIsAudio,
                 status = DownloadStatus.QUEUED,
                 errorMessage = null
             )
@@ -577,8 +592,14 @@ class DownloadService : Service() {
             return
         }
 
+        // Video and Music managers already perform internal chunked/segment retries, URL refresh, and
+        // format fallback internally. Cap outer full restarts to 1 so failed streams never loop from 0%.
+        val maxRetriesForType = when (current.downloadType) {
+            DownloadType.VIDEO, DownloadType.MUSIC -> 1
+            else -> MAX_AUTO_RETRIES
+        }
         val isTransient = isRetryableError(error)
-        if (isAutoResumeEnabled() && isTransient && current.retryCount < MAX_AUTO_RETRIES) {
+        if (isAutoResumeEnabled() && isTransient && current.retryCount < maxRetriesForType) {
             val nextRetry = current.retryCount + 1
             repository.update(
                 current.copy(
@@ -587,7 +608,7 @@ class DownloadService : Service() {
                     downloadSpeed = 0,
                     uploadSpeed = 0,
                     eta = 0,
-                    errorMessage = "Auto-retrying ($nextRetry/$MAX_AUTO_RETRIES): $error"
+                    errorMessage = "Retrying ($nextRetry/$maxRetriesForType)..."
                 )
             )
             notificationManager.cancel(id.toInt() + 1000)
@@ -625,7 +646,15 @@ class DownloadService : Service() {
             "tracker unreachable",
             "no peers returned",
             "empty bittorrent swarm",
-            "please select at least one file"
+            "please select at least one file",
+            "http 403",
+            "http 410",
+            "403:",
+            "410:",
+            "stalled at byte",
+            "unrecognized",
+            "no playable",
+            "could not extract"
         )
         if (nonRetryableIndicators.any { lower.contains(it) }) {
             return false

@@ -35,6 +35,7 @@ import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
 import com.example.downloadmanager.model.DownloadType
 import com.example.downloadmanager.service.DownloadService
+import com.example.downloadmanager.utils.EdgeToEdgeHelper
 import com.example.downloadmanager.utils.MediaAssetHelper
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import java.io.File
@@ -46,6 +47,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var downloadAdapter: DownloadAdapter
     private var downloadService: DownloadService? = null
     private var isBound = false
+    private var lastQuickPasteAtMs = 0L
     
     private val serviceConnection = object : android.content.ServiceConnection {
         override fun onServiceConnected(className: ComponentName, service: IBinder) {
@@ -64,10 +66,16 @@ class MainActivity : AppCompatActivity() {
     }
     
     override fun onCreate(savedInstanceState: Bundle?) {
+        EdgeToEdgeHelper.enableWithDarkHeader(this)
         super.onCreate(savedInstanceState)
         
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        EdgeToEdgeHelper.applyTopHeaderInsets(binding.appBarLayout)
+        EdgeToEdgeHelper.applyScrollingBottomInsets(binding.recyclerView)
+        EdgeToEdgeHelper.applyHorizontalCutoutInsets(binding.emptyStateContainer)
+        EdgeToEdgeHelper.applyBottomFabMarginInsets(binding.fabAdd)
         
         setSupportActionBar(binding.toolbar)
         syncAppVersionHeader()
@@ -128,6 +136,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleQuickPaste() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastQuickPasteAtMs < 700L) return
+        lastQuickPasteAtMs = now
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val clipText = clipboard.primaryClip?.getItemAt(0)?.text?.toString()?.trim()
         val validUrl = if (!clipText.isNullOrBlank()) {
@@ -215,9 +226,9 @@ class MainActivity : AppCompatActivity() {
             val stat = StatFs(path.path)
             val freeBytes = stat.availableBlocksLong * stat.blockSizeLong
             val freeGb = freeBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
-            binding.tvStatStorage.text = "%.1f GB".format(freeGb)
+            binding.tvStatStorage.text = "Free: %.1f GB".format(freeGb)
         } catch (e: Exception) {
-            binding.tvStatStorage.text = "-- GB"
+            binding.tvStatStorage.text = "Free: -- GB"
         }
     }
 

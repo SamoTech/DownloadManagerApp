@@ -16,6 +16,7 @@
         android:background="@color/colorHeaderBg"
         android:elevation="4dp"
         app:navigationIconTint="@android:color/white"
+        app:subtitleTextColor="#38BDF8"
         app:titleTextColor="@android:color/white" />
 
     <androidx.core.widget.NestedScrollView
@@ -23,10 +24,11 @@
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
+        android:clipToPadding="false"
         android:fillViewport="true"
         android:paddingHorizontal="16dp"
-        android:paddingTop="16dp"
-        android:paddingBottom="8dp">
+        android:paddingTop="14dp"
+        android:paddingBottom="16dp">
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -34,6 +36,15 @@
             android:orientation="vertical">
 
             <!-- Download Mode Selector Chips -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="6dp"
+                android:text="DOWNLOAD MODE"
+                android:textColor="@color/colorOnSurfaceSecondary"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
             <HorizontalScrollView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -53,36 +64,45 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:checked="true"
-                        android:text="@string/direct_download" />
+                        android:text="@string/direct_download"
+                        app:chipIcon="@drawable/ic_download"
+                        app:chipIconVisible="true" />
 
                     <com.google.android.material.chip.Chip
                         android:id="@+id/chipTypeMusic"
                         style="@style/Widget.Material3.Chip.Filter"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="@string/music_download" />
+                        android:text="@string/music_download"
+                        app:chipIcon="@drawable/ic_music"
+                        app:chipIconVisible="true" />
 
                     <com.google.android.material.chip.Chip
                         android:id="@+id/chipTypeVideo"
                         style="@style/Widget.Material3.Chip.Filter"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="@string/video_download" />
+                        android:text="@string/video_download"
+                        app:chipIcon="@drawable/ic_video"
+                        app:chipIconVisible="true" />
 
                     <com.google.android.material.chip.Chip
                         android:id="@+id/chipTypeTorrent"
                         style="@style/Widget.Material3.Chip.Filter"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="@string/torrents" />
+                        android:text="@string/torrents"
+                        app:chipIcon="@drawable/ic_torrent"
+                        app:chipIconVisible="true" />
                 </com.google.android.material.chip.ChipGroup>
             </HorizontalScrollView>
 
-            <!-- Main Input Card -->
+            <!-- Unified Link & Save Location Card (no duplicate save boxes) -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:background="@drawable/card_background"
+                android:elevation="1dp"
                 android:orientation="vertical"
                 android:padding="16dp">
 
@@ -101,7 +121,8 @@
                         app:boxCornerRadiusBottomEnd="12dp"
                         app:boxCornerRadiusBottomStart="12dp"
                         app:boxCornerRadiusTopEnd="12dp"
-                        app:boxCornerRadiusTopStart="12dp">
+                        app:boxCornerRadiusTopStart="12dp"
+                        app:endIconMode="clear_text">
 
                         <com.google.android.material.textfield.TextInputEditText
                             android:id="@+id/etUrl"
@@ -133,7 +154,8 @@
                     app:boxCornerRadiusBottomEnd="12dp"
                     app:boxCornerRadiusBottomStart="12dp"
                     app:boxCornerRadiusTopEnd="12dp"
-                    app:boxCornerRadiusTopStart="12dp">
+                    app:boxCornerRadiusTopStart="12dp"
+                    app:endIconMode="clear_text">
 
                     <com.google.android.material.textfield.TextInputEditText
                         android:id="@+id/etFilename"
@@ -183,6 +205,57 @@
                         app:cornerRadius="12dp"
                         app:icon="@drawable/ic_folder" />
                 </LinearLayout>
+
+                <!-- 1-Tap Quick Folder Preset Chips -->
+                <HorizontalScrollView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:scrollbars="none">
+
+                    <com.google.android.material.chip.ChipGroup
+                        android:id="@+id/chipGroupFolders"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        app:singleSelection="true">
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chipFolderDownloads"
+                            style="@style/Widget.Material3.Chip.Assist"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/default_download_path"
+                            app:chipIcon="@drawable/ic_folder"
+                            app:chipIconVisible="true" />
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chipFolderVideos"
+                            style="@style/Widget.Material3.Chip.Assist"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/videos"
+                            app:chipIcon="@drawable/ic_video"
+                            app:chipIconVisible="true" />
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chipFolderMusic"
+                            style="@style/Widget.Material3.Chip.Assist"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/music"
+                            app:chipIcon="@drawable/ic_music"
+                            app:chipIconVisible="true" />
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chipFolderTorrents"
+                            style="@style/Widget.Material3.Chip.Assist"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/torrents"
+                            app:chipIcon="@drawable/ic_torrent"
+                            app:chipIconVisible="true" />
+                    </com.google.android.material.chip.ChipGroup>
+                </HorizontalScrollView>
             </LinearLayout>
 
             <!-- Music specific options -->
@@ -190,8 +263,9 @@
                 android:id="@+id/musicOptions"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
+                android:layout_marginTop="14dp"
                 android:background="@drawable/card_background"
+                android:elevation="1dp"
                 android:orientation="vertical"
                 android:padding="16dp"
                 android:visibility="gone">
@@ -210,7 +284,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
                     android:text="@string/supported_music_sites"
-                    android:textColor="@color/gray"
+                    android:textColor="@color/colorPrimary"
                     android:textSize="12sp" />
 
                 <com.google.android.material.divider.MaterialDivider
@@ -301,13 +375,14 @@
                     android:text="@string/allow_alternate_music_source" />
             </LinearLayout>
 
-            <!-- Torrent specific options -->
+            <!-- Torrent specific options (duplicate Save/Browse removed; uses unified Save To above) -->
             <LinearLayout
                 android:id="@+id/torrentOptions"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
+                android:layout_marginTop="14dp"
                 android:background="@drawable/card_background"
+                android:elevation="1dp"
                 android:orientation="vertical"
                 android:padding="16dp"
                 android:visibility="gone">
@@ -331,7 +406,7 @@
                         android:id="@+id/btnPickTorrentFile"
                         style="@style/Widget.Material3.Button.OutlinedButton"
                         android:layout_width="wrap_content"
-                        android:layout_height="38dp"
+                        android:layout_height="40dp"
                         android:layout_marginEnd="6dp"
                         android:insetTop="0dp"
                         android:insetBottom="0dp"
@@ -342,7 +417,7 @@
                         android:id="@+id/btnFetchTorrentFiles"
                         style="@style/Widget.Material3.Button.TonalButton"
                         android:layout_width="wrap_content"
-                        android:layout_height="38dp"
+                        android:layout_height="40dp"
                         android:insetTop="0dp"
                         android:insetBottom="0dp"
                         android:text="Fetch Files"
@@ -405,30 +480,18 @@
                     android:nestedScrollingEnabled="false"
                     android:overScrollMode="never" />
 
-                <com.google.android.material.textfield.TextInputLayout
+                <!-- Legacy ViewBinding IDs kept hidden so no duplicate Save UI appears -->
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/etTorrentSavePath"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:hint="@string/save_to"
-                    app:boxBackgroundMode="outline">
-
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/etTorrentSavePath"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:clickable="true"
-                        android:focusable="false"
-                        android:importantForAutofill="no"
-                        android:inputType="text" />
-                </com.google.android.material.textfield.TextInputLayout>
+                    android:visibility="gone" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnTorrentBrowse"
-                    style="@style/Widget.Material3.Button.OutlinedButton"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="@string/browse" />
+                    android:visibility="gone" />
             </LinearLayout>
 
             <!-- Video specific options -->
@@ -436,8 +499,9 @@
                 android:id="@+id/videoOptions"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
+                android:layout_marginTop="14dp"
                 android:background="@drawable/card_background"
+                android:elevation="1dp"
                 android:orientation="vertical"
                 android:padding="16dp"
                 android:visibility="gone">
@@ -456,7 +520,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
                     android:text="Supports YouTube, TikTok, Instagram, X/Twitter, Facebook, Reddit, Vimeo, Dailymotion &amp; Direct Video"
-                    android:textColor="@color/gray"
+                    android:textColor="@color/colorPrimary"
                     android:textSize="12sp" />
 
                 <com.google.android.material.divider.MaterialDivider
@@ -500,11 +564,12 @@
                         android:text="@string/audio_only" />
                 </RadioGroup>
 
+                <!-- Duplicate extract audio checkbox hidden; rbAudioOnly covers Audio Only cleanly -->
                 <com.google.android.material.checkbox.MaterialCheckBox
                     android:id="@+id/cbExtractAudio"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
+                    android:visibility="gone"
                     android:text="@string/extract_audio" />
             </LinearLayout>
 
@@ -513,14 +578,15 @@
     </androidx.core.widget.NestedScrollView>
 
     <LinearLayout
+        android:id="@+id/bottomActionContainer"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="@color/colorBackground"
-        android:elevation="6dp"
+        android:background="@color/colorSurface"
+        android:elevation="8dp"
         android:orientation="vertical"
         android:paddingHorizontal="16dp"
-        android:paddingTop="8dp"
-        android:paddingBottom="16dp">
+        android:paddingTop="10dp"
+        android:paddingBottom="14dp">
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnStartDownload"

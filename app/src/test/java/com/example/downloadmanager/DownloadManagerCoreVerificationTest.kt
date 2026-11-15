@@ -1495,9 +1495,9 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun phase7_activeTorrentSelectedFile_compactAndDictTrackers_andDistinctStatuses() = runBlocking {
-        // 0. Verify Luca Version 20.0 (Build 20)
-        assertEquals("20.0", BuildConfig.VERSION_NAME)
-        assertEquals(20, BuildConfig.VERSION_CODE)
+        // 0. Verify Luca Version 21.0 (Build 21)
+        assertEquals("21.0", BuildConfig.VERSION_NAME)
+        assertEquals(21, BuildConfig.VERSION_CODE)
 
         val tempRoot = createTempDirectory("phase7_torrent_trace").toFile()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -2752,8 +2752,8 @@ class DownloadManagerCoreVerificationTest {
             assertTrue(MediaAssetHelper.hasVideoTrack(tailMoovMp4))
             assertEquals("H.264 • AAC 44.1kHz Stereo", MediaAssetHelper.inspectMediaCodecSummary(tailMoovMp4, isVideo = true))
 
-            assertEquals(20, BuildConfig.VERSION_CODE)
-            assertEquals("20.0", BuildConfig.VERSION_NAME)
+            assertEquals(21, BuildConfig.VERSION_CODE)
+            assertEquals("21.0", BuildConfig.VERSION_NAME)
         } finally {
             try { peerServer.close() } catch (_: Exception) {}
             server.stop(0)
@@ -3798,6 +3798,332 @@ class DownloadManagerCoreVerificationTest {
             threadB.join(500)
             dhtBootstrapThread.join(500)
             dhtClosestThread.join(500)
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun v21_youtubeChunkedResume_midStream403Refresh_progressivePreference_andHlsSegmentRetry() = runBlocking {
+        assertEquals(21, BuildConfig.VERSION_CODE)
+        assertEquals("21.0", BuildConfig.VERSION_NAME)
+
+        // 1. Path-based client detection (/c/IOS/) for manifest.googlevideo.com HLS URLs
+        val hlsIosUa = com.example.downloadmanager.utils.YouTubeExtractor.getUserAgentForStreamUrl(
+            "https://manifest.googlevideo.com/api/manifest/hls_variant/c/IOS/id/abc/playlist.m3u8"
+        )
+        assertEquals(com.example.downloadmanager.utils.YouTubeExtractor.IOS_USER_AGENT, hlsIosUa)
+
+        // 2. selectBestFormat prefers progressive muxed MP4 over muxed_hls
+        val dao = InMemoryDownloadDao()
+        val repo = DownloadRepository(dao)
+        val videoManager = com.example.downloadmanager.manager.VideoDownloadManager(null, repo)
+        val fmtHls = com.example.downloadmanager.model.VideoFormat("muxed_hls", "https://ex/master.m3u8", "720p (HLS)", "mp4")
+        val fmt18 = com.example.downloadmanager.model.VideoFormat("muxed_18", "https://ex/360.mp4", "360p (MP4)", "mp4")
+        val fmt22 = com.example.downloadmanager.model.VideoFormat("muxed_22", "https://ex/720.mp4", "720p (MP4)", "mp4")
+        val pickedBest = videoManager.selectBestFormat(listOf(fmtHls, fmt18, fmt22), "best")
+        assertEquals("muxed_22", pickedBest?.formatId)
+        val pickedMedium = videoManager.selectBestFormat(listOf(fmtHls, fmt18, fmt22), "medium")
+        assertEquals("muxed_18", pickedMedium?.formatId)
+
+        val tempRoot = createTempDirectory("v21_youtube_resume").toFile()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        try {
+            server.executor = Executors.newCachedThreadPool()
+
+            // 3. Simulated GoogleVideo chunked stream:
+            //    - Request 1 (/stream_old?c=ANDROID&clen=...): serves first 1,500,000 bytes (partial chunk!), then drops!
+            //    - Request 2 (at offset 1,500,000): returns 403 -> triggers onRefreshUrl to /stream_fresh
+            //    - Request 3 (/stream_fresh with Range header): returns 200 ignoring Range -> stalls once to test &range= fallback
+            //    - Request 4 (/stream_fresh?...&range=1500000-...): completes cleanly WITHOUT restarting from byte 0!
+            val totalPayload = ByteArray(2_400_000) { ((it * 17 + 9) and 0xFF).toByte() }
+            val oldChunkRequests = java.util.concurrent.atomic.AtomicInteger(0)
+            val freshHeaderRequests = java.util.concurrent.atomic.AtomicInteger(0)
+            val observedOffsets = java.util.concurrent.CopyOnWriteArrayList<Long>()
+
+            server.createContext("/stream_old") { ex ->
+                val count = oldChunkRequests.incrementAndGet()
+                if (count == 1) {
+                    val partialLen = 1_500_000
+                    ex.responseHeaders.add("Content-Range", "bytes 0-${partialLen - 1}/${totalPayload.size}")
+                    ex.sendResponseHeaders(206, (partialLen + 50_000).toLong()) // intentionally closes early after 1.5M
+                    ex.responseBody.use { out ->
+                        out.write(totalPayload, 0, partialLen)
+                        out.flush()
+                    }
+                } else {
+                    ex.sendResponseHeaders(403, -1)
+                    ex.close()
+                }
+            }
+
+            server.createContext("/stream_fresh") { ex ->
+                val rawQuery = ex.requestURI.rawQuery ?: ""
+                val queryRange = Regex("range=(\\d+)-(\\d+)").find(rawQuery)
+                if (queryRange == null) {
+                    freshHeaderRequests.incrementAndGet()
+                    // Simulate CDN rejecting/ignoring Range header on retry 0 -> forces &range= fallback
+                    ex.sendResponseHeaders(200, totalPayload.size.toLong())
+                    ex.close()
+                    return@createContext
+                }
+                val start = queryRange.groupValues[1].toInt()
+                val end = minOf(queryRange.groupValues[2].toInt(), totalPayload.size - 1)
+                observedOffsets.add(start.toLong())
+                val len = end - start + 1
+                ex.responseHeaders.add("Content-Range", "bytes $start-$end/${totalPayload.size}")
+                ex.sendResponseHeaders(206, len.toLong())
+                ex.responseBody.use { out ->
+                    out.write(totalPayload, start, len)
+                }
+            }
+
+            // 4. Simulated HLS stream whose segment 2 fails once mid-transfer and retries cleanly
+            val seg1Data = ByteArray(2048) { 0x11 }
+            val seg2Data = ByteArray(2048) { 0x22 }
+            val seg2Attempts = java.util.concurrent.atomic.AtomicInteger(0)
+
+            server.createContext("/master.m3u8") { ex ->
+                val m3u8 = """
+                    #EXTM3U
+                    #EXT-X-VERSION:3
+                    #EXT-X-TARGETDURATION:4
+                    #EXTINF:4.0,
+                    /seg1.ts
+                    #EXTINF:4.0,
+                    /seg2.ts
+                    #EXT-X-ENDLIST
+                """.trimIndent().toByteArray(StandardCharsets.UTF_8)
+                ex.sendResponseHeaders(200, m3u8.size.toLong())
+                ex.responseBody.use { it.write(m3u8) }
+            }
+            server.createContext("/seg1.ts") { ex ->
+                ex.sendResponseHeaders(200, seg1Data.size.toLong())
+                ex.responseBody.use { it.write(seg1Data) }
+            }
+            server.createContext("/seg2.ts") { ex ->
+                if (seg2Attempts.incrementAndGet() == 1) {
+                    ex.sendResponseHeaders(503, -1)
+                    ex.close()
+                } else {
+                    ex.sendResponseHeaders(200, seg2Data.size.toLong())
+                    ex.responseBody.use { it.write(seg2Data) }
+                }
+            }
+
+            server.start()
+            val port = server.address.port
+
+            val itemId = repo.insert(
+                DownloadItem(
+                    url = "http://127.0.0.1:$port/stream_old?c=ANDROID&clen=${totalPayload.size}",
+                    filename = "yt_resume.mp4",
+                    savePath = tempRoot.absolutePath,
+                    downloadType = DownloadType.VIDEO,
+                    status = DownloadStatus.DOWNLOADING
+                )
+            )
+            val chunkOutFile = File(tempRoot, "yt_resume.mp4")
+            val progressReports = mutableListOf<Long>()
+            val refreshedCalls = java.util.concurrent.atomic.AtomicInteger(0)
+
+            val chunkOk = videoManager.downloadGoogleVideoChunked(
+                downloadId = itemId,
+                streamUrl = "http://127.0.0.1:$port/stream_old?c=ANDROID&clen=${totalPayload.size}",
+                userAgent = com.example.downloadmanager.utils.YouTubeExtractor.ANDROID_APP_USER_AGENT,
+                destFile = chunkOutFile,
+                totalSize = totalPayload.size.toLong(),
+                onRefreshUrl = {
+                    refreshedCalls.incrementAndGet()
+                    "http://127.0.0.1:$port/stream_fresh?c=ANDROID&clen=${totalPayload.size}"
+                },
+                onProgress = { read, _, _, _ -> progressReports.add(read) }
+            )
+
+            assertTrue("Chunked YouTube download must recover and finish", chunkOk)
+            assertEquals("URL refresh must be invoked once on mid-stream 403", 1, refreshedCalls.get())
+            assertTrue("Fallback &range= query must resume at byte 1500000 without resetting to 0", observedOffsets.contains(1_500_000L))
+            assertFalse("Refreshed URL must NOT restart from byte 0", observedOffsets.contains(0L))
+            assertEquals(totalPayload.size.toLong(), chunkOutFile.length())
+            assertArrayEquals("Final reassembled video bytes must match 100%", totalPayload, chunkOutFile.readBytes())
+
+            // Verify HLS segment atomic retry without duplicate bytes
+            val hlsOutFile = File(tempRoot, "hls_retry.ts")
+            val hlsOk = videoManager.downloadHlsStreamToFile(
+                downloadId = itemId,
+                playlistUrl = "http://127.0.0.1:$port/master.m3u8",
+                userAgent = com.example.downloadmanager.utils.YouTubeExtractor.ANDROID_APP_USER_AGENT,
+                destFile = hlsOutFile,
+                onProgress = { _, _, _, _ -> }
+            )
+            assertTrue("HLS download must succeed after transient segment 503", hlsOk)
+            assertEquals(2, seg2Attempts.get())
+            assertArrayEquals("Concatenated HLS bytes must equal seg1 + seg2 with no corruption", seg1Data + seg2Data, hlsOutFile.readBytes())
+        } finally {
+            runCatching { server.stop(0) }
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun verifyBrowserRendererRecoveryPolicy() {
+        assertEquals(
+            com.example.downloadmanager.activity.BrowserActivity.Companion.RendererRecoveryAction.DEFER_UNTIL_RESUME,
+            com.example.downloadmanager.activity.BrowserActivity.resolveRendererRecoveryAction(
+                isForegroundResumed = false,
+                crashCount = 0
+            )
+        )
+        assertEquals(
+            com.example.downloadmanager.activity.BrowserActivity.Companion.RendererRecoveryAction.SHOW_RECOVERY_OVERLAY,
+            com.example.downloadmanager.activity.BrowserActivity.resolveRendererRecoveryAction(
+                isForegroundResumed = true,
+                crashCount = 0
+            )
+        )
+        assertEquals(
+            com.example.downloadmanager.activity.BrowserActivity.Companion.RendererRecoveryAction.SHOW_RECOVERY_OVERLAY,
+            com.example.downloadmanager.activity.BrowserActivity.resolveRendererRecoveryAction(
+                isForegroundResumed = true,
+                crashCount = com.example.downloadmanager.activity.BrowserActivity.MAX_RENDERER_CRASH_RECOVERIES - 1
+            )
+        )
+        assertEquals(
+            com.example.downloadmanager.activity.BrowserActivity.Companion.RendererRecoveryAction.CIRCUIT_BREAKER_LIMIT,
+            com.example.downloadmanager.activity.BrowserActivity.resolveRendererRecoveryAction(
+                isForegroundResumed = true,
+                crashCount = com.example.downloadmanager.activity.BrowserActivity.MAX_RENDERER_CRASH_RECOVERIES
+            )
+        )
+    }
+
+    @Test
+    fun verifyYouTubeClientRotationHelpersAndUserAgents() {
+        val vrUrl = "https://rr3---sn-test.googlevideo.com/videoplayback?itag=18&c=ANDROID_VR&clen=12345"
+        val iosPathUrl = "https://rr1---sn-test.googlevideo.com/videoplayback/id/abc/c/IOS/itag/22"
+        val tvEmbedUrl = "https://rr2---sn-test.googlevideo.com/videoplayback?itag=18&c=TVHTML5_SIMPLY_EMBEDDED_PLAYER"
+        val webEmbedUrl = "https://rr4---sn-test.googlevideo.com/videoplayback?itag=18&c=WEB_EMBEDDED_PLAYER"
+
+        assertEquals("ANDROID_VR", YouTubeExtractor.extractClientNameFromUrl(vrUrl))
+        assertEquals("IOS", YouTubeExtractor.extractClientNameFromUrl(iosPathUrl))
+        assertEquals("TVHTML5_SIMPLY_EMBEDDED_PLAYER", YouTubeExtractor.extractClientNameFromUrl(tvEmbedUrl))
+        assertEquals("WEB_EMBEDDED_PLAYER", YouTubeExtractor.extractClientNameFromUrl(webEmbedUrl))
+        assertNull(YouTubeExtractor.extractClientNameFromUrl("https://cdn.example.com/video.mp4"))
+
+        assertEquals(YouTubeExtractor.VR_USER_AGENT, YouTubeExtractor.getUserAgentForStreamUrl(vrUrl))
+        assertEquals(YouTubeExtractor.IOS_USER_AGENT, YouTubeExtractor.getUserAgentForStreamUrl(iosPathUrl))
+        assertEquals(YouTubeExtractor.TV_EMBED_USER_AGENT, YouTubeExtractor.getUserAgentForStreamUrl(tvEmbedUrl))
+        assertEquals(YouTubeExtractor.DEFAULT_MOBILE_USER_AGENT, YouTubeExtractor.getUserAgentForStreamUrl(webEmbedUrl))
+    }
+
+    @Test
+    fun verifyHlsMasterAudioGroupParsing() {
+        val masterM3u8 = """
+            #EXTM3U
+            #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud_low",NAME="English",DEFAULT=NO,URI="audio/low.m3u8"
+            #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud_aac",NAME="English",DEFAULT=YES,URI="audio/main.m3u8"
+            #EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=640x360,AUDIO="aud_aac"
+            360p/index.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=4200000,RESOLUTION=1920x1080,AUDIO="aud_aac"
+            1080p/index.m3u8
+        """.trimIndent()
+
+        val parsed = HlsPlaylistParser.parse(masterM3u8, "https://cdn.example.com/hls/master.m3u8")
+        assertTrue(parsed is HlsPlaylistParser.ParsedPlaylist.Master)
+        val master = parsed as HlsPlaylistParser.ParsedPlaylist.Master
+        assertEquals(2, master.variants.size)
+
+        val best = HlsPlaylistParser.selectBestVariant(master.variants)
+        assertEquals(1080, best.height)
+        assertEquals("https://cdn.example.com/hls/1080p/index.m3u8", best.url)
+        assertEquals("https://cdn.example.com/hls/audio/main.m3u8", best.audioUrl)
+    }
+
+    @Test
+    fun verifyGoogleVideoMultiClientRotationOnRepeated403() = runBlocking {
+        val tempRoot = createTempDirectory("luca_yt_multi_client_").toFile()
+        val repo = DownloadRepository(InMemoryDownloadDao())
+        val videoManager = VideoDownloadManager(null, repo)
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.executor = Executors.newCachedThreadPool()
+
+        try {
+            val payloadV1 = ByteArray(1_600_000) { idx -> (idx % 199).toByte() }
+            val payloadV3 = ByteArray(900_000) { idx -> ((idx * 7 + 13) % 251).toByte() }
+
+            val v1Requests = java.util.concurrent.atomic.AtomicInteger(0)
+            val v2Requests = java.util.concurrent.atomic.AtomicInteger(0)
+
+            server.createContext("/v1") { ex ->
+                if (v1Requests.incrementAndGet() == 1) {
+                    val part = 600_000
+                    ex.responseHeaders.add("Content-Range", "bytes 0-${part - 1}/${payloadV1.size}")
+                    ex.sendResponseHeaders(206, (part + 20_000).toLong())
+                    ex.responseBody.use { out ->
+                        out.write(payloadV1, 0, part)
+                        out.flush()
+                    }
+                } else {
+                    ex.sendResponseHeaders(403, -1)
+                    ex.close()
+                }
+            }
+
+            server.createContext("/v2") { ex ->
+                v2Requests.incrementAndGet()
+                ex.sendResponseHeaders(403, -1)
+                ex.close()
+            }
+
+            server.createContext("/v3") { ex ->
+                val rangeHeader = ex.requestHeaders.getFirst("Range")
+                val match = Regex("bytes=(\\d+)-(\\d+)").find(rangeHeader.orEmpty())
+                val start = match?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                val end = minOf(match?.groupValues?.get(2)?.toIntOrNull() ?: (payloadV3.size - 1), payloadV3.size - 1)
+                val len = end - start + 1
+                ex.responseHeaders.add("Content-Range", "bytes $start-$end/${payloadV3.size}")
+                ex.sendResponseHeaders(206, len.toLong())
+                ex.responseBody.use { out ->
+                    out.write(payloadV3, start, len)
+                }
+            }
+
+            server.start()
+            val port = server.address.port
+
+            val itemId = repo.insert(
+                DownloadItem(
+                    url = "http://127.0.0.1:$port/v1?c=ANDROID_VR&clen=${payloadV1.size}",
+                    filename = "yt_rotate.mp4",
+                    savePath = tempRoot.absolutePath,
+                    downloadType = DownloadType.VIDEO,
+                    status = DownloadStatus.DOWNLOADING
+                )
+            )
+            val outFile = File(tempRoot, "yt_rotate.mp4")
+            val refreshStep = java.util.concurrent.atomic.AtomicInteger(0)
+
+            val ok = videoManager.downloadGoogleVideoChunked(
+                downloadId = itemId,
+                streamUrl = "http://127.0.0.1:$port/v1?c=ANDROID_VR&clen=${payloadV1.size}",
+                userAgent = YouTubeExtractor.VR_USER_AGENT,
+                destFile = outFile,
+                totalSize = payloadV1.size.toLong(),
+                onRefreshUrl = {
+                    when (refreshStep.incrementAndGet()) {
+                        1 -> "http://127.0.0.1:$port/v2?c=IOS&clen=${payloadV1.size}"
+                        else -> "http://127.0.0.1:$port/v3?c=TVHTML5_SIMPLY_EMBEDDED_PLAYER&clen=${payloadV3.size}"
+                    }
+                },
+                onProgress = { _, _, _, _ -> }
+            )
+
+            assertTrue("Download must succeed after rotating across 2 failing clients to 3rd healthy client", ok)
+            assertEquals(2, refreshStep.get())
+            assertTrue(v2Requests.get() >= 1)
+            assertEquals(payloadV3.size.toLong(), outFile.length())
+            assertArrayEquals("Stream from rotated client with new clen must cleanly overwrite buffer without corruption", payloadV3, outFile.readBytes())
+        } finally {
+            runCatching { server.stop(0) }
             tempRoot.deleteRecursively()
         }
     }

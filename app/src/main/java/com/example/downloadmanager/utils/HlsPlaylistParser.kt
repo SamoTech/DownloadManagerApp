@@ -31,7 +31,8 @@ object HlsPlaylistParser {
         val url: String,
         val bandwidth: Long,
         val resolution: String?,
-        val height: Int
+        val height: Int,
+        val audioUrl: String? = null
     )
 
     data class HlsInitMap(
@@ -98,6 +99,27 @@ object HlsPlaylistParser {
     }
 
     private fun parseMasterPlaylist(lines: List<String>, baseUrl: String): ParsedPlaylist.Master {
+        val audioGroupDefaultUrls = LinkedHashMap<String, String>()
+        val audioGroupFallbackUrls = LinkedHashMap<String, String>()
+        for (line in lines) {
+            if (line.startsWith("#EXT-X-MEDIA:")) {
+                val attrs = line.substringAfter("#EXT-X-MEDIA:")
+                val mediaType = parseQuotedOrRawAttribute(attrs, "TYPE")?.uppercase(Locale.US)
+                if (mediaType == "AUDIO") {
+                    val groupId = parseQuotedOrRawAttribute(attrs, "GROUP-ID")
+                    val rawUri = parseQuotedOrRawAttribute(attrs, "URI")
+                    val isDefault = parseQuotedOrRawAttribute(attrs, "DEFAULT")?.equals("YES", ignoreCase = true) == true
+                    if (!groupId.isNullOrBlank() && !rawUri.isNullOrBlank()) {
+                        val resolvedAudioUrl = resolveUri(baseUrl, rawUri)
+                        audioGroupFallbackUrls.putIfAbsent(groupId, resolvedAudioUrl)
+                        if (isDefault) {
+                            audioGroupDefaultUrls.putIfAbsent(groupId, resolvedAudioUrl)
+                        }
+                    }
+                }
+            }
+        }
+
         val variants = mutableListOf<HlsVariant>()
         var i = 0
         while (i < lines.size) {
@@ -111,6 +133,12 @@ object HlsPlaylistParser {
                 val resolution = Regex("RESOLUTION=(\\d+x\\d+)", RegexOption.IGNORE_CASE)
                     .find(attrs)?.groupValues?.getOrNull(1)
                 val height = resolution?.substringAfter('x', "")?.toIntOrNull() ?: 0
+                val audioGroupId = parseQuotedOrRawAttribute(attrs, "AUDIO")
+                val linkedAudioUrl = if (!audioGroupId.isNullOrBlank()) {
+                    audioGroupDefaultUrls[audioGroupId] ?: audioGroupFallbackUrls[audioGroupId]
+                } else {
+                    null
+                }
 
                 // Next non-comment line is the variant URI
                 var j = i + 1
@@ -124,7 +152,8 @@ object HlsPlaylistParser {
                             url = resolvedUrl,
                             bandwidth = bandwidth,
                             resolution = resolution,
-                            height = height
+                            height = height,
+                            audioUrl = linkedAudioUrl?.takeIf { it != resolvedUrl }
                         )
                     )
                     i = j

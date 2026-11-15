@@ -9,16 +9,21 @@ import androidx.preference.EditTextPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceFragmentCompat
 import androidx.preference.SwitchPreferenceCompat
+import android.view.View
 import com.example.downloadmanager.BuildConfig
 import com.example.downloadmanager.R
+import com.example.downloadmanager.utils.EdgeToEdgeHelper
 
 class SettingsActivity : AppCompatActivity() {
     
     override fun onCreate(savedInstanceState: Bundle?) {
+        EdgeToEdgeHelper.enableWithDarkHeader(this)
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_settings)
-        
-        setSupportActionBar(findViewById(R.id.toolbar))
+
+        val toolbar = findViewById<androidx.appcompat.widget.Toolbar>(R.id.toolbar)
+        EdgeToEdgeHelper.applyTopHeaderInsets(toolbar)
+        setSupportActionBar(toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         supportActionBar?.title = getString(R.string.settings)
         supportActionBar?.subtitle = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
@@ -76,6 +81,11 @@ class SettingsActivity : AppCompatActivity() {
                 AppCompatDelegate.setApplicationLocales(locales)
                 true
             }
+        }
+
+        override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+            super.onViewCreated(view, savedInstanceState)
+            EdgeToEdgeHelper.applyScrollingBottomInsets(listView)
         }
     }
 }

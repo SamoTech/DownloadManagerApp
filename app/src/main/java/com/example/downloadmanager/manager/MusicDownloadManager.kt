@@ -402,12 +402,15 @@ class MusicDownloadManager(
     suspend fun extractMusicInfo(
         rawUrl: String,
         preferredFormatCode: String? = null,
-        allowAlternateSource: Boolean? = null
+        allowAlternateSource: Boolean? = null,
+        excludedClients: Set<String> = emptySet()
     ): MusicTrackInfo? = withContext(Dispatchers.IO) {
         val validUrl = VideoDownloadManager.normalizeHttpUrl(rawUrl) ?: return@withContext null
         val useAlternate = allowAlternateSource ?: isAlternateSourceAllowedByPrefs()
         val cacheKey = "$validUrl|${preferredFormatCode ?: "default"}|alt=$useAlternate"
-        trackInfoCache[cacheKey]?.let { return@withContext it }
+        if (excludedClients.isEmpty()) {
+            trackInfoCache[cacheKey]?.let { return@withContext it }
+        }
 
         // 1. SoundCloud URL
         if (isSoundCloudUrl(validUrl)) {
@@ -433,12 +436,16 @@ class MusicDownloadManager(
 
         // 3. YouTube or YouTube Music URL
         if (VideoDownloadManager.isYouTubeUrl(validUrl)) {
-            val ytInfo = YouTubeExtractor(context).extract(validUrl)
+            val ytInfo = YouTubeExtractor(context).extract(
+                url = validUrl,
+                forceRefresh = excludedClients.isNotEmpty(),
+                excludedClients = excludedClients
+            )
             if (ytInfo != null && ytInfo.formats.isNotEmpty()) {
                 val wantWebm = preferredFormatCode?.lowercase(Locale.US)?.startsWith("ogg") == true
-                val bestAudio = ytInfo.formats
+                val audioCandidates = ytInfo.formats
                     .filter { it.isAudioOnly }
-                    .maxByOrNull { fmt ->
+                    .sortedByDescending { fmt ->
                         val containerBonus = when {
                             wantWebm && fmt.container == "webm" -> 10000
                             !wantWebm && fmt.container == "m4a" -> 10000
@@ -446,8 +453,11 @@ class MusicDownloadManager(
                         }
                         containerBonus + (fmt.audioBitrate ?: 0)
                     }
+                val bestAudio = audioCandidates.firstOrNull()
                     ?: ytInfo.formats.firstOrNull { it.formatId.startsWith("muxed_") }
                     ?: ytInfo.formats.firstOrNull()
+                val alternateAudio = audioCandidates.firstOrNull { it.url != bestAudio?.url }
+                    ?: ytInfo.formats.firstOrNull { it.url != bestAudio?.url }
 
                 val host = validUrl.toHttpUrlOrNull()?.host.orEmpty()
                 val platformName = if (UrlClassifier.matchesDomain(host, "music.youtube.com")) {
@@ -462,13 +472,16 @@ class MusicDownloadManager(
                     platform = platformName,
                     sourceUrl = validUrl,
                     directAudioUrl = bestAudio?.url,
+                    fallbackAudioUrl = alternateAudio?.url,
                     containerExt = bestAudio?.container?.let { if (it == "webm") ".webm" else ".m4a" },
                     estimatedSizeBytes = bestAudio?.fileSize ?: 0L,
                     mediaSource = "$platformName Direct Stream",
                     isPreview = false,
                     durationSeconds = ytInfo.duration
                 )
-                trackInfoCache[cacheKey] = info
+                if (excludedClients.isEmpty()) {
+                    trackInfoCache[cacheKey] = info
+                }
                 return@withContext info
             }
         }
@@ -1775,10 +1788,11 @@ class MusicDownloadManager(
                 repository.update(activeItem)
             }
 
+            val isYouTubeTrack = VideoDownloadManager.isYouTubeUrl(lookupUrl)
             val candidateUrls = LinkedHashSet<String>().apply {
                 info?.directAudioUrl?.let { add(it) }
-                // Include non-preview fallback stream (e.g., SoundCloud HLS fallback if progressive stream fails)
-                if (info?.platform == "SoundCloud" || info?.isPreview == true) {
+                // Include non-preview fallback stream (SoundCloud HLS or alternate YouTube InnerTube client stream)
+                if (info?.platform == "SoundCloud" || info?.isPreview == true || isYouTubeTrack) {
                     info?.fallbackAudioUrl?.let { add(it) }
                 }
                 getInterceptedSoundCloudStream(lookupUrl)?.let { add(it) }
@@ -1795,11 +1809,11 @@ class MusicDownloadManager(
             }
 
             val tempRawFile = File(dir, ".tmp_music_${downloadItem.id}")
-            val tempRemuxedFile = File(dir, ".tmp_music_mux_${downloadItem.id}")
             try {
                 val vdm = VideoDownloadManager(context, repository)
                 var downloadedOk = false
                 var lastErr: Exception? = null
+                val failedClients = LinkedHashSet<String>()
 
                 for (attempt in 0..1) {
                     if (attempt == 1) {
@@ -1807,13 +1821,20 @@ class MusicDownloadManager(
                         val shouldReExtract = candidateUrls.isEmpty() ||
                             errMsg.contains("403") || errMsg.contains("401") || errMsg.contains("410") || errMsg.contains("416")
                         if (!shouldReExtract) break
-                        // Evict cached track info and re-extract fresh signed CDN URLs once if initial stream URL expired
+                        // Evict cached track info and re-extract fresh signed CDN URLs excluding failed clients
                         trackInfoCache.keys.filter { it.startsWith("$lookupUrl|") }.forEach { trackInfoCache.remove(it) }
                         YouTubeExtractor.invalidateCache(lookupUrl)
-                        val freshInfo = runCatching { extractMusicInfo(lookupUrl, formatHint, allowAlternate) }.getOrNull()
+                        val freshInfo = runCatching {
+                            extractMusicInfo(
+                                rawUrl = lookupUrl,
+                                preferredFormatCode = formatHint,
+                                allowAlternateSource = allowAlternate,
+                                excludedClients = failedClients
+                            )
+                        }.getOrNull()
                         candidateUrls.clear()
                         freshInfo?.directAudioUrl?.let { candidateUrls.add(it) }
-                        if (freshInfo?.platform == "SoundCloud" || freshInfo?.isPreview == true) {
+                        if (freshInfo?.platform == "SoundCloud" || freshInfo?.isPreview == true || isYouTubeTrack) {
                             freshInfo?.fallbackAudioUrl?.let { candidateUrls.add(it) }
                         }
                         if (candidateUrls.isEmpty()) break
@@ -1821,13 +1842,37 @@ class MusicDownloadManager(
 
                     for (streamUrl in candidateUrls) {
                         currentCoroutineContext().ensureActive()
+                        var activeAttemptUrl = streamUrl
                         try {
                             if (tempRawFile.exists()) tempRawFile.delete()
+                            val refreshCallback: (suspend () -> String?)? = if (isYouTubeTrack) {
+                                suspend {
+                                    YouTubeExtractor.extractClientNameFromUrl(activeAttemptUrl)?.let { failedClients.add(it) }
+                                    trackInfoCache.keys.filter { it.startsWith("$lookupUrl|") }.forEach { trackInfoCache.remove(it) }
+                                    YouTubeExtractor.invalidateCache(lookupUrl)
+                                    val fresh = runCatching {
+                                        extractMusicInfo(
+                                            rawUrl = lookupUrl,
+                                            preferredFormatCode = formatHint,
+                                            allowAlternateSource = allowAlternate,
+                                            excludedClients = failedClients
+                                        )
+                                    }.getOrNull()
+                                    val refreshedUrl = fresh?.directAudioUrl ?: fresh?.fallbackAudioUrl
+                                    if (!refreshedUrl.isNullOrBlank()) {
+                                        activeAttemptUrl = refreshedUrl
+                                    }
+                                    refreshedUrl
+                                }
+                            } else {
+                                null
+                            }
                             val streamOk = vdm.streamUrlToFile(
                                 downloadId = downloadItem.id,
                                 streamUrl = streamUrl,
                                 destFile = tempRawFile,
                                 expectedSize = info?.estimatedSizeBytes ?: 0L,
+                                onRefreshUrl = refreshCallback,
                                 onProgress = onProgress
                             )
                             if (streamOk && tempRawFile.exists() && tempRawFile.length() > 0L) {
@@ -1845,6 +1890,7 @@ class MusicDownloadManager(
                         } catch (ce: CancellationException) {
                             throw ce
                         } catch (e: Exception) {
+                            YouTubeExtractor.extractClientNameFromUrl(activeAttemptUrl)?.let { failedClients.add(it) }
                             lastErr = e
                             downloadedOk = false
                         }
@@ -1880,6 +1926,8 @@ class MusicDownloadManager(
                         val bestYtAudio = ytFallback.formats.filter { it.isAudioOnly }.maxByOrNull { it.audioBitrate ?: 0 }
                             ?: ytFallback.formats.firstOrNull()
                         if (bestYtAudio != null) {
+                            val altFailedClients = LinkedHashSet<String>()
+                            var activeAltUrl = bestYtAudio.url
                             try {
                                 if (tempRawFile.exists()) tempRawFile.delete()
                                 val ytOk = vdm.streamUrlToFile(
@@ -1887,6 +1935,20 @@ class MusicDownloadManager(
                                     streamUrl = bestYtAudio.url,
                                     destFile = tempRawFile,
                                     expectedSize = bestYtAudio.fileSize ?: 0L,
+                                    onRefreshUrl = {
+                                        YouTubeExtractor.extractClientNameFromUrl(activeAltUrl)?.let { altFailedClients.add(it) }
+                                        YouTubeExtractor.invalidateCache(ytFallback.url)
+                                        val refreshedYt = runCatching {
+                                            YouTubeExtractor(context).extract(
+                                                url = ytFallback.url,
+                                                forceRefresh = true,
+                                                excludedClients = altFailedClients
+                                            )
+                                        }.getOrNull()
+                                        val nextFormat = refreshedYt?.formats?.filter { it.isAudioOnly }?.maxByOrNull { it.audioBitrate ?: 0 }
+                                            ?: refreshedYt?.formats?.firstOrNull()
+                                        nextFormat?.url?.also { activeAltUrl = it }
+                                    },
                                     onProgress = onProgress
                                 )
                                 if (ytOk && tempRawFile.exists() && tempRawFile.length() > 0L) {
@@ -1959,7 +2021,6 @@ class MusicDownloadManager(
                 onComplete(completedItem)
             } finally {
                 tempRawFile.delete()
-                tempRemuxedFile.delete()
             }
         } catch (_: CancellationException) {
             // Paused or cancelled cleanly

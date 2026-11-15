@@ -26,6 +26,7 @@ import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
 import com.example.downloadmanager.model.DownloadType
 import com.example.downloadmanager.service.DownloadService
+import com.example.downloadmanager.utils.EdgeToEdgeHelper
 import com.example.downloadmanager.utils.MediaAssetHelper
 import kotlinx.coroutines.launch
 import java.io.File
@@ -61,10 +62,14 @@ class DownloadDetailActivity : AppCompatActivity() {
     }
     
     override fun onCreate(savedInstanceState: Bundle?) {
+        EdgeToEdgeHelper.enableWithDarkHeader(this)
         super.onCreate(savedInstanceState)
         
         binding = ActivityDownloadDetailBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        EdgeToEdgeHelper.applyTopHeaderInsets(binding.toolbar)
+        EdgeToEdgeHelper.applyScrollingBottomInsets(binding.scrollDetailContainer)
         
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
