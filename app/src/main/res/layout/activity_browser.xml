@@ -31,7 +31,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="4dp"
                 android:paddingHorizontal="4dp"
-                android:text="Smart Browser • Luca v21.0 (Build 21)"
+                android:text="Smart Browser • Luca v22.0 (Build 22)"
                 android:textColor="#38BDF8"
                 android:textSize="11sp"
                 android:textStyle="bold" />
@@ -132,7 +132,7 @@
                         android:backgroundTint="#1E293B"
                         android:paddingHorizontal="14dp"
                         android:paddingVertical="6dp"
-                        android:text="Luca v21.0 (Build 21)"
+                        android:text="Luca v22.0 (Build 22)"
                         android:textColor="#38BDF8"
                         android:textSize="12sp"
                         android:textStyle="bold" />
@@ -315,7 +315,7 @@
                 android:layout_weight="1"
                 android:ellipsize="end"
                 android:maxLines="1"
-                android:text="Luca v21.0 (Build 21) • Ready"
+                android:text="Luca v22.0 (Build 22) • Ready"
                 android:textColor="#94A3B8"
                 android:textSize="12sp" />
 

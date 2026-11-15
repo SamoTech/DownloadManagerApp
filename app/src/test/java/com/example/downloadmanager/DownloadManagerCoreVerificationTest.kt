@@ -1495,9 +1495,9 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun phase7_activeTorrentSelectedFile_compactAndDictTrackers_andDistinctStatuses() = runBlocking {
-        // 0. Verify Luca Version 21.0 (Build 21)
-        assertEquals("21.0", BuildConfig.VERSION_NAME)
-        assertEquals(21, BuildConfig.VERSION_CODE)
+        // 0. Verify Luca Version 22.0 (Build 22)
+        assertEquals("22.0", BuildConfig.VERSION_NAME)
+        assertEquals(22, BuildConfig.VERSION_CODE)
 
         val tempRoot = createTempDirectory("phase7_torrent_trace").toFile()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -2752,8 +2752,8 @@ class DownloadManagerCoreVerificationTest {
             assertTrue(MediaAssetHelper.hasVideoTrack(tailMoovMp4))
             assertEquals("H.264 • AAC 44.1kHz Stereo", MediaAssetHelper.inspectMediaCodecSummary(tailMoovMp4, isVideo = true))
 
-            assertEquals(21, BuildConfig.VERSION_CODE)
-            assertEquals("21.0", BuildConfig.VERSION_NAME)
+            assertEquals(22, BuildConfig.VERSION_CODE)
+            assertEquals("22.0", BuildConfig.VERSION_NAME)
         } finally {
             try { peerServer.close() } catch (_: Exception) {}
             server.stop(0)
@@ -3804,8 +3804,8 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun v21_youtubeChunkedResume_midStream403Refresh_progressivePreference_andHlsSegmentRetry() = runBlocking {
-        assertEquals(21, BuildConfig.VERSION_CODE)
-        assertEquals("21.0", BuildConfig.VERSION_NAME)
+        assertEquals(22, BuildConfig.VERSION_CODE)
+        assertEquals("22.0", BuildConfig.VERSION_NAME)
 
         // 1. Path-based client detection (/c/IOS/) for manifest.googlevideo.com HLS URLs
         val hlsIosUa = com.example.downloadmanager.utils.YouTubeExtractor.getUserAgentForStreamUrl(

@@ -23,7 +23,7 @@
             app:menu="@menu/menu_main"
             app:subtitle="@string/app_name"
             app:subtitleTextColor="#38BDF8"
-            app:title="Luca v21.0 (Build 21)"
+            app:title="Luca v22.0 (Build 22)"
             app:titleTextColor="@android:color/white" />
 
         <!-- Streamlined Hero Dashboard & One-Tap Action Card -->
@@ -203,7 +203,7 @@
                         android:id="@+id/tvAppVersion"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Luca v21.0 (Build 21)"
+                        android:text="Luca v22.0 (Build 22)"
                         android:textColor="#38BDF8"
                         android:textSize="10sp"
                         android:textStyle="bold" />
