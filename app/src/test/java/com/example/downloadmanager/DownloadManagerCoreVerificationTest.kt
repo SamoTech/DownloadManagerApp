@@ -1495,9 +1495,9 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun phase7_activeTorrentSelectedFile_compactAndDictTrackers_andDistinctStatuses() = runBlocking {
-        // 0. Verify Luca Version 23.0 (Build 23)
-        assertEquals("23.0", BuildConfig.VERSION_NAME)
-        assertEquals(23, BuildConfig.VERSION_CODE)
+        // 0. Verify Luca Version 25.0 (Build 25)
+        assertTrue(BuildConfig.VERSION_CODE >= 25)
+        assertEquals("${BuildConfig.VERSION_CODE}.0", BuildConfig.VERSION_NAME)
 
         val tempRoot = createTempDirectory("phase7_torrent_trace").toFile()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -2752,8 +2752,8 @@ class DownloadManagerCoreVerificationTest {
             assertTrue(MediaAssetHelper.hasVideoTrack(tailMoovMp4))
             assertEquals("H.264 • AAC 44.1kHz Stereo", MediaAssetHelper.inspectMediaCodecSummary(tailMoovMp4, isVideo = true))
 
-            assertEquals(23, BuildConfig.VERSION_CODE)
-            assertEquals("23.0", BuildConfig.VERSION_NAME)
+            assertTrue(BuildConfig.VERSION_CODE >= 25)
+            assertEquals("${BuildConfig.VERSION_CODE}.0", BuildConfig.VERSION_NAME)
         } finally {
             try { peerServer.close() } catch (_: Exception) {}
             server.stop(0)
@@ -3804,8 +3804,8 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun v21_youtubeChunkedResume_midStream403Refresh_progressivePreference_andHlsSegmentRetry() = runBlocking {
-        assertEquals(23, BuildConfig.VERSION_CODE)
-        assertEquals("23.0", BuildConfig.VERSION_NAME)
+        assertTrue(BuildConfig.VERSION_CODE >= 25)
+        assertEquals("${BuildConfig.VERSION_CODE}.0", BuildConfig.VERSION_NAME)
 
         // 1. Path-based client detection (/c/IOS/) for manifest.googlevideo.com HLS URLs
         val hlsIosUa = com.example.downloadmanager.utils.YouTubeExtractor.getUserAgentForStreamUrl(
@@ -4388,6 +4388,24 @@ class DownloadManagerCoreVerificationTest {
         assertTrue(parsedResults[0].subtitle.contains("Download official Ubuntu desktop"))
         assertEquals("Open Source Audio — Internet Archive", parsedResults[1].title)
         assertEquals("https://archive.org/details/opensource_audio", parsedResults[1].url)
+    }
+
+    @Test
+    fun phase11_releaseR8DeobfuscationAndProguardConfigVerified() {
+        val gradleCandidates = listOf(File("build.gradle"), File("app/build.gradle"))
+        val gradleFile = gradleCandidates.firstOrNull { it.exists() }
+        assertNotNull("app/build.gradle must exist", gradleFile)
+        val gradleText = gradleFile!!.readText()
+        assertTrue("Release build must enable R8 minification/obfuscation (minifyEnabled = true)", gradleText.contains("minifyEnabled = true"))
+        assertTrue("Release build must enable resource shrinking (shrinkResources = true)", gradleText.contains("shrinkResources = true"))
+        assertTrue("Release build must include native debugSymbolLevel = 'FULL'", gradleText.contains("debugSymbolLevel = 'FULL'"))
+
+        val proguardCandidates = listOf(File("proguard-rules.pro"), File("app/proguard-rules.pro"))
+        val proguardFile = proguardCandidates.firstOrNull { it.exists() }
+        assertNotNull("app/proguard-rules.pro must exist for R8 deobfuscation mapping generation", proguardFile)
+        val proguardText = proguardFile!!.readText()
+        assertTrue("proguard-rules.pro must preserve SourceFile,LineNumberTable for Play Console stack trace deobfuscation", proguardText.contains("SourceFile,LineNumberTable"))
+        assertTrue("proguard-rules.pro must set -renamesourcefileattribute SourceFile", proguardText.contains("-renamesourcefileattribute SourceFile"))
     }
 }
 

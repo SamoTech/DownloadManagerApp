@@ -10,8 +10,12 @@ android {
         applicationId = "com.samotech.Lucadownloadmanager"
         minSdk = 24
         targetSdk = 36
-        versionCode = 24
-        versionName = "24.0"
+        versionCode = 25
+        versionName = "25.0"
+
+        ndk {
+            debugSymbolLevel = 'FULL'
+        }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -39,7 +43,11 @@ android {
             if (System.getenv("KEYSTORE_PATH")) {
                 signingConfig = signingConfigs.release
             }
-            minifyEnabled = false
+            minifyEnabled = true
+            shrinkResources = true
+            ndk {
+                debugSymbolLevel = 'FULL'
+            }
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }

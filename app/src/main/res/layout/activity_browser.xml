@@ -31,7 +31,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="4dp"
                 android:paddingHorizontal="4dp"
-                android:text="Smart Browser • Luca v23.0 (Build 23)"
+                android:text="Smart Browser • Luca v25.0 (Build 25)"
                 android:textColor="#38BDF8"
                 android:textSize="11sp"
                 android:textStyle="bold" />
@@ -421,7 +421,7 @@
                         android:backgroundTint="#1E293B"
                         android:paddingHorizontal="14dp"
                         android:paddingVertical="6dp"
-                        android:text="Luca v23.0 (Build 23)"
+                        android:text="Luca v25.0 (Build 25)"
                         android:textColor="#38BDF8"
                         android:textSize="12sp"
                         android:textStyle="bold" />
