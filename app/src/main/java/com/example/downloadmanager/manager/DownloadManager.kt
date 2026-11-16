@@ -3,7 +3,6 @@ package com.example.downloadmanager.manager
 import android.app.Application
 import android.os.Environment
 import android.util.Log
-import android.webkit.CookieManager
 import android.webkit.MimeTypeMap
 import androidx.preference.PreferenceManager
 import com.example.downloadmanager.model.DownloadItem
@@ -66,6 +65,129 @@ class DownloadManager(
         private const val BUFFER_SIZE = 32 * 1024
         private const val DEFAULT_USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+
+        /**
+         * Normalizes shared cloud-storage viewer URLs (Google Drive, Dropbox, GitHub blob)
+         * into direct binary download URLs (`aria2` / `Fetch2` direct-link resolution pattern).
+         */
+        fun normalizeCloudDirectDownloadUrl(rawUrl: String): String {
+            val trimmed = rawUrl.trim()
+            val parsed = trimmed.toHttpUrlOrNull() ?: return trimmed
+            val host = parsed.host.lowercase(Locale.US)
+            val path = parsed.encodedPath
+
+            // 1. Google Drive shared file links: /file/d/<ID>/view or /open?id=<ID>
+            if (host == "drive.google.com" || host == "docs.google.com") {
+                val fileId = Regex("""/file/d/([a-zA-Z0-9_-]{10,})""").find(path)?.groupValues?.getOrNull(1)
+                    ?: if (path.startsWith("/open") || path.startsWith("/uc")) parsed.queryParameter("id") else null
+                if (!fileId.isNullOrBlank()) {
+                    return "https://drive.usercontent.google.com/download?id=$fileId&export=download&confirm=t"
+                }
+            }
+
+            // 2. Dropbox shared links: convert ?dl=0 to ?dl=1 so Dropbox serves raw file instead of HTML viewer
+            if (host == "www.dropbox.com" || host == "dropbox.com") {
+                if (path.startsWith("/s/") || path.startsWith("/scl/fi/")) {
+                    return parsed.newBuilder()
+                        .removeAllQueryParameters("dl")
+                        .addQueryParameter("dl", "1")
+                        .build()
+                        .toString()
+                }
+            }
+
+            // 3. GitHub repository blob links: /<owner>/<repo>/blob/<branch>/<path> -> raw.githubusercontent.com
+            if (host == "github.com") {
+                val segments = parsed.pathSegments.filter { it.isNotEmpty() }
+                if (segments.size >= 5 && segments[2] == "blob") {
+                    val owner = segments[0]
+                    val repo = segments[1]
+                    val refAndPath = segments.drop(3).joinToString("/")
+                    return "https://raw.githubusercontent.com/$owner/$repo/$refAndPath"
+                }
+            }
+
+            return trimmed
+        }
+
+        internal const val MIN_DYNAMIC_SPLIT_SIZE = 256 * 1024L
+
+        /**
+         * Dynamic segment state modeled on `ezoo-download` (`crates/engine/src/segments.rs`):
+         * - [start]: original start byte offset (inclusive)
+         * - [pos]: current next byte offset to write
+         * - [endExclusive]: exclusive end byte offset (can be shrunk in-place when a fast worker steals the second half)
+         * - [active]: whether a worker coroutine currently owns this segment
+         */
+        internal data class DynamicSegment(
+            val start: Long,
+            var pos: Long,
+            var endExclusive: Long,
+            var active: Boolean = false
+        ) {
+            fun remaining(): Long = (endExclusive - pos).coerceAtLeast(0L)
+            fun isFinished(): Boolean = pos >= endExclusive
+        }
+
+        internal fun planDynamicSegments(
+            totalSize: Long,
+            connections: Int,
+            minSegmentSize: Long = MIN_DYNAMIC_SPLIT_SIZE
+        ): MutableList<DynamicSegment> {
+            if (totalSize <= 0L) return mutableListOf()
+            val maxBySize = (totalSize / minSegmentSize.coerceAtLeast(1L)).toInt().coerceAtLeast(1)
+            val count = connections.coerceAtLeast(1).coerceAtMost(maxBySize)
+            val chunk = totalSize / count
+            val list = ArrayList<DynamicSegment>(count)
+            for (i in 0 until count) {
+                val start = i * chunk
+                val endExclusive = if (i == count - 1) totalSize else (i + 1) * chunk
+                list.add(DynamicSegment(start = start, pos = start, endExclusive = endExclusive, active = false))
+            }
+            return list
+        }
+
+        /**
+         * Claims an inactive unfinished segment, or dynamically splits the active segment with the
+         * largest remaining byte range (`rem >= minSplitSize * 2`) in half (`mid = pos + rem / 2`),
+         * shrinking the active worker's `endExclusive = mid` and returning the newly created second-half segment.
+         */
+        internal fun claimOrStealSegment(
+            segments: MutableList<DynamicSegment>,
+            minSplitSize: Long = MIN_DYNAMIC_SPLIT_SIZE
+        ): DynamicSegment? {
+            // 1. First claim any inactive unfinished segment
+            val inactive = segments.firstOrNull { !it.active && !it.isFinished() }
+            if (inactive != null) {
+                inactive.active = true
+                return inactive
+            }
+
+            // 2. Otherwise steal the second half of the largest remaining active segment (ezoo-download split_largest)
+            var bestIdx = -1
+            var bestRem = minSplitSize * 2L - 1L
+            for (i in segments.indices) {
+                val rem = segments[i].remaining()
+                if (rem > bestRem) {
+                    bestRem = rem
+                    bestIdx = i
+                }
+            }
+            if (bestIdx < 0) return null
+
+            val target = segments[bestIdx]
+            val mid = target.pos + (bestRem / 2L)
+            val oldEnd = target.endExclusive
+            target.endExclusive = mid
+            val stolen = DynamicSegment(
+                start = mid,
+                pos = mid,
+                endExclusive = oldEnd,
+                active = true
+            )
+            segments.add(stolen)
+            return stolen
+        }
     }
 
     /**
@@ -73,8 +195,9 @@ class DownloadManager(
      * so it shows up in MainActivity right away.
      */
     suspend fun startDownload(downloadItem: DownloadItem): Long {
+        val effectiveUrl = normalizeCloudDirectDownloadUrl(downloadItem.url)
         val cleanFilename = downloadItem.filename.trim().ifBlank {
-            getFilenameFromUrl(downloadItem.url)
+            getFilenameFromUrl(effectiveUrl)
         }
         val cleanSavePath = downloadItem.savePath.trim().ifBlank {
             getDefaultDownloadPath()
@@ -84,6 +207,7 @@ class DownloadManager(
         }
 
         val itemToInsert = downloadItem.copy(
+            url = effectiveUrl,
             filename = sanitizeFilename(cleanFilename),
             savePath = cleanSavePath,
             mimeType = mime,
@@ -116,12 +240,6 @@ class DownloadManager(
         val parsed = url.toHttpUrlOrNull()
         if (parsed != null) {
             reqBuilder.header("Referer", "${parsed.scheme}://${parsed.host}/")
-        }
-        runCatching {
-            val cookie = CookieManager.getInstance()?.getCookie(url)
-            if (!cookie.isNullOrBlank()) {
-                reqBuilder.header("Cookie", cookie)
-            }
         }
     }
 
@@ -267,6 +385,11 @@ class DownloadManager(
 
             val saveDir = File(activeItem.savePath)
             if (!saveDir.exists()) saveDir.mkdirs()
+
+            val normalizedDirectUrl = normalizeCloudDirectDownloadUrl(activeItem.url)
+            if (normalizedDirectUrl != activeItem.url) {
+                activeItem = activeItem.copy(url = normalizedDirectUrl)
+            }
 
             val probe = probeHttpResource(activeItem.url)
             val urlExtractedName = FilenameResolver.extractFilenameFromUrl(activeItem.url)
@@ -497,7 +620,8 @@ class DownloadManager(
         stagingFile: File,
         probedTotalSize: Long,
         onProgress: (Long, Long, Int, Long) -> Unit,
-        allow416Retry: Boolean = true
+        allow416Retry: Boolean = true,
+        resumeRetriesRemaining: Int = 3
     ): StreamTransferOutcome = coroutineScope {
         val rawExistingLen = if (stagingFile.exists() && stagingFile.isFile) stagingFile.length() else 0L
         val canResumePartial = item.isResumable && (
@@ -573,7 +697,8 @@ class DownloadManager(
                         stagingFile = stagingFile,
                         probedTotalSize = -1L,
                         onProgress = onProgress,
-                        allow416Retry = false
+                        allow416Retry = false,
+                        resumeRetriesRemaining = resumeRetriesRemaining
                     )
                 } else {
                     throw IOException("HTTP 416 Range Not Satisfiable")
@@ -587,6 +712,7 @@ class DownloadManager(
             val responseEtag = response.header("ETag")
             val responseLastMod = response.header("Last-Modified")
             val responseSha256 = extractSha256FromHeaders(response)
+            val responseAcceptRanges = response.header("Accept-Ranges")?.lowercase(Locale.US).orEmpty()
 
             var appendMode = false
             var startingOffset = 0L
@@ -626,7 +752,8 @@ class DownloadManager(
                         stagingFile = stagingFile,
                         probedTotalSize = -1L,
                         onProgress = onProgress,
-                        allow416Retry = false
+                        allow416Retry = false,
+                        resumeRetriesRemaining = resumeRetriesRemaining
                     )
                 }
 
@@ -655,7 +782,7 @@ class DownloadManager(
             val finalEtag = responseEtag ?: item.etag
             val finalLastMod = responseLastMod ?: item.lastModified
             val finalSha = responseSha256 ?: item.expectedSha256
-            val canResumeLater = (response.code == 206 || item.isResumable) &&
+            val canResumeLater = (response.code == 206 || item.isResumable || responseAcceptRanges.contains("bytes")) &&
                 (HttpRangeValidator.hasStrongValidator(finalEtag, finalLastMod) || !finalSha.isNullOrBlank())
 
             repository.updateResumeValidators(
@@ -673,60 +800,92 @@ class DownloadManager(
             var lastBytes = downloaded
             val windowStartMs = System.currentTimeMillis()
             var windowBytesRead = 0L
+            var streamReadException: IOException? = null
 
             stagingFile.parentFile?.mkdirs()
             body.byteStream().use { input ->
                 FileOutputStream(stagingFile, appendMode).use { output ->
                     val buffer = ByteArray(BUFFER_SIZE)
                     var read: Int
-                    while (input.read(buffer).also { read = it } != -1) {
-                        ensureActive()
-                        val currentStatus = repository.getDownloadById(item.id)?.status
-                        if (currentStatus == DownloadStatus.PAUSED || currentStatus == DownloadStatus.CANCELLED) {
-                            output.flush()
-                            runCatching { output.fd.sync() }
-                            throw CancellationException()
-                        }
+                    try {
+                        while (input.read(buffer).also { read = it } != -1) {
+                            ensureActive()
+                            val currentStatus = repository.getDownloadById(item.id)?.status
+                            if (currentStatus == DownloadStatus.PAUSED || currentStatus == DownloadStatus.CANCELLED) {
+                                output.flush()
+                                runCatching { output.fd.sync() }
+                                throw CancellationException()
+                            }
 
-                        downloaded += read
-                        windowBytesRead += read
-                        if (expectedTotalSize >= 0L && downloaded > expectedTotalSize) {
-                            throw IOException(
-                                "Response body exceeded declared Content-Length ($expectedTotalSize bytes)"
-                            )
-                        }
+                            downloaded += read
+                            windowBytesRead += read
+                            if (expectedTotalSize >= 0L && downloaded > expectedTotalSize) {
+                                throw IOException(
+                                    "Response body exceeded declared Content-Length ($expectedTotalSize bytes)"
+                                )
+                            }
 
-                        output.write(buffer, 0, read)
+                            output.write(buffer, 0, read)
 
-                        if (speedLimitBytesPerSec > 0L) {
-                            val expectedMs = (windowBytesRead * 1000L) / speedLimitBytesPerSec
-                            val actualMs = System.currentTimeMillis() - windowStartMs
-                            if (expectedMs > actualMs + 15L) {
-                                delay((expectedMs - actualMs).coerceAtMost(250L))
+                            if (speedLimitBytesPerSec > 0L) {
+                                val expectedMs = (windowBytesRead * 1000L) / speedLimitBytesPerSec
+                                val actualMs = System.currentTimeMillis() - windowStartMs
+                                if (expectedMs > actualMs + 15L) {
+                                    delay((expectedMs - actualMs).coerceAtMost(250L))
+                                }
+                            }
+
+                            val now = System.currentTimeMillis()
+                            val elapsed = now - lastUpdateTime
+                            if (elapsed >= 400) {
+                                val speed = if (elapsed > 0) ((downloaded - lastBytes) * 1000L) / elapsed else 0L
+                                val progress = if (expectedTotalSize > 0L) {
+                                    ((downloaded * 100L) / expectedTotalSize).toInt().coerceIn(0, 99)
+                                } else {
+                                    0
+                                }
+                                onProgress(downloaded, expectedTotalSize.coerceAtLeast(downloaded), progress, speed)
+                                lastUpdateTime = now
+                                lastBytes = downloaded
                             }
                         }
-
-                        val now = System.currentTimeMillis()
-                        val elapsed = now - lastUpdateTime
-                        if (elapsed >= 400) {
-                            val speed = if (elapsed > 0) ((downloaded - lastBytes) * 1000L) / elapsed else 0L
-                            val progress = if (expectedTotalSize > 0L) {
-                                ((downloaded * 100L) / expectedTotalSize).toInt().coerceIn(0, 99)
-                            } else {
-                                0
-                            }
-                            onProgress(downloaded, expectedTotalSize.coerceAtLeast(downloaded), progress, speed)
-                            lastUpdateTime = now
-                            lastBytes = downloaded
-                        }
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (ioe: IOException) {
+                        streamReadException = ioe
+                    } finally {
+                        output.flush()
+                        runCatching { output.fd.sync() }
                     }
-                    output.flush()
-                    runCatching { output.fd.sync() }
                 }
             }
 
-            if (expectedTotalSize >= 0L && downloaded != expectedTotalSize) {
-                throw IOException(
+            if (streamReadException != null || (expectedTotalSize >= 0L && downloaded != expectedTotalSize)) {
+                val exceededDeclared = expectedTotalSize >= 0L && downloaded > expectedTotalSize
+                if (!exceededDeclared &&
+                    canResumeLater &&
+                    resumeRetriesRemaining > 0 &&
+                    downloaded > startingOffset &&
+                    (expectedTotalSize < 0L || downloaded < expectedTotalSize)
+                ) {
+                    response.close()
+                    delay(200L * (4 - resumeRetriesRemaining))
+                    return@use downloadSingleStream(
+                        item = item.copy(
+                            downloadedSize = downloaded,
+                            etag = finalEtag,
+                            lastModified = finalLastMod,
+                            expectedSha256 = finalSha,
+                            isResumable = true
+                        ),
+                        stagingFile = stagingFile,
+                        probedTotalSize = expectedTotalSize,
+                        onProgress = onProgress,
+                        allow416Retry = allow416Retry,
+                        resumeRetriesRemaining = resumeRetriesRemaining - 1
+                    )
+                }
+                throw streamReadException ?: IOException(
                     "Truncated response body: expected $expectedTotalSize bytes, received $downloaded bytes"
                 )
             }
@@ -766,7 +925,8 @@ class DownloadManager(
         stagingFile.parentFile?.mkdirs()
         RandomAccessFile(stagingFile, "rw").use { it.setLength(totalSize) }
 
-        val partSize = totalSize / numParts
+        val segmentLock = Any()
+        val segments = planDynamicSegments(totalSize, numParts, MIN_DYNAMIC_SPLIT_SIZE)
         val totalDownloaded = AtomicLong(0L)
 
         val workerJob = SupervisorJob(coroutineContext[Job])
@@ -791,93 +951,161 @@ class DownloadManager(
 
         try {
             val workers = (0 until numParts).map { idx ->
-                val startByte = idx * partSize
-                val endByte = if (idx == numParts - 1) totalSize - 1 else (startByte + partSize - 1)
-                val expectedSegmentLen = endByte - startByte + 1L
-
                 workerScope.async(Dispatchers.IO) {
-                    val reqBuilder = Request.Builder()
-                        .url(item.url)
-                        .get()
-                        .header("Range", "bytes=$startByte-$endByte")
-                    applyDirectRequestHeaders(reqBuilder, item.url)
+                    while (isActive) {
+                        val seg = synchronized(segmentLock) {
+                            claimOrStealSegment(segments, MIN_DYNAMIC_SPLIT_SIZE)
+                        } ?: break
 
-                    val ifRange = HttpRangeValidator.selectIfRangeHeaderValue(item.etag, item.lastModified)
-                    if (ifRange != null) {
-                        reqBuilder.header("If-Range", ifRange)
-                    }
-
-                    okHttpClient.newCall(reqBuilder.build()).execute().use { response ->
-                        if (response.code == 200) {
-                            // Server ignored Range header and sent full entity body!
-                            throw RangeIgnoredFallbackException(
-                                "Segment $idx received HTTP 200 instead of 206 Partial Content"
-                            )
-                        }
-                        if (response.code != 206) {
-                            throw IOException("Segment $idx failed with HTTP ${response.code}")
-                        }
-
-                        if (HttpRangeValidator.hasStrongValidator(item.etag, item.lastModified)) {
-                            val segEtag = response.header("ETag")
-                            val segLastMod = response.header("Last-Modified")
-                            if ((segEtag != null || segLastMod != null) &&
-                                !HttpRangeValidator.isValidatorCompatible(
-                                    storedEtag = item.etag,
-                                    storedLastModified = item.lastModified,
-                                    responseEtag = segEtag ?: item.etag,
-                                    responseLastModified = segLastMod ?: item.lastModified
-                                )
-                            ) {
-                                throw RangeIgnoredFallbackException(
-                                    "Segment $idx entity validator mismatch during range combine"
-                                )
-                            }
-                        }
-
-                        // Strictly validate Content-Range and Content-Length before writing at offset
+                        var lastSegError: IOException? = null
                         try {
-                            HttpRangeValidator.validate206Range(
-                                contentRangeHeader = response.header("Content-Range"),
-                                contentLengthHeader = response.header("Content-Length")?.toLongOrNull() ?: -1L,
-                                expectedStart = startByte,
-                                expectedEndInclusive = endByte,
-                                expectedTotal = totalSize
-                            )
-                        } catch (e: Exception) {
-                            throw IOException("Segment $idx invalid Content-Range: ${e.message}", e)
-                        }
+                            for (attempt in 1..3) {
+                                val (reqStart, reqEndExclusive) = synchronized(segmentLock) {
+                                    seg.pos to seg.endExclusive
+                                }
+                                if (reqStart >= reqEndExclusive) break
+                                val endByte = reqEndExclusive - 1L
 
-                        val body = response.body ?: throw IOException("Empty segment $idx")
-                        var segmentBytesWritten = 0L
+                                val reqBuilder = Request.Builder()
+                                    .url(item.url)
+                                    .get()
+                                    .header("Range", "bytes=$reqStart-$endByte")
+                                applyDirectRequestHeaders(reqBuilder, item.url)
 
-                        RandomAccessFile(stagingFile, "rw").use { raf ->
-                            raf.seek(startByte)
-                            body.byteStream().use { input ->
-                                val buf = ByteArray(BUFFER_SIZE)
-                                var read: Int
-                                while (input.read(buf).also { read = it } != -1) {
-                                    ensureActive()
-                                    val st = repository.getDownloadById(item.id)?.status
-                                    if (st == DownloadStatus.PAUSED || st == DownloadStatus.CANCELLED) {
-                                        throw CancellationException()
+                                val ifRange = HttpRangeValidator.selectIfRangeHeaderValue(item.etag, item.lastModified)
+                                if (ifRange != null) {
+                                    reqBuilder.header("If-Range", ifRange)
+                                }
+
+                                var madeProgressThisAttempt = false
+                                try {
+                                    okHttpClient.newCall(reqBuilder.build()).execute().use { response ->
+                                        if (response.code == 200) {
+                                            // Server ignored Range header and sent full entity body!
+                                            throw RangeIgnoredFallbackException(
+                                                "Segment $idx received HTTP 200 instead of 206 Partial Content"
+                                            )
+                                        }
+                                        if (response.code != 206) {
+                                            throw IOException("Segment $idx failed with HTTP ${response.code}")
+                                        }
+
+                                        if (HttpRangeValidator.hasStrongValidator(item.etag, item.lastModified)) {
+                                            val segEtag = response.header("ETag")
+                                            val segLastMod = response.header("Last-Modified")
+                                            if ((segEtag != null || segLastMod != null) &&
+                                                !HttpRangeValidator.isValidatorCompatible(
+                                                    storedEtag = item.etag,
+                                                    storedLastModified = item.lastModified,
+                                                    responseEtag = segEtag ?: item.etag,
+                                                    responseLastModified = segLastMod ?: item.lastModified
+                                                )
+                                            ) {
+                                                throw RangeIgnoredFallbackException(
+                                                    "Segment $idx entity validator mismatch during range combine"
+                                                )
+                                            }
+                                        }
+
+                                        // Strictly validate Content-Range and Content-Length before writing at offset
+                                        try {
+                                            HttpRangeValidator.validate206Range(
+                                                contentRangeHeader = response.header("Content-Range"),
+                                                contentLengthHeader = response.header("Content-Length")?.toLongOrNull() ?: -1L,
+                                                expectedStart = reqStart,
+                                                expectedEndInclusive = endByte,
+                                                expectedTotal = totalSize
+                                            )
+                                        } catch (e: Exception) {
+                                            throw IOException("Segment $idx invalid Content-Range: ${e.message}", e)
+                                        }
+
+                                        val body = response.body ?: throw IOException("Empty segment $idx")
+                                        var reachedDynamicEnd = false
+
+                                        RandomAccessFile(stagingFile, "rw").use { raf ->
+                                            raf.seek(reqStart)
+                                            body.byteStream().use { input ->
+                                                val buf = ByteArray(BUFFER_SIZE)
+                                                var read: Int
+                                                while (input.read(buf).also { read = it } != -1) {
+                                                    ensureActive()
+                                                    val st = repository.getDownloadById(item.id)?.status
+                                                    if (st == DownloadStatus.PAUSED || st == DownloadStatus.CANCELLED) {
+                                                        throw CancellationException()
+                                                    }
+
+                                                    val (writePos, writeLen, hitStop) = synchronized(segmentLock) {
+                                                        val stop = minOf(seg.endExclusive, reqEndExclusive)
+                                                        val allowed = (stop - seg.pos).coerceAtLeast(0L)
+                                                        if (allowed <= 0L) {
+                                                            Triple(seg.pos, 0, true)
+                                                        } else {
+                                                            val toWrite = minOf(read.toLong(), allowed).toInt()
+                                                            val currentPos = seg.pos
+                                                            seg.pos += toWrite
+                                                            Triple(currentPos, toWrite, seg.pos >= stop)
+                                                        }
+                                                    }
+
+                                                    if (writeLen == 0 && read > 0 && !hitStop) {
+                                                        throw IOException("Segment $idx overflow beyond $reqEndExclusive")
+                                                    }
+                                                    if (writeLen < read && synchronized(segmentLock) { seg.endExclusive == reqEndExclusive }) {
+                                                        // Server sent more bytes than requested without a dynamic split occurring
+                                                        throw IOException(
+                                                            "Segment $idx overflow: received more than ${reqEndExclusive - reqStart} bytes"
+                                                        )
+                                                    }
+
+                                                    if (writeLen > 0) {
+                                                        raf.seek(writePos)
+                                                        raf.write(buf, 0, writeLen)
+                                                        madeProgressThisAttempt = true
+                                                        totalDownloaded.addAndGet(writeLen.toLong())
+                                                    }
+
+                                                    if (hitStop) {
+                                                        reachedDynamicEnd = true
+                                                        break
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        val finishedSeg = synchronized(segmentLock) { seg.pos >= seg.endExclusive }
+                                        if (!finishedSeg && !reachedDynamicEnd) {
+                                            val (curPos, curEnd) = synchronized(segmentLock) { seg.pos to seg.endExclusive }
+                                            throw IOException(
+                                                "Segment $idx truncated: expected ${curEnd - seg.start} bytes, got ${curPos - seg.start} bytes"
+                                            )
+                                        }
                                     }
-                                    if (segmentBytesWritten + read > expectedSegmentLen) {
-                                        throw IOException(
-                                            "Segment $idx overflow: received more than $expectedSegmentLen bytes"
-                                        )
+                                } catch (ce: CancellationException) {
+                                    throw ce
+                                } catch (rife: RangeIgnoredFallbackException) {
+                                    throw rife
+                                } catch (ioe: IOException) {
+                                    lastSegError = ioe
+                                    val overflowed = ioe.message?.contains("overflow") == true
+                                    if (overflowed || attempt >= 3 || (!madeProgressThisAttempt && attempt >= 2)) {
+                                        throw ioe
                                     }
-                                    raf.write(buf, 0, read)
-                                    segmentBytesWritten += read
-                                    totalDownloaded.addAndGet(read.toLong())
+                                    delay(200L * attempt)
                                 }
                             }
-                        }
 
-                        if (segmentBytesWritten != expectedSegmentLen) {
-                            throw IOException(
-                                "Segment $idx truncated: expected $expectedSegmentLen bytes, got $segmentBytesWritten bytes"
-                            )
+                            val segDone = synchronized(segmentLock) { seg.isFinished() }
+                            if (!segDone) {
+                                val (curPos, curEnd) = synchronized(segmentLock) { seg.pos to seg.endExclusive }
+                                throw lastSegError ?: IOException(
+                                    "Segment $idx incomplete: pos=$curPos, end=$curEnd"
+                                )
+                            }
+                        } finally {
+                            synchronized(segmentLock) {
+                                seg.active = false
+                            }
                         }
                     }
                 }

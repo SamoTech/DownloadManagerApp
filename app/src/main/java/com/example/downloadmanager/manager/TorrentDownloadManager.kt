@@ -2291,30 +2291,66 @@ class TorrentDownloadManager(
             addAll(initialCandidates)
         }
         val retriedPeers = ConcurrentHashMap.newKeySet<InetSocketAddress>()
+        val pieceAvailability = java.util.concurrent.atomic.AtomicIntegerArray(extMeta.pieceHashes.size)
 
         fun claimNextPieceForPeer(
             peerBitfield: BitSet,
             sawBitfieldOrHave: Boolean,
-            peerRejected: Set<Int>
+            peerRejected: Set<Int>,
+            allowedOnly: Set<Int>? = null
         ): Int? {
-            // 1. Prefer an unclaimed needed piece that the peer explicitly advertises (or any needed piece if peer sent no bitfield/HAVE yet)
-            for (p in neededPiecesList) {
-                if (p in completedPieces || p in inFlightPieces || p in peerRejected) continue
-                if (!sawBitfieldOrHave || peerBitfield.get(p)) {
-                    if (inFlightPieces.add(p)) return p
+            // 0. First/Last Piece Priority (`ezoo-download/crates/engine/src/bt.rs` `first_last` pattern):
+            // Prioritize the very first and very last needed pieces so container headers/trailers
+            // (e.g., MP4 `ftyp` and trailing `moov` atoms) arrive first for immediate inspection/preview.
+            if (sawBitfieldOrHave && neededPiecesList.isNotEmpty()) {
+                val boundaryCandidates = if (neededPiecesList.size > 1) {
+                    listOf(neededPiecesList.first(), neededPiecesList.last())
+                } else {
+                    listOf(neededPiecesList.first())
+                }
+                for (boundaryPiece in boundaryCandidates) {
+                    if (boundaryPiece in completedPieces || boundaryPiece in inFlightPieces || boundaryPiece in peerRejected) continue
+                    if (allowedOnly != null && boundaryPiece !in allowedOnly) continue
+                    if (peerBitfield.get(boundaryPiece) && inFlightPieces.add(boundaryPiece)) {
+                        return boundaryPiece
+                    }
+                }
+            }
+            // 1. Rarest-First Piece Picker (libtorrent / anacrolix pattern):
+            // Among unclaimed needed pieces held by this peer, pick the one with the lowest positive swarm availability
+            // (breaking ties sequentially for disk locality).
+            if (sawBitfieldOrHave) {
+                var bestPiece = -1
+                var bestAvail = Int.MAX_VALUE
+                for (p in neededPiecesList) {
+                    if (p in completedPieces || p in inFlightPieces || p in peerRejected) continue
+                    if (allowedOnly != null && p !in allowedOnly) continue
+                    if (peerBitfield.get(p)) {
+                        val avail = pieceAvailability.get(p).coerceAtLeast(1)
+                        if (avail < bestAvail) {
+                            bestAvail = avail
+                            bestPiece = p
+                            if (avail <= 1) break
+                        }
+                    }
+                }
+                if (bestPiece >= 0 && inFlightPieces.add(bestPiece)) {
+                    return bestPiece
                 }
             }
             // 2. Fallback ONLY if peer never sent BITFIELD / HAVE / HAVE_ALL / HAVE_NONE
-            if (!sawBitfieldOrHave) {
+            if (!sawBitfieldOrHave && allowedOnly == null) {
                 for (p in neededPiecesList) {
                     if (p in completedPieces || p in inFlightPieces || p in peerRejected) continue
                     if (inFlightPieces.add(p)) return p
                 }
             }
             // 3. Endgame mode: race an already in-flight piece that this peer actually possesses
-            for (p in neededPiecesList) {
-                if (p !in completedPieces && p !in peerRejected && (!sawBitfieldOrHave || peerBitfield.get(p))) {
-                    return p
+            if (allowedOnly == null) {
+                for (p in neededPiecesList) {
+                    if (p !in completedPieces && p !in peerRejected && (!sawBitfieldOrHave || peerBitfield.get(p))) {
+                        return p
+                    }
                 }
             }
             return null
@@ -2402,7 +2438,7 @@ class TorrentDownloadManager(
                                         val added = pexMap["added"] as? ByteArray
                                         if (added != null) {
                                             var idx = 0
-                                            while (idx + 6 <= added.size && seenPeers.size < 220) {
+                                            while (idx + 6 <= added.size && seenPeers.size < 350) {
                                                 val ip = added.copyOfRange(idx, idx + 4)
                                                 val p = ((added[idx + 4].toInt() and 0xFF) shl 8) or
                                                     (added[idx + 5].toInt() and 0xFF)
@@ -2420,7 +2456,7 @@ class TorrentDownloadManager(
                                         val added6 = pexMap["added6"] as? ByteArray
                                         if (added6 != null) {
                                             var idx = 0
-                                            while (idx + 18 <= added6.size && seenPeers.size < 220) {
+                                            while (idx + 18 <= added6.size && seenPeers.size < 350) {
                                                 val ip6 = added6.copyOfRange(idx, idx + 16)
                                                 val p = ((added6[idx + 16].toInt() and 0xFF) shl 8) or
                                                     (added6[idx + 17].toInt() and 0xFF)
@@ -2452,7 +2488,10 @@ class TorrentDownloadManager(
                                                     val haveIdx = inp.readInt()
                                                     sawBitfieldOrHave = true
                                                     if (haveIdx in 0 until extMeta.pieceHashes.size) {
-                                                        peerBitfield.set(haveIdx)
+                                                        if (!peerBitfield.get(haveIdx)) {
+                                                            peerBitfield.set(haveIdx)
+                                                            pieceAvailability.incrementAndGet(haveIdx)
+                                                        }
                                                     }
                                                     if (payloadLen > 4) skipFully(inp, payloadLen - 4)
                                                 } else if (payloadLen > 0) {
@@ -2467,14 +2506,22 @@ class TorrentDownloadManager(
                                                     val byteIdx = i / 8
                                                     val bitIdx = 7 - (i % 8)
                                                     if (byteIdx < bf.size && ((bf[byteIdx].toInt() shr bitIdx) and 1) == 1) {
-                                                        peerBitfield.set(i)
+                                                        if (!peerBitfield.get(i)) {
+                                                            peerBitfield.set(i)
+                                                            pieceAvailability.incrementAndGet(i)
+                                                        }
                                                     }
                                                 }
                                             }
                                             14 -> {
                                                 // BEP-6 Fast Extension HAVE_ALL
                                                 sawBitfieldOrHave = true
-                                                peerBitfield.set(0, extMeta.pieceHashes.size)
+                                                for (i in 0 until extMeta.pieceHashes.size) {
+                                                    if (!peerBitfield.get(i)) {
+                                                        peerBitfield.set(i)
+                                                        pieceAvailability.incrementAndGet(i)
+                                                    }
+                                                }
                                                 if (payloadLen > 0) skipFully(inp, payloadLen)
                                             }
                                             15 -> {
@@ -2518,7 +2565,7 @@ class TorrentDownloadManager(
                                                             val pexVal = (mMap?.get("ut_pex") as? Number)?.toInt()
                                                             if (pexVal != null && pexVal > 0) peerUtPexId = pexVal
                                                         }
-                                                    } else if ((extId == 2 || extId == peerUtPexId) && seenPeers.size < 220) {
+                                                    } else if ((extId == 2 || extId == peerUtPexId) && seenPeers.size < 350) {
                                                         runCatching {
                                                             val pexMap = SimpleBencodeDecoder(extBody).readValue() as? Map<*, *>
                                                             addDiscoveredPexPeers(pexMap)
@@ -2536,7 +2583,7 @@ class TorrentDownloadManager(
 
                                     var waitLoops = 0
                                     val waitStartMs = System.currentTimeMillis()
-                                    while (peerChoking && waitLoops < 256) {
+                                    while (peerChoking && peerAllowedFastPieces.isEmpty() && waitLoops < 256) {
                                         val allowedWaitMs = if (sawBitfieldOrHave || !peerBitfield.isEmpty) 10_000L else 5500L
                                         if (System.currentTimeMillis() - waitStartMs >= allowedWaitMs) break
                                         waitLoops++
@@ -2548,7 +2595,7 @@ class TorrentDownloadManager(
                                         handleControlMessage(msgId, len - 1)
                                     }
 
-                                    if (peerChoking) return@use
+                                    if (peerChoking && peerAllowedFastPieces.isEmpty()) return@use
                                     unchokedPeers.incrementAndGet()
 
                                     while (completedPieces.size < neededPiecesList.size) {
@@ -2563,7 +2610,7 @@ class TorrentDownloadManager(
                                             val msgId = inp.readUnsignedByte()
                                             handleControlMessage(msgId, len - 1)
                                         }
-                                        if (peerChoking) {
+                                        if (peerChoking && peerAllowedFastPieces.none { it !in completedPieces && it !in inFlightPieces && it !in peerRejectedPieces }) {
                                             // Wait briefly for peer to re-unchoke between pieces before dropping socket
                                             val chokeWaitEnd = System.currentTimeMillis() + 3500L
                                             socket.soTimeout = 1800
@@ -2579,10 +2626,11 @@ class TorrentDownloadManager(
                                             } finally {
                                                 runCatching { socket.soTimeout = 10000 }
                                             }
-                                            if (peerChoking) break
+                                            if (peerChoking && peerAllowedFastPieces.none { it !in completedPieces && it !in inFlightPieces && it !in peerRejectedPieces }) break
                                         }
 
-                                        val pieceIdx = claimNextPieceForPeer(peerBitfield, sawBitfieldOrHave, peerRejectedPieces) ?: break
+                                        val allowedFastFilter = if (peerChoking) peerAllowedFastPieces else null
+                                        val pieceIdx = claimNextPieceForPeer(peerBitfield, sawBitfieldOrHave, peerRejectedPieces, allowedFastFilter) ?: break
                                         try {
                                             if (pieceIdx in completedPieces) continue
                                             ensureActive()
@@ -3656,12 +3704,6 @@ class TorrentDownloadManager(
             val uri = URI(url)
             if (uri.scheme != null && uri.host != null) {
                 reqBuilder.header("Referer", "${uri.scheme}://${uri.host}/")
-            }
-        }
-        runCatching {
-            val cookie = android.webkit.CookieManager.getInstance().getCookie(url)
-            if (!cookie.isNullOrBlank()) {
-                reqBuilder.header("Cookie", cookie)
             }
         }
         val call = probeHttpClient.newCall(reqBuilder.build())

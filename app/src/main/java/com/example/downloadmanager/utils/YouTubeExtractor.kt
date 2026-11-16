@@ -9,13 +9,15 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
 
 /**
- * Real YouTube & YouTube Music stream extractor using InnerTube ANDROID_VR / iOS clients.
+ * Real YouTube & YouTube Music stream extractor using InnerTube ANDROID_VR / iOS / TV_EMBEDDED clients
+ * and player JS signatureCipher deobfuscation (`yt-dlp` / `NewPipeExtractor` pattern).
  * Extracts both progressive muxed MP4 streams (video + audio) and adaptive HD video / M4A & Opus audio streams.
  */
 class YouTubeExtractor(@Suppress("unused") private val context: Context? = null) {
@@ -53,11 +55,18 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
             "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version"
 
         private val cache = ConcurrentHashMap<String, Pair<Long, YouTubeVideoInfo>>()
+        private val playerJsCache = ConcurrentHashMap<String, String>()
         private const val CACHE_TTL_MS = 10 * 60 * 1000L // 10 minutes
 
         private val YOUTUBE_VIDEO_ID_PATTERN = Pattern.compile(
             "(?:(?:music\\.|www\\.|m\\.)?youtube\\.com/(?:[^/]+/.+/(?:shorts/)?|embed/|v/|shorts/|live/|watch\\?v=|watch\\?.+&v=)|youtu\\.be/)([a-zA-Z0-9_-]{11})"
         )
+
+        sealed class CipherOp {
+            object Reverse : CipherOp()
+            data class Splice(val count: Int) : CipherOp()
+            data class Swap(val index: Int) : CipherOp()
+        }
 
         fun invalidateCache(urlOrVideoId: String) {
             val trimmed = urlOrVideoId.trim()
@@ -110,6 +119,235 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
             val m = Regex("[?&]clen=(\\d+)").find(url)
             return m?.groupValues?.getOrNull(1)?.toLongOrNull()
         }
+
+        /**
+         * Resolves a format's direct URL from either `url`, `signatureCipher`, or `cipher`,
+         * applying YouTube player JS signature deobfuscation when an encrypted `s=` parameter is present.
+         */
+        internal fun resolveFormatStreamUrl(
+            fmtObj: JSONObject,
+            playerJsCodeProvider: () -> String? = { null }
+        ): String? {
+            fmtObj.optString("url")?.takeIf { it.startsWith("http") }?.let {
+                return cleanYouTubePlaybackUrl(it)
+            }
+
+            val rawCipher = fmtObj.optString("signatureCipher").orEmpty().ifBlank {
+                fmtObj.optString("cipher").orEmpty()
+            }.trim()
+            return resolveSignatureCipherUrl(rawCipher, playerJsCodeProvider)
+        }
+
+        internal fun resolveSignatureCipherUrl(
+            rawCipher: String,
+            playerJsCodeProvider: () -> String? = { null }
+        ): String? {
+            if (rawCipher.isBlank()) return null
+
+            var baseUrl: String? = null
+            var encryptedSig: String? = null
+            var plainSig: String? = null
+            var sigParamName = "sig"
+
+            for (part in rawCipher.split("&")) {
+                val eq = part.indexOf('=')
+                if (eq <= 0) continue
+                val key = part.substring(0, eq).trim()
+                val rawVal = part.substring(eq + 1)
+                val decodedVal = runCatching { URLDecoder.decode(rawVal, "UTF-8") }.getOrDefault(rawVal)
+                when (key) {
+                    "url" -> baseUrl = decodedVal
+                    "s" -> encryptedSig = decodedVal
+                    "sig", "lsig" -> {
+                        plainSig = decodedVal
+                        sigParamName = key
+                    }
+                    "sp" -> if (decodedVal.isNotBlank()) sigParamName = decodedVal
+                }
+            }
+
+            val validBase = baseUrl?.takeIf { it.startsWith("http") } ?: return null
+            if (!encryptedSig.isNullOrEmpty()) {
+                val jsCode = playerJsCodeProvider()
+                val deciphered = if (!jsCode.isNullOrBlank()) {
+                    decipherSignature(encryptedSig, jsCode)
+                } else {
+                    null
+                } ?: return null
+                val sep = if (validBase.contains("?")) "&" else "?"
+                val encodedSig = URLEncoder.encode(deciphered, "UTF-8")
+                return cleanYouTubePlaybackUrl("$validBase$sep$sigParamName=$encodedSig")
+            }
+
+            if (!plainSig.isNullOrEmpty() && !validBase.contains("$sigParamName=")) {
+                val sep = if (validBase.contains("?")) "&" else "?"
+                val encodedSig = URLEncoder.encode(plainSig, "UTF-8")
+                return cleanYouTubePlaybackUrl("$validBase$sep$sigParamName=$encodedSig")
+            }
+
+            return cleanYouTubePlaybackUrl(validBase)
+        }
+
+        /**
+         * Transient per-request piece/UMP parameters stripped by `ezoo-download` (`extension/yt-core.js`)
+         * so signed `googlevideo.com/videoplayback` URLs support full-file GET and standard `Range` requests.
+         */
+        private val YOUTUBE_PIECE_PARAMS = setOf("range", "rn", "rbuf", "ump", "srfvp", "alr")
+
+        /**
+         * Cleans a signed YouTube `videoplayback` URL following `ezoo-download` (`extension/yt-core.js`):
+         * - Rejects `sabr=1` (Server-Adaptive Bitrate POST-only streams that return empty body on GET)
+         * - Strips transient chunk parameters (`range`, `rn`, `rbuf`, `ump`, `srfvp`, `alr`) while preserving signature order
+         */
+        internal fun cleanYouTubePlaybackUrl(rawUrl: String): String? {
+            val trimmed = rawUrl.trim()
+            if (!trimmed.startsWith("http://", ignoreCase = true) &&
+                !trimmed.startsWith("https://", ignoreCase = true)
+            ) {
+                return null
+            }
+            if (!trimmed.contains("/videoplayback", ignoreCase = true) &&
+                !trimmed.contains("googlevideo.com", ignoreCase = true)
+            ) {
+                return trimmed
+            }
+            val qIdx = trimmed.indexOf('?')
+            if (qIdx < 0) return trimmed
+
+            val basePart = trimmed.substring(0, qIdx)
+            val queryPart = trimmed.substring(qIdx + 1)
+            val keptParams = ArrayList<String>()
+
+            for (param in queryPart.split("&")) {
+                if (param.isEmpty()) continue
+                val eq = param.indexOf('=')
+                val key = (if (eq >= 0) param.substring(0, eq) else param).lowercase()
+                val value = if (eq >= 0) param.substring(eq + 1) else ""
+                if (key == "sabr" && value == "1") {
+                    return null
+                }
+                if (key in YOUTUBE_PIECE_PARAMS) {
+                    continue
+                }
+                keptParams.add(param)
+            }
+            return if (keptParams.isEmpty()) basePart else "$basePart?${keptParams.joinToString("&")}"
+        }
+
+        /**
+         * Ranks YouTube audio tracks so original-language tracks outrank auto-translated dubbed or descriptive tracks,
+         * modeled after `ezoo-download` (`extension/yt-core.js` `trackRank` and `crates/engine/src/ytdlp.rs` `audio_rank`):
+         * - `2`: Original audio track (`acont=original` in `xtags` or `"original"` in `audioTrack`)
+         * - `1`: Standard/default audio track
+         * - `0`: Dubbed or descriptive audio track (`acont=dubbed`, `acont=descriptive`)
+         */
+        internal fun rankAudioTrackQuality(
+            xtags: String?,
+            audioTrackDisplayName: String? = null,
+            audioTrackId: String? = null,
+            isAudioTrackDefault: Boolean = false
+        ): Int {
+            val combined = buildString {
+                if (!xtags.isNullOrBlank()) append(xtags).append(';')
+                if (!audioTrackDisplayName.isNullOrBlank()) append(audioTrackDisplayName).append(';')
+                if (!audioTrackId.isNullOrBlank()) append(audioTrackId)
+            }.lowercase()
+
+            if (combined.contains("acont=original") || combined.contains("original")) {
+                return 2
+            }
+            if (combined.contains("acont=dubbed") ||
+                combined.contains("dubbed") ||
+                combined.contains("acont=descriptive") ||
+                combined.contains("descriptive")
+            ) {
+                return 0
+            }
+            return if (isAudioTrackDefault) 2 else 1
+        }
+
+        /**
+         * Parses and executes YouTube's player.js (`base.js`) signature cipher operations
+         * (`reverse`, `splice`, `swap`) following `yt-dlp` / `NewPipeExtractor` pattern.
+         */
+        internal fun decipherSignature(cipheredSig: String, playerJsCode: String): String? {
+            val ops = parseCipherOperationsFromPlayerJs(playerJsCode)
+            if (ops.isEmpty()) return null
+            val chars = cipheredSig.toMutableList()
+            for (op in ops) {
+                when (op) {
+                    is CipherOp.Reverse -> chars.reverse()
+                    is CipherOp.Splice -> {
+                        val removeCount = op.count.coerceIn(0, chars.size)
+                        repeat(removeCount) { chars.removeAt(0) }
+                    }
+                    is CipherOp.Swap -> {
+                        if (chars.isNotEmpty() && op.index >= 0) {
+                            val swapPos = op.index % chars.size
+                            val tmp = chars[0]
+                            chars[0] = chars[swapPos]
+                            chars[swapPos] = tmp
+                        }
+                    }
+                }
+            }
+            return chars.joinToString("")
+        }
+
+        internal fun parseCipherOperationsFromPlayerJs(playerJsCode: String): List<CipherOp> {
+            if (playerJsCode.isBlank()) return emptyList()
+            val funcBodyMatch = Regex(
+                """function(?:\s+[a-zA-Z0-9_$]+)?\(([a-zA-Z0-9_$]+)\)\{\1=\1\.split\((?:""|'')\);((?:[a-zA-Z0-9_$]+(?:\.[a-zA-Z0-9_$]+|\["[^"]+"\]|\['[^']+'\])\(\1(?:,\d+)?\);)+)return \1\.join\((?:""|'')\)\}"""
+            ).find(playerJsCode) ?: return emptyList()
+
+            val callsBlock = funcBodyMatch.groupValues[2]
+            val firstObjMatch = Regex("""([a-zA-Z0-9_$]+)(?:\.[a-zA-Z0-9_$]+|\["[^"]+"\]|\['[^']+'\])""").find(callsBlock)
+                ?: return emptyList()
+            val helperObjName = Regex.escape(firstObjMatch.groupValues[1])
+
+            val objDefMatch = Regex(
+                """var\s+$helperObjName\s*=\s*\{(.*?)\};""",
+                RegexOption.DOT_MATCHES_ALL
+            ).find(playerJsCode) ?: return emptyList()
+            val objBody = objDefMatch.groupValues[1]
+
+            val methodTypes = HashMap<String, String>()
+            val methodEntryRegex = Regex(
+                """([a-zA-Z0-9_$]+)\s*:\s*function\([a-zA-Z0-9_$,\s]*\)\{([^}]*)\}"""
+            )
+            for (m in methodEntryRegex.findAll(objBody)) {
+                val mName = m.groupValues[1]
+                val mCode = m.groupValues[2]
+                when {
+                    mCode.contains(".reverse(") -> methodTypes[mName] = "reverse"
+                    mCode.contains(".splice(") -> methodTypes[mName] = "splice"
+                    mCode.contains("%") -> methodTypes[mName] = "swap"
+                }
+            }
+            if (methodTypes.isEmpty()) return emptyList()
+
+            val operations = mutableListOf<CipherOp>()
+            val callRegex = Regex(
+                """(?:[a-zA-Z0-9_$]+)(?:\.([a-zA-Z0-9_$]+)|\["([^"]+)"\]|\['([^']+)'\])\([a-zA-Z0-9_$]+(?:,(\d+))?\)"""
+            )
+            for (call in callRegex.findAll(callsBlock)) {
+                val mName = call.groupValues[1].ifEmpty {
+                    call.groupValues[2].ifEmpty { call.groupValues[3] }
+                }
+                val arg = call.groupValues[4].toIntOrNull() ?: 0
+                when (methodTypes[mName]) {
+                    "reverse" -> operations.add(CipherOp.Reverse)
+                    "splice" -> operations.add(CipherOp.Splice(arg))
+                    "swap" -> operations.add(CipherOp.Swap(arg))
+                }
+            }
+            return operations
+        }
+
+        internal fun extractSignatureTimestamp(jsOrHtml: String): Int? {
+            val m = Regex("""["']?(?:signatureTimestamp|sts|STS)["']?\s*[:=]\s*(\d{5})""").find(jsOrHtml)
+            return m?.groupValues?.getOrNull(1)?.toIntOrNull()
+        }
     }
 
     data class YouTubeVideoInfo(
@@ -146,6 +384,12 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
         val formats: List<VideoFormat>,
         val playabilityReason: String? = null,
         val clientNameUsed: String? = null
+    )
+
+    private data class EmbedPageContext(
+        val visitorData: String?,
+        val playerJsUrl: String?,
+        val signatureTimestamp: Int?
     )
 
     fun extract(
@@ -287,7 +531,7 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
         return null
     }
 
-    private fun fetchVisitorData(videoId: String): String? {
+    private fun fetchEmbedPageContext(videoId: String): EmbedPageContext {
         return try {
             val req = Request.Builder()
                 .url("https://www.youtube.com/embed/$videoId")
@@ -295,9 +539,37 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                 .header("Cookie", "SOCS=CAI; PREF=hl=en&gl=US")
                 .build()
             okHttpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return null
+                if (!resp.isSuccessful) return EmbedPageContext(null, null, null)
                 val html = resp.body?.string().orEmpty()
-                Regex(""""VISITOR_DATA"\s*:\s*"([^"]+)"""").find(html)?.groupValues?.getOrNull(1)
+                val visitor = Regex(""""VISITOR_DATA"\s*:\s*"([^"]+)"""").find(html)?.groupValues?.getOrNull(1)
+                val jsPath = Regex(""""jsUrl"\s*:\s*"([^"]+/base\.js)"""").find(html)?.groupValues?.getOrNull(1)
+                    ?: Regex("""(/s/player/[a-zA-Z0-9_-]+/[^"'\s]+/base\.js)""").find(html)?.groupValues?.getOrNull(1)
+                val fullJsUrl = jsPath?.replace("\\/", "/")?.let {
+                    if (it.startsWith("http")) it else "https://www.youtube.com$it"
+                }
+                val stsFromHtml = extractSignatureTimestamp(html)
+                EmbedPageContext(visitor, fullJsUrl, stsFromHtml)
+            }
+        } catch (_: Exception) {
+            EmbedPageContext(null, null, null)
+        }
+    }
+
+    private fun fetchPlayerJsCode(playerJsUrl: String?): String? {
+        val url = playerJsUrl?.takeIf { it.startsWith("http") } ?: return null
+        playerJsCache[url]?.let { return it }
+        return try {
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", DEFAULT_MOBILE_USER_AGENT)
+                .build()
+            okHttpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val code = resp.body?.string().orEmpty()
+                if (code.isNotEmpty()) {
+                    playerJsCache[url] = code
+                }
+                code.ifEmpty { null }
             }
         } catch (_: Exception) {
             null
@@ -323,16 +595,39 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
         val allFormats = mutableListOf<VideoFormat>()
         val workingClients = LinkedHashSet<String>()
         var lastPlayabilityReason: String? = null
-        var visitorData: String? = fetchVisitorData(videoId)
+        var embedCtx = fetchEmbedPageContext(videoId)
+        var visitorData: String? = embedCtx.visitorData
+
+        val lazyPlayerJs: () -> String? = {
+            fetchPlayerJsCode(embedCtx.playerJsUrl)
+        }
 
         for ((index, spec) in clients.withIndex()) {
             val (clientName, clientVersion, userAgent, clientIdHeader) = spec
             try {
                 if (index > 0 && visitorData == null) {
-                    visitorData = fetchVisitorData(videoId)
+                    embedCtx = fetchEmbedPageContext(videoId)
+                    visitorData = embedCtx.visitorData
                 }
                 val visitorField = if (!visitorData.isNullOrBlank()) {
                     """, "visitorData": "$visitorData""""
+                } else {
+                    ""
+                }
+                val isEmbeddedClient = clientName == "TVHTML5_SIMPLY_EMBEDDED_PLAYER" ||
+                    clientName == "WEB_EMBEDDED_PLAYER"
+                val stsValue = if (isEmbeddedClient) {
+                    embedCtx.signatureTimestamp ?: lazyPlayerJs()?.let { extractSignatureTimestamp(it) }
+                } else {
+                    null
+                }
+                val playbackContextField = if (stsValue != null) {
+                    """,
+                          "playbackContext": {
+                            "contentPlaybackContext": {
+                              "signatureTimestamp": $stsValue
+                            }
+                          }"""
                 } else {
                     ""
                 }
@@ -372,7 +667,7 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                             "thirdParty": {
                               "embedUrl": "https://www.youtube.com/"
                             }
-                          }
+                          }$playbackContextField
                         }
                     """.trimIndent()
                     "WEB_EMBEDDED_PLAYER" -> """
@@ -390,7 +685,7 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                             "thirdParty": {
                               "embedUrl": "https://www.youtube.com/"
                             }
-                          }
+                          }$playbackContextField
                         }
                     """.trimIndent()
                     "ANDROID" -> """
@@ -459,7 +754,7 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                     if (bodyStr.isEmpty()) return@use
 
                     val root = JSONObject(bodyStr)
-                    val parsed = parsePlayerJson(videoId, clientName, root, allFormats)
+                    val parsed = parsePlayerJson(videoId, clientName, root, allFormats, lazyPlayerJs)
                     if (extractedVideoInfo == null && parsed.videoInfo != null) {
                         extractedVideoInfo = parsed.videoInfo
                     }
@@ -489,7 +784,7 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
 
         // Last-resort HTML player response fallback if all InnerTube POST clients failed
         if (allFormats.isEmpty()) {
-            val watchFallback = fetchWatchPagePlayerResponse(videoId, allFormats)
+            val watchFallback = fetchWatchPagePlayerResponse(videoId, allFormats, lazyPlayerJs)
             if (extractedVideoInfo == null && watchFallback.videoInfo != null) {
                 extractedVideoInfo = watchFallback.videoInfo
             }
@@ -519,7 +814,8 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
         videoId: String,
         clientName: String,
         root: JSONObject,
-        allFormats: MutableList<VideoFormat>
+        allFormats: MutableList<VideoFormat>,
+        playerJsCodeProvider: () -> String? = { null }
     ): ParsedPlayerOutcome {
         val startCount = allFormats.size
         var parsedVideoInfo: VideoInfo? = null
@@ -566,7 +862,7 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
         if (muxedArray != null) {
             for (i in 0 until muxedArray.length()) {
                 val fmtObj = muxedArray.optJSONObject(i) ?: continue
-                val directUrl = fmtObj.optString("url").takeIf { it.startsWith("http") } ?: continue
+                val directUrl = resolveFormatStreamUrl(fmtObj, playerJsCodeProvider) ?: continue
                 if (allFormats.any { it.url == directUrl }) continue
                 val itag = fmtObj.optInt("itag", 18)
                 val mime = fmtObj.optString("mimeType", "video/mp4")
@@ -604,9 +900,22 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
         // 2. Adaptive formats (high-res video tracks and dedicated M4A/Opus audio tracks)
         val adaptiveArray = streamingData.optJSONArray("adaptiveFormats")
         if (adaptiveArray != null) {
-            for (i in 0 until adaptiveArray.length()) {
-                val fmtObj = adaptiveArray.optJSONObject(i) ?: continue
-                val directUrl = fmtObj.optString("url").takeIf { it.startsWith("http") } ?: continue
+            // Sort adaptive formats so original-language audio tracks (`acont=original`) are processed before dubbed tracks (`ezoo-download` pattern)
+            val orderedAdaptive = (0 until adaptiveArray.length())
+                .mapNotNull { adaptiveArray.optJSONObject(it) }
+                .sortedByDescending { fmtObj ->
+                    val audioTrackObj = fmtObj.optJSONObject("audioTrack")
+                    val xtags = fmtObj.optString("xtags").takeIf { it.isNotBlank() }
+                        ?: Regex("[?&]xtags=([^&]+)").find(fmtObj.optString("url"))?.groupValues?.getOrNull(1)
+                    rankAudioTrackQuality(
+                        xtags = xtags,
+                        audioTrackDisplayName = audioTrackObj?.optString("displayName"),
+                        audioTrackId = audioTrackObj?.optString("id"),
+                        isAudioTrackDefault = audioTrackObj?.optBoolean("audioIsDefault", false) == true
+                    )
+                }
+            for (fmtObj in orderedAdaptive) {
+                val directUrl = resolveFormatStreamUrl(fmtObj, playerJsCodeProvider) ?: continue
                 if (allFormats.any { it.url == directUrl }) continue
                 val itag = fmtObj.optInt("itag", 0)
                 val mime = fmtObj.optString("mimeType", "")
@@ -723,7 +1032,8 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
 
     private fun fetchWatchPagePlayerResponse(
         videoId: String,
-        allFormats: MutableList<VideoFormat>
+        allFormats: MutableList<VideoFormat>,
+        fallbackPlayerJsProvider: () -> String? = { null }
     ): ParsedPlayerOutcome {
         return try {
             val watchUrl = "https://www.youtube.com/watch?v=$videoId&bpctr=9999999999&has_verified=1"
@@ -737,8 +1047,15 @@ class YouTubeExtractor(@Suppress("unused") private val context: Context? = null)
                 if (!resp.isSuccessful) return ParsedPlayerOutcome(null, 0, null)
                 val html = resp.body?.string().orEmpty()
                 val jsonText = extractBalancedJsonObject(html, "ytInitialPlayerResponse") ?: return ParsedPlayerOutcome(null, 0, null)
+                val watchJsPath = Regex(""""jsUrl"\s*:\s*"([^"]+/base\.js)"""").find(html)?.groupValues?.getOrNull(1)
+                    ?: Regex("""(/s/player/[a-zA-Z0-9_-]+/[^"'\s]+/base\.js)""").find(html)?.groupValues?.getOrNull(1)
+                val fullWatchJsUrl = watchJsPath?.replace("\\/", "/")?.let {
+                    if (it.startsWith("http")) it else "https://www.youtube.com$it"
+                }
                 val root = JSONObject(jsonText)
-                parsePlayerJson(videoId, "WEB", root, allFormats)
+                parsePlayerJson(videoId, "WEB", root, allFormats) {
+                    fetchPlayerJsCode(fullWatchJsUrl) ?: fallbackPlayerJsProvider()
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Watch page player fallback failed: ${e.message}")

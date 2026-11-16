@@ -2,7 +2,6 @@ package com.example.downloadmanager.manager
 
 import android.app.Application
 import android.util.Log
-import android.webkit.CookieManager
 import androidx.preference.PreferenceManager
 import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
@@ -364,122 +363,233 @@ class VideoDownloadManager(
     }
 
     private fun extractTikTokVideoInfo(url: String): VideoStreamInfo? {
-        if (!isThirdPartyResolverEnabled()) {
-            return null
-        }
         return try {
             val resolvedUrl = if (url.toHttpUrlOrNull()?.host?.let {
                     UrlClassifier.matchesAnyDomain(it, "vm.tiktok.com", "vt.tiktok.com")
                 } == true
             ) {
-                resolveRedirectUrl(url, "tiktok.com") ?: return null
+                resolveRedirectUrl(url, "tiktok.com") ?: url
             } else {
                 url
             }
 
-            val encoded = URLEncoder.encode(resolvedUrl, "UTF-8")
-            val apiUrl = "https://www.tikwm.com/api/?url=$encoded&hd=1"
-            val req = Request.Builder()
-                .url(apiUrl)
-                .header("User-Agent", DESKTOP_USER_AGENT)
-                .header("Accept", "application/json")
-                .build()
+            if (isThirdPartyResolverEnabled()) {
+                val encoded = URLEncoder.encode(resolvedUrl, "UTF-8")
+                val apiUrl = "https://www.tikwm.com/api/?url=$encoded&hd=1"
+                val req = Request.Builder()
+                    .url(apiUrl)
+                    .header("User-Agent", DESKTOP_USER_AGENT)
+                    .header("Accept", "application/json")
+                    .build()
 
-            okHttpClient.newCall(req).execute().use { resp ->
-                if (resp.isSuccessful) {
-                    val body = resp.body?.string().orEmpty()
-                    if (body.isNotEmpty()) {
-                        val json = JSONObject(body)
-                        val data = json.optJSONObject("data")
-                        if (json.optInt("code", -1) == 0 && data != null) {
-                            val id = data.optString("id", "tiktok_${System.currentTimeMillis()}")
-                            val rawTitle = data.optString("title").trim()
-                            val authorObj = data.optJSONObject("author")
-                            val author = authorObj?.optString("nickname")?.ifBlank {
-                                authorObj.optString("unique_id", "TikTok")
-                            } ?: "TikTok"
-                            val title = rawTitle.ifBlank { "TikTok_${author}_$id" }
-                            val durationSec = data.optLong("duration", 0L)
-                            val cover = data.optString("cover").takeIf { it.startsWith("http") }
+                runCatching {
+                    okHttpClient.newCall(req).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            val body = resp.body?.string().orEmpty()
+                            if (body.isNotEmpty()) {
+                                val json = JSONObject(body)
+                                val data = json.optJSONObject("data")
+                                if (json.optInt("code", -1) == 0 && data != null) {
+                                    val id = data.optString("id", "tiktok_${System.currentTimeMillis()}")
+                                    val rawTitle = data.optString("title").trim()
+                                    val authorObj = data.optJSONObject("author")
+                                    val author = authorObj?.optString("nickname")?.ifBlank {
+                                        authorObj.optString("unique_id", "TikTok")
+                                    } ?: "TikTok"
+                                    val title = rawTitle.ifBlank { "TikTok_${author}_$id" }
+                                    val durationSec = data.optLong("duration", 0L)
+                                    val cover = data.optString("cover").takeIf { it.startsWith("http") }
 
-                            val formats = mutableListOf<VideoFormat>()
-                            val hdPlay = resolveTikwmUrl(data.optString("hdplay"))
-                            val sdPlay = resolveTikwmUrl(data.optString("play"))
-                            val wmPlay = resolveTikwmUrl(data.optString("wmplay"))
-                            val musicUrl = resolveTikwmUrl(data.optString("music"))
-                            val hdSize = data.optLong("hd_size", 0L)
-                            val sdSize = data.optLong("size", 0L)
-                            val wmSize = data.optLong("wm_size", 0L)
+                                    val formats = mutableListOf<VideoFormat>()
+                                    val hdPlay = resolveTikwmUrl(data.optString("hdplay"))
+                                    val sdPlay = resolveTikwmUrl(data.optString("play"))
+                                    val wmPlay = resolveTikwmUrl(data.optString("wmplay"))
+                                    val musicUrl = resolveTikwmUrl(data.optString("music"))
+                                    val hdSize = data.optLong("hd_size", 0L)
+                                    val sdSize = data.optLong("size", 0L)
+                                    val wmSize = data.optLong("wm_size", 0L)
 
-                            if (hdPlay != null) {
-                                formats.add(
-                                    VideoFormat(
-                                        formatId = "muxed_tiktok_hd",
-                                        url = hdPlay,
-                                        quality = "1080p HD (No Watermark)",
-                                        container = "mp4",
-                                        fileSize = hdSize.takeIf { it > 0L },
-                                        isAudioOnly = false
-                                    )
-                                )
-                            }
-                            if (sdPlay != null && sdPlay != hdPlay) {
-                                formats.add(
-                                    VideoFormat(
-                                        formatId = "muxed_tiktok_sd",
-                                        url = sdPlay,
-                                        quality = "720p (No Watermark)",
-                                        container = "mp4",
-                                        fileSize = sdSize.takeIf { it > 0L },
-                                        isAudioOnly = false
-                                    )
-                                )
-                            }
-                            if (wmPlay != null && wmPlay != sdPlay) {
-                                formats.add(
-                                    VideoFormat(
-                                        formatId = "muxed_tiktok_wm",
-                                        url = wmPlay,
-                                        quality = "540p (Watermarked)",
-                                        container = "mp4",
-                                        fileSize = wmSize.takeIf { it > 0L },
-                                        isAudioOnly = false
-                                    )
-                                )
-                            }
-                            if (musicUrl != null) {
-                                formats.add(
-                                    VideoFormat(
-                                        formatId = "audio_tiktok_mp3",
-                                        url = musicUrl,
-                                        quality = "Original Sound MP3",
-                                        container = "mp3",
-                                        isAudioOnly = true,
-                                        audioBitrate = 192
-                                    )
-                                )
-                            }
+                                    if (hdPlay != null) {
+                                        formats.add(
+                                            VideoFormat(
+                                                formatId = "muxed_tiktok_hd",
+                                                url = hdPlay,
+                                                quality = "1080p HD (No Watermark)",
+                                                container = "mp4",
+                                                fileSize = hdSize.takeIf { it > 0L },
+                                                isAudioOnly = false
+                                            )
+                                        )
+                                    }
+                                    if (sdPlay != null && sdPlay != hdPlay) {
+                                        formats.add(
+                                            VideoFormat(
+                                                formatId = "muxed_tiktok_sd",
+                                                url = sdPlay,
+                                                quality = "720p (No Watermark)",
+                                                container = "mp4",
+                                                fileSize = sdSize.takeIf { it > 0L },
+                                                isAudioOnly = false
+                                            )
+                                        )
+                                    }
+                                    if (wmPlay != null && wmPlay != sdPlay) {
+                                        formats.add(
+                                            VideoFormat(
+                                                formatId = "muxed_tiktok_wm",
+                                                url = wmPlay,
+                                                quality = "540p (Watermarked)",
+                                                container = "mp4",
+                                                fileSize = wmSize.takeIf { it > 0L },
+                                                isAudioOnly = false
+                                            )
+                                        )
+                                    }
+                                    if (musicUrl != null) {
+                                        formats.add(
+                                            VideoFormat(
+                                                formatId = "audio_tiktok_mp3",
+                                                url = musicUrl,
+                                                quality = "Original Sound MP3",
+                                                container = "mp3",
+                                                isAudioOnly = true,
+                                                audioBitrate = 192
+                                            )
+                                        )
+                                    }
 
-                            if (formats.isNotEmpty()) {
-                                return VideoStreamInfo(
-                                    video = VideoInfo(
-                                        id = id,
-                                        title = title,
-                                        url = resolvedUrl,
-                                        thumbnailUrl = cover,
-                                        duration = durationSec * 1000L,
-                                        author = author
-                                    ),
-                                    formats = formats
-                                )
+                                    if (formats.isNotEmpty()) {
+                                        return VideoStreamInfo(
+                                            video = VideoInfo(
+                                                id = id,
+                                                title = title,
+                                                url = resolvedUrl,
+                                                thumbnailUrl = cover,
+                                                duration = durationSec * 1000L,
+                                                author = author
+                                            ),
+                                            formats = formats
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
-            null
+
+            // First-party TikTok webpage hydration fallback (__UNIVERSAL_DATA_FOR_REHYDRATION__ / SIGI_STATE)
+            extractTikTokFirstPartyHydration(resolvedUrl)
         } catch (e: Exception) {
             Log.w(TAG, "TikTok extraction error: ${e.message}")
+            null
+        }
+    }
+
+    private fun extractTikTokFirstPartyHydration(resolvedUrl: String): VideoStreamInfo? {
+        return try {
+            val req = Request.Builder()
+                .url(resolvedUrl)
+                .header("User-Agent", DESKTOP_USER_AGENT)
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .build()
+            okHttpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val html = resp.body?.string().orEmpty()
+                if (html.isEmpty()) return null
+
+                val universalMatch = Regex(
+                    """<script[^>]*id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>""",
+                    setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
+                ).find(html)?.groupValues?.getOrNull(1)
+
+                val itemStruct = if (!universalMatch.isNullOrBlank()) {
+                    val root = JSONObject(universalMatch)
+                    root.optJSONObject("__DEFAULT_SCOPE__")
+                        ?.optJSONObject("webapp.video-detail")
+                        ?.optJSONObject("itemInfo")
+                        ?.optJSONObject("itemStruct")
+                } else {
+                    val sigiMatch = Regex(
+                        """<script[^>]*id="SIGI_STATE"[^>]*>(.*?)</script>""",
+                        setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
+                    ).find(html)?.groupValues?.getOrNull(1)
+                    if (!sigiMatch.isNullOrBlank()) {
+                        val sigiRoot = JSONObject(sigiMatch)
+                        val itemModule = sigiRoot.optJSONObject("ItemModule")
+                        val firstKey = itemModule?.keys()?.asSequence()?.firstOrNull()
+                        if (firstKey != null) itemModule.optJSONObject(firstKey) else null
+                    } else null
+                } ?: return null
+
+                val id = itemStruct.optString("id", "tiktok_${System.currentTimeMillis()}")
+                val desc = itemStruct.optString("desc").trim()
+                val authorObj = itemStruct.optJSONObject("author")
+                val author = authorObj?.optString("nickname")?.ifBlank {
+                    authorObj.optString("uniqueId", "TikTok")
+                } ?: "TikTok"
+                val title = desc.ifBlank { "TikTok_${author}_$id" }
+                val videoObj = itemStruct.optJSONObject("video") ?: return null
+                val durationSec = videoObj.optLong("duration", 0L)
+                val cover = videoObj.optString("cover").takeIf { it.startsWith("http") }
+
+                val formats = mutableListOf<VideoFormat>()
+                val playAddr = videoObj.optString("playAddr").replace("\\u002F", "/").takeIf { it.startsWith("http") }
+                val downloadAddr = videoObj.optString("downloadAddr").replace("\\u002F", "/").takeIf { it.startsWith("http") }
+                val musicUrl = itemStruct.optJSONObject("music")?.optString("playUrl")
+                    ?.replace("\\u002F", "/")
+                    ?.takeIf { it.startsWith("http") }
+
+                if (playAddr != null) {
+                    formats.add(
+                        VideoFormat(
+                            formatId = "muxed_tiktok_direct",
+                            url = playAddr,
+                            quality = "${videoObj.optInt("height", 720)}p MP4",
+                            container = "mp4",
+                            isAudioOnly = false
+                        )
+                    )
+                }
+                if (downloadAddr != null && downloadAddr != playAddr) {
+                    formats.add(
+                        VideoFormat(
+                            formatId = "muxed_tiktok_download",
+                            url = downloadAddr,
+                            quality = "Download MP4",
+                            container = "mp4",
+                            isAudioOnly = false
+                        )
+                    )
+                }
+                if (musicUrl != null) {
+                    formats.add(
+                        VideoFormat(
+                            formatId = "audio_tiktok_mp3",
+                            url = musicUrl,
+                            quality = "Original Sound MP3",
+                            container = "mp3",
+                            isAudioOnly = true,
+                            audioBitrate = 192
+                        )
+                    )
+                }
+
+                if (formats.isEmpty()) return null
+                VideoStreamInfo(
+                    video = VideoInfo(
+                        id = id,
+                        title = title,
+                        url = resolvedUrl,
+                        thumbnailUrl = cover,
+                        duration = durationSec * 1000L,
+                        author = author
+                    ),
+                    formats = formats
+                )
+            }
+        } catch (_: Exception) {
             null
         }
     }
@@ -965,47 +1075,61 @@ class VideoDownloadManager(
                 if (redditVideo != null) {
                     val fallbackUrl = redditVideo.optString("fallback_url").substringBefore("?").takeIf { it.startsWith("http") }
                     val hlsUrl = redditVideo.optString("hls_url").takeIf { it.startsWith("http") }
-                    if (fallbackUrl != null) {
-                        val baseVUrl = fallbackUrl.substringBeforeLast("/")
-                        formats.add(
-                            VideoFormat(
-                                formatId = "adaptive_reddit_hd",
-                                url = fallbackUrl,
-                                quality = "${redditVideo.optInt("height", 720)}p MP4",
-                                container = "mp4",
-                                isAudioOnly = false
-                            )
-                        )
-                        formats.add(
-                            VideoFormat(
-                                formatId = "muxed_reddit_fallback",
-                                url = fallbackUrl,
-                                quality = "Direct MP4",
-                                container = "mp4",
-                                isAudioOnly = false
-                            )
-                        )
-                        formats.add(
-                            VideoFormat(
-                                formatId = "audio_reddit_128",
-                                url = "$baseVUrl/DASH_AUDIO_128.mp4",
-                                quality = "128kbps M4A Audio",
-                                container = "m4a",
-                                isAudioOnly = true,
-                                audioBitrate = 128
-                            )
-                        )
-                    }
-                    if (hlsUrl != null) {
+                    val isGif = redditVideo.optBoolean("is_gif", false)
+                    if (hlsUrl != null && !isGif) {
                         formats.add(
                             VideoFormat(
                                 formatId = "muxed_reddit_hls",
                                 url = hlsUrl,
-                                quality = "HLS Stream",
+                                quality = "${redditVideo.optInt("height", 720)}p HLS (With Audio)",
                                 container = "mp4",
                                 isAudioOnly = false
                             )
                         )
+                    }
+                    if (fallbackUrl != null) {
+                        val baseVUrl = fallbackUrl.substringBeforeLast("/")
+                        if (isGif) {
+                            formats.add(
+                                VideoFormat(
+                                    formatId = "muxed_reddit_gif",
+                                    url = fallbackUrl,
+                                    quality = "${redditVideo.optInt("height", 720)}p MP4",
+                                    container = "mp4",
+                                    isAudioOnly = false
+                                )
+                            )
+                        } else {
+                            formats.add(
+                                VideoFormat(
+                                    formatId = "adaptive_reddit_hd",
+                                    url = fallbackUrl,
+                                    quality = "${redditVideo.optInt("height", 720)}p MP4",
+                                    container = "mp4",
+                                    isAudioOnly = false
+                                )
+                            )
+                            formats.add(
+                                VideoFormat(
+                                    formatId = "audio_reddit_128",
+                                    url = "$baseVUrl/DASH_AUDIO_128.mp4",
+                                    quality = "128kbps M4A Audio",
+                                    container = "m4a",
+                                    isAudioOnly = true,
+                                    audioBitrate = 128
+                                )
+                            )
+                            formats.add(
+                                VideoFormat(
+                                    formatId = "audio_reddit_legacy",
+                                    url = "$baseVUrl/DASH_audio.mp4",
+                                    quality = "Legacy M4A Audio",
+                                    container = "m4a",
+                                    isAudioOnly = true,
+                                    audioBitrate = 96
+                                )
+                            )
+                        }
                     }
                 }
 
@@ -2260,12 +2384,6 @@ class VideoDownloadManager(
         }
         if (host.contains("sndcdn.com") || host.contains("soundcloud.com")) {
             reqBuilder.header("Origin", "https://soundcloud.com")
-        }
-        runCatching {
-            val cookie = CookieManager.getInstance()?.getCookie(url)
-            if (!cookie.isNullOrBlank()) {
-                reqBuilder.header("Cookie", cookie)
-            }
         }
     }
 

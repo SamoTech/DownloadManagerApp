@@ -1495,9 +1495,9 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun phase7_activeTorrentSelectedFile_compactAndDictTrackers_andDistinctStatuses() = runBlocking {
-        // 0. Verify Luca Version 22.0 (Build 22)
-        assertEquals("22.0", BuildConfig.VERSION_NAME)
-        assertEquals(22, BuildConfig.VERSION_CODE)
+        // 0. Verify Luca Version 23.0 (Build 23)
+        assertEquals("23.0", BuildConfig.VERSION_NAME)
+        assertEquals(23, BuildConfig.VERSION_CODE)
 
         val tempRoot = createTempDirectory("phase7_torrent_trace").toFile()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -2752,8 +2752,8 @@ class DownloadManagerCoreVerificationTest {
             assertTrue(MediaAssetHelper.hasVideoTrack(tailMoovMp4))
             assertEquals("H.264 • AAC 44.1kHz Stereo", MediaAssetHelper.inspectMediaCodecSummary(tailMoovMp4, isVideo = true))
 
-            assertEquals(22, BuildConfig.VERSION_CODE)
-            assertEquals("22.0", BuildConfig.VERSION_NAME)
+            assertEquals(23, BuildConfig.VERSION_CODE)
+            assertEquals("23.0", BuildConfig.VERSION_NAME)
         } finally {
             try { peerServer.close() } catch (_: Exception) {}
             server.stop(0)
@@ -3804,8 +3804,8 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun v21_youtubeChunkedResume_midStream403Refresh_progressivePreference_andHlsSegmentRetry() = runBlocking {
-        assertEquals(22, BuildConfig.VERSION_CODE)
-        assertEquals("22.0", BuildConfig.VERSION_NAME)
+        assertEquals(23, BuildConfig.VERSION_CODE)
+        assertEquals("23.0", BuildConfig.VERSION_NAME)
 
         // 1. Path-based client detection (/c/IOS/) for manifest.googlevideo.com HLS URLs
         val hlsIosUa = com.example.downloadmanager.utils.YouTubeExtractor.getUserAgentForStreamUrl(
@@ -4127,4 +4127,198 @@ class DownloadManagerCoreVerificationTest {
             tempRoot.deleteRecursively()
         }
     }
+
+    @Test
+    fun phase8_youtubeExtractor_deciphersSignatureCipherAndExtractsSts() {
+        // Sample player.js snippet modeled after yt-dlp / NewPipeExtractor cipher patterns:
+        // 1. splice(0, 2) -> drops first 2 chars
+        // 2. reverse()    -> reverses string
+        // 3. swap(0, 3)   -> swaps index 0 and index 3 % len
+        val samplePlayerJs = """
+            var sts=20045;
+            var Go={
+                aB:function(a,b){a.splice(0,b)},
+                cD:function(a){a.reverse()},
+                eF:function(a,b){var c=a[0];a[0]=a[b%a.length];a[b%a.length]=c}
+            };
+            var decipher=function(a){a=a.split("");Go.aB(a,2);Go.cD(a);Go.eF(a,3);return a.join("")};
+        """.trimIndent()
+
+        assertEquals(20045, YouTubeExtractor.extractSignatureTimestamp(samplePlayerJs))
+
+        // Trace "XY123456":
+        // splice(0,2) -> "123456"
+        // reverse()   -> "654321"
+        // swap(0,3)   -> '6' at [0] swapped with '3' at [3] -> "354621"
+        val deciphered = YouTubeExtractor.decipherSignature("XY123456", samplePlayerJs)
+        assertEquals("354621", deciphered)
+
+        val resolvedUrl = YouTubeExtractor.resolveSignatureCipherUrl(
+            "s=XY123456&sp=sig&url=https%3A%2F%2Frr1---sn-test.googlevideo.com%2Fvideoplayback%3Fitag%3D18"
+        ) { samplePlayerJs }
+        assertNotNull(resolvedUrl)
+        assertTrue(resolvedUrl!!.startsWith("https://rr1---sn-test.googlevideo.com/videoplayback?itag=18"))
+        assertTrue("Deciphered signature must be appended under sp=sig", resolvedUrl.contains("sig=354621"))
+    }
+
+    @Test
+    fun phase8_directHttpEngine_normalizesCloudShareUrlsAndAutoResumesMidStreamDrops() = runBlocking {
+        // 1. Verify cloud share URL normalization (Google Drive, Dropbox, GitHub blob)
+        assertEquals(
+            "https://drive.usercontent.google.com/download?id=1AbCdEfGhIjKlMnOpQrStUvWxYz&export=download&confirm=t",
+            DownloadManager.normalizeCloudDirectDownloadUrl(
+                "https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/view?usp=sharing"
+            )
+        )
+        assertEquals(
+            "https://www.dropbox.com/s/abc123xyz/archive.zip?dl=1",
+            DownloadManager.normalizeCloudDirectDownloadUrl(
+                "https://www.dropbox.com/s/abc123xyz/archive.zip?dl=0"
+            )
+        )
+        assertEquals(
+            "https://raw.githubusercontent.com/owner/repo/main/releases/app.apk",
+            DownloadManager.normalizeCloudDirectDownloadUrl(
+                "https://github.com/owner/repo/blob/main/releases/app.apk"
+            )
+        )
+
+        // 2. Verify mid-stream socket drop auto-resume in DownloadManager
+        val tempRoot = createTempDirectory("phase8_http_autoresume").toFile()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        try {
+            server.executor = Executors.newCachedThreadPool()
+            val payload = ByteArray(120_000) { idx -> ((idx * 31 + 7) % 251).toByte() }
+            val requestCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+            server.createContext("/flaky.bin") { ex ->
+                val attempt = requestCount.incrementAndGet()
+                val rangeHeader = ex.requestHeaders.getFirst("Range")
+                ex.responseHeaders.add("Accept-Ranges", "bytes")
+                ex.responseHeaders.add("ETag", "\"v22-etag\"")
+                if (attempt == 1 && rangeHeader == null) {
+                    // First request: advertise full 120_000 bytes, but drop connection after 50_000 bytes
+                    ex.sendResponseHeaders(200, payload.size.toLong())
+                    ex.responseBody.use { out ->
+                        out.write(payload, 0, 50_000)
+                        out.flush()
+                    }
+                } else if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
+                    val start = rangeHeader.removePrefix("bytes=").substringBefore("-").toInt()
+                    val rem = payload.size - start
+                    ex.responseHeaders.add("Content-Range", "bytes $start-${payload.size - 1}/${payload.size}")
+                    ex.sendResponseHeaders(206, rem.toLong())
+                    ex.responseBody.use { out ->
+                        out.write(payload, start, rem)
+                        out.flush()
+                    }
+                } else {
+                    ex.sendResponseHeaders(200, payload.size.toLong())
+                    ex.responseBody.use { out ->
+                        out.write(payload)
+                    }
+                }
+            }
+            server.start()
+            val port = server.address.port
+
+            val dao = InMemoryDownloadDao()
+            val repo = DownloadRepository(dao)
+            val dm = DownloadManager(null, repo)
+
+            val itemId = repo.insert(
+                DownloadItem(
+                    url = "http://127.0.0.1:$port/flaky.bin",
+                    filename = "flaky.bin",
+                    savePath = tempRoot.absolutePath,
+                    downloadType = DownloadType.DIRECT,
+                    status = DownloadStatus.QUEUED
+                )
+            )
+            val item = repo.getDownloadById(itemId)!!
+            var completedItem: DownloadItem? = null
+            var errorMsg: String? = null
+            dm.executeDownloadJob(
+                downloadItem = item,
+                onProgress = { _, _, _, _ -> },
+                onComplete = { completedItem = it },
+                onError = { _, err -> errorMsg = err }
+            )
+
+            assertNull("Expected auto-resume to recover without error, but got: $errorMsg", errorMsg)
+            assertNotNull("Download should complete after automatic Range resume", completedItem)
+            assertTrue("Server should have received initial request + Range resume request", requestCount.get() >= 2)
+            val finalFile = File(tempRoot, "flaky.bin")
+            assertTrue(finalFile.exists())
+            assertArrayEquals(payload, finalFile.readBytes())
+        } finally {
+            runCatching { server.stop(0) }
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun phase9_ezooDownloadEngineTechniques_workStealingUrlCleaningAudioRankingAndGrabber() {
+        // 1. Dynamic Segment Work-Stealing (`ezoo-download/crates/engine/src/segments.rs`)
+        val segments = DownloadManager.planDynamicSegments(
+            totalSize = 2_000_000L,
+            connections = 2,
+            minSegmentSize = 256 * 1024L
+        )
+        assertEquals(2, segments.size)
+
+        // Worker 0 and Worker 1 claim initial segments [0..1_000_000) and [1_000_000..2_000_000)
+        val firstClaim = DownloadManager.claimOrStealSegment(segments, 256 * 1024L)
+        val secondClaim = DownloadManager.claimOrStealSegment(segments, 256 * 1024L)
+        assertNotNull(firstClaim)
+        assertNotNull(secondClaim)
+        assertEquals(0L, firstClaim!!.start)
+        assertEquals(1_000_000L, firstClaim.endExclusive)
+        assertEquals(1_000_000L, secondClaim!!.start)
+        assertEquals(2_000_000L, secondClaim.endExclusive)
+
+        // Suppose Worker 0 finishes its segment [0..1_000_000) rapidly while Worker 1 is still at 1_200_000 (800 KB remaining)
+        firstClaim.pos = firstClaim.endExclusive
+        firstClaim.active = false
+        secondClaim.pos = 1_200_000L
+
+        // Worker 0 calls claimOrStealSegment -> steals the second half of Worker 1's remaining 800 KB!
+        val stolen = DownloadManager.claimOrStealSegment(segments, 256 * 1024L)
+        assertNotNull("Idle worker should dynamically split and steal the second half of the slow active segment", stolen)
+        assertEquals("Slow segment's endExclusive must be shrunk in-place to the midpoint", 1_600_000L, secondClaim.endExclusive)
+        assertEquals("Stolen segment must start at the midpoint", 1_600_000L, stolen!!.start)
+        assertEquals("Stolen segment must end at the original end", 2_000_000L, stolen.endExclusive)
+        assertTrue(stolen.active)
+
+        // 2. YouTube Playback URL Cleaning (`ezoo-download/extension/yt-core.js`)
+        val dirtyYtUrl =
+            "https://rr2---sn-abc.googlevideo.com/videoplayback?itag=140&clen=4194304&range=0-65535&rn=3&rbuf=0&ump=1&srfvp=1&alr=yes&sig=XYZ123"
+        val cleanedYtUrl = YouTubeExtractor.cleanYouTubePlaybackUrl(dirtyYtUrl)
+        assertEquals(
+            "https://rr2---sn-abc.googlevideo.com/videoplayback?itag=140&clen=4194304&sig=XYZ123",
+            cleanedYtUrl
+        )
+        val sabrOnlyUrl =
+            "https://rr2---sn-abc.googlevideo.com/videoplayback?itag=251&sabr=1&sig=XYZ123"
+        assertNull("sabr=1 POST-only URL must be rejected for direct GET download", YouTubeExtractor.cleanYouTubePlaybackUrl(sabrOnlyUrl))
+
+        // 3. Original vs. Dubbed Audio Track Ranking (`ezoo-download/crates/engine/src/ytdlp.rs` & `yt-core.js`)
+        assertEquals(2, YouTubeExtractor.rankAudioTrackQuality(xtags = "acont=original:lang=en"))
+        assertEquals(1, YouTubeExtractor.rankAudioTrackQuality(xtags = null, audioTrackDisplayName = "English"))
+        assertEquals(0, YouTubeExtractor.rankAudioTrackQuality(xtags = "acont=dubbed-auto:lang=es"))
+        assertEquals(0, YouTubeExtractor.rankAudioTrackQuality(xtags = null, audioTrackDisplayName = "Spanish (Descriptive)"))
+
+        // 4. Inline Script / Escaped JSON URL Grabber (`ezoo-download/crates/engine/src/grabber.rs`)
+        val sampleHtmlWithScript = """
+            <html><head><script>
+            window.__INITIAL_STATE__ = {"videoUrl":"https:\/\/cdn.example.org\/streams\/clip_1080p.mp4?token\u003dabc\u0026exp\u003d999"};
+            </script></head></html>
+        """.trimIndent()
+        val scriptUrls = com.example.downloadmanager.activity.BrowserActivity.extractInlineScriptUrls(sampleHtmlWithScript)
+        assertTrue(
+            "Escaped JSON script URL should be unescaped and extracted",
+            scriptUrls.contains("https://cdn.example.org/streams/clip_1080p.mp4?token=abc&exp=999")
+        )
+    }
 }
+

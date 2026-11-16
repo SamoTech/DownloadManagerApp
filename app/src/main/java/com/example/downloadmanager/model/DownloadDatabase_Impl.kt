@@ -11,7 +11,10 @@ import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.execSQL
 import kotlin.reflect.KClass
 
+import android.annotation.SuppressLint
+
 @Suppress("UNCHECKED_CAST", "DEPRECATION", "REDUNDANT_PROJECTION", "REMOVAL")
+@SuppressLint("RestrictedApi")
 public class DownloadDatabase_Impl : DownloadDatabase() {
     private val _downloadDao: Lazy<DownloadDao> = lazy {
         DownloadDao_Impl(this)

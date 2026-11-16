@@ -11,7 +11,10 @@ import androidx.sqlite.SQLiteStatement
 import java.util.Date
 import kotlin.reflect.KClass
 
+import android.annotation.SuppressLint
+
 @Suppress("UNCHECKED_CAST", "DEPRECATION", "REDUNDANT_PROJECTION", "REMOVAL")
+@SuppressLint("RestrictedApi")
 public class DownloadDao_Impl(
     private val __db: RoomDatabase,
 ) : DownloadDao {
