@@ -40,6 +40,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.ByteArrayOutputStream
 import java.net.URLDecoder
+import java.net.URLEncoder
 import java.util.Collections
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -52,10 +53,11 @@ class BrowserActivity : AppCompatActivity() {
     private lateinit var videoDownloadManager: VideoDownloadManager
 
     private val detectedLinks = Collections.synchronizedList(mutableListOf<DetectedLinkItem>())
+    private val pageNavigationLinks = Collections.synchronizedList(mutableListOf<DetectedLinkItem>())
     @Volatile
-    private var currentUrl: String = ""
+    private var currentUrl: String = DEFAULT_HOME_URL
     @Volatile
-    private var currentPageTitle: String = ""
+    private var currentPageTitle: String = "DuckDuckGo"
     private var lastScannedUrl: String = ""
     private var activeScanJob: Job? = null
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -76,10 +78,14 @@ class BrowserActivity : AppCompatActivity() {
         val title: String,
         val url: String,
         val downloadType: DownloadType,
-        val badgeLabel: String
+        val badgeLabel: String,
+        val isNavigablePage: Boolean = false,
+        val subtitle: String = ""
     )
 
     companion object {
+        const val DEFAULT_HOME_URL = "https://duckduckgo.com"
+        const val DUCKDUCKGO_HTML_SEARCH_BASE = "https://html.duckduckgo.com/html/?q="
         private val AUDIO_EXTENSIONS = setOf(
             "mp3", "flac", "m4a", "wav", "ogg", "aac", "opus", "wma"
         )
@@ -391,6 +397,305 @@ class BrowserActivity : AppCompatActivity() {
             }
             return urls.toList()
         }
+
+        /**
+         * Determines whether [rawInput] looks like a direct domain/URL (e.g. `duckduckgo.com`, `youtube.com/watch?v=...`,
+         * `192.168.1.1:8080/file.zip`) rather than a free-text search query.
+         */
+        internal fun looksLikeDomainOrUrl(rawInput: String): Boolean {
+            val trimmed = rawInput.trim()
+            if (trimmed.isEmpty() || trimmed.any { it.isWhitespace() }) return false
+            if (trimmed.startsWith("http://", ignoreCase = true) ||
+                trimmed.startsWith("https://", ignoreCase = true) ||
+                trimmed.startsWith("magnet:", ignoreCase = true)
+            ) {
+                return true
+            }
+            val hostCandidate = trimmed.substringBefore('/').substringBefore('?').substringBefore('#')
+            if (hostCandidate.equals("localhost", ignoreCase = true) ||
+                hostCandidate.startsWith("localhost:", ignoreCase = true)
+            ) {
+                return true
+            }
+            val hostWithoutPort = hostCandidate.substringBefore(':')
+            if (hostWithoutPort.startsWith('.') || hostWithoutPort.endsWith('.') || !hostWithoutPort.contains('.')) {
+                return false
+            }
+            // IPv4 address check
+            if (Regex("""^\d{1,3}(\.\d{1,3}){3}$""").matches(hostWithoutPort)) {
+                return true
+            }
+            val tld = hostWithoutPort.substringAfterLast('.')
+            return tld.length >= 2 && tld.all { it.isLetterOrDigit() || it == '-' }
+        }
+
+        /**
+         * Resolves any address-bar or search-box input into a navigable target URL, using
+         * **DuckDuckGo (`https://duckduckgo.com/?q=...`)** as the default search engine whenever the input
+         * is a search query rather than a direct URL or magnet link.
+         */
+        internal fun resolveBrowserInputToUrl(rawInput: String): String {
+            val trimmed = rawInput.trim()
+            if (trimmed.isEmpty()) return DEFAULT_HOME_URL
+            if (trimmed.startsWith("magnet:", ignoreCase = true)) return trimmed
+            if (trimmed.startsWith("http://", ignoreCase = true) ||
+                trimmed.startsWith("https://", ignoreCase = true)
+            ) {
+                return trimmed
+            }
+            if (looksLikeDomainOrUrl(trimmed)) {
+                return "https://$trimmed"
+            }
+            val encodedQuery = runCatching { URLEncoder.encode(trimmed, "UTF-8") }.getOrDefault(trimmed.replace(" ", "+"))
+            return "https://duckduckgo.com/?q=$encodedQuery"
+        }
+
+        /**
+         * Returns true if [url] is the DuckDuckGo Main Page (with no active `q=` search query).
+         */
+        internal fun isDuckDuckGoHomeUrl(url: String): Boolean {
+            val trimmed = url.trim()
+            if (trimmed.isEmpty()) return true
+            val parsed = trimmed.toHttpUrlOrNull() ?: return false
+            val host = parsed.host.lowercase(Locale.US)
+            if (host != "duckduckgo.com" && !host.endsWith(".duckduckgo.com")) return false
+            val q = parsed.queryParameter("q")?.trim()
+            return q.isNullOrEmpty()
+        }
+
+        /**
+         * Extracts the search query `q` if [url] is a DuckDuckGo search URL (`duckduckgo.com/?q=...` or `html.duckduckgo.com/html/?q=...`).
+         */
+        internal fun extractDuckDuckGoSearchQuery(url: String): String? {
+            val parsed = url.trim().toHttpUrlOrNull() ?: return null
+            val host = parsed.host.lowercase(Locale.US)
+            if (host != "duckduckgo.com" && !host.endsWith(".duckduckgo.com")) return null
+            return parsed.queryParameter("q")?.trim()?.takeIf { it.isNotEmpty() }
+        }
+
+        /**
+         * Unwraps DuckDuckGo HTML redirect links (`/l/?uddg=<url-encoded-target>` or `https://duckduckgo.com/l/?kh=-1&uddg=...`)
+         * into their real destination URL.
+         */
+        internal fun unwrapDuckDuckGoRedirectUrl(
+            rawHref: String,
+            baseUrl: String = "https://html.duckduckgo.com"
+        ): String? {
+            val cleaned = rawHref.replace("&amp;", "&").trim()
+            if (cleaned.isEmpty() || cleaned.startsWith("javascript:", ignoreCase = true)) return null
+            val resolved = when {
+                cleaned.startsWith("//") -> "https:$cleaned"
+                cleaned.startsWith("http://", ignoreCase = true) ||
+                    cleaned.startsWith("https://", ignoreCase = true) -> cleaned
+                else -> baseUrl.toHttpUrlOrNull()?.resolve(cleaned)?.toString() ?: cleaned
+            }
+            val httpUrl = resolved.toHttpUrlOrNull()
+            if (httpUrl != null) {
+                val uddg = httpUrl.queryParameter("uddg")?.trim()
+                if (!uddg.isNullOrEmpty()) {
+                    return runCatching { URLDecoder.decode(uddg, "UTF-8") }.getOrDefault(uddg)
+                }
+            }
+            val uddgMatch = Regex("""[?&]uddg=([^&]+)""").find(resolved)?.groupValues?.getOrNull(1)
+            if (!uddgMatch.isNullOrBlank()) {
+                return runCatching { URLDecoder.decode(uddgMatch, "UTF-8") }.getOrDefault(uddgMatch)
+            }
+            return resolved.takeIf {
+                it.startsWith("http://", ignoreCase = true) ||
+                    it.startsWith("https://", ignoreCase = true) ||
+                    it.startsWith("magnet:", ignoreCase = true)
+            }
+        }
+
+        internal fun stripHtmlTagsAndEntities(rawHtml: String): String {
+            return rawHtml
+                .replace(Regex("<[^>]+>"), " ")
+                .replace("&amp;", "&")
+                .replace("&quot;", "\"")
+                .replace("&#39;", "'")
+                .replace("&#x27;", "'")
+                .replace("&apos;", "'")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&nbsp;", " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+        }
+
+        /**
+         * Parses DuckDuckGo HTML search results (`https://html.duckduckgo.com/html/?q=...`) into interactive
+         * browser items so the user can view titles, snippets, and click results to navigate or download.
+         */
+        internal fun parseDuckDuckGoSearchResults(
+            html: String,
+            baseUrl: String = "https://html.duckduckgo.com"
+        ): List<DetectedLinkItem> {
+            if (html.isBlank()) return emptyList()
+            val results = ArrayList<DetectedLinkItem>()
+            val seenUrls = HashSet<String>()
+
+            // Match DuckDuckGo result anchors (`result__a` or `/l/?uddg=`)
+            val anchorRegex = Regex(
+                """<a[^>]+href=["']([^"']+)["'][^>]*>(.*?)</a>""",
+                setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+            )
+            val snippetRegex = Regex(
+                """<a[^>]+class=["'][^"']*result__snippet[^"']*["'][^>]*>(.*?)</a>|<div[^>]+class=["'][^"']*result__snippet[^"']*["'][^>]*>(.*?)</div>""",
+                setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+            )
+            val snippets = snippetRegex.findAll(html).map { m ->
+                val raw = m.groupValues[1].ifEmpty { m.groupValues[2] }
+                stripHtmlTagsAndEntities(raw)
+            }.toList()
+
+            var resultIdx = 0
+            for (match in anchorRegex.findAll(html)) {
+                val wholeTag = match.value
+                val rawHref = match.groupValues[1]
+                val innerHtml = match.groupValues[2]
+                val isResultAnchor = wholeTag.contains("result__a", ignoreCase = true) ||
+                    rawHref.contains("uddg=", ignoreCase = true)
+                if (!isResultAnchor) continue
+                if (wholeTag.contains("result__snippet", ignoreCase = true) ||
+                    wholeTag.contains("result__url", ignoreCase = true)
+                ) {
+                    continue
+                }
+
+                val targetUrl = unwrapDuckDuckGoRedirectUrl(rawHref, baseUrl) ?: continue
+                val parsedTarget = targetUrl.toHttpUrlOrNull()
+                if (parsedTarget != null && parsedTarget.host.endsWith("duckduckgo.com", ignoreCase = true) &&
+                    !targetUrl.contains("uddg=", ignoreCase = true)
+                ) {
+                    continue
+                }
+                if (!seenUrls.add(targetUrl)) continue
+
+                val cleanTitle = stripHtmlTagsAndEntities(innerHtml).ifBlank { targetUrl }
+                val snippet = snippets.getOrNull(resultIdx).orEmpty()
+                resultIdx++
+
+                val hostBadge = parsedTarget?.host?.removePrefix("www.")?.uppercase(Locale.US) ?: "WEB"
+                val subtitleText = if (snippet.isNotBlank()) "$snippet\n$targetUrl" else targetUrl
+
+                results.add(
+                    DetectedLinkItem(
+                        title = cleanTitle,
+                        url = targetUrl,
+                        downloadType = DownloadType.DIRECT,
+                        badgeLabel = "DUCKDUCKGO • $hostBadge",
+                        isNavigablePage = true,
+                        subtitle = subtitleText
+                    )
+                )
+                if (results.size >= 30) break
+            }
+            return results
+        }
+
+        /**
+         * Extracts navigable `<a href="...">` webpage links from any visited HTML page so the user can
+         * browse and click links inside the native browser viewport.
+         */
+        internal fun extractWebpageNavigationItems(
+            html: String,
+            baseUrl: String
+        ): List<DetectedLinkItem> {
+            if (html.isBlank()) return emptyList()
+            val baseHttp = baseUrl.toHttpUrlOrNull()
+            val items = ArrayList<DetectedLinkItem>()
+            val seenUrls = HashSet<String>()
+
+            val anchorRegex = Regex(
+                """<a[^>]+href=["']([^"']+)["'][^>]*>(.*?)</a>""",
+                setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+            )
+            for (match in anchorRegex.findAll(html)) {
+                val rawHref = match.groupValues[1].replace("&amp;", "&").trim()
+                if (rawHref.isEmpty() ||
+                    rawHref.startsWith("#") ||
+                    rawHref.startsWith("javascript:", ignoreCase = true) ||
+                    rawHref.startsWith("mailto:", ignoreCase = true) ||
+                    rawHref.startsWith("tel:", ignoreCase = true)
+                ) {
+                    continue
+                }
+                val resolved = when {
+                    rawHref.startsWith("http://", ignoreCase = true) ||
+                        rawHref.startsWith("https://", ignoreCase = true) -> rawHref
+                    else -> baseHttp?.resolve(rawHref)?.toString()
+                } ?: continue
+
+                if (resolved == baseUrl || !seenUrls.add(resolved)) continue
+                val cleanText = stripHtmlTagsAndEntities(match.groupValues[2])
+                if (cleanText.length < 2) continue
+
+                val host = resolved.toHttpUrlOrNull()?.host?.removePrefix("www.")?.uppercase(Locale.US) ?: "LINK"
+                items.add(
+                    DetectedLinkItem(
+                        title = cleanText.take(110),
+                        url = resolved,
+                        downloadType = DownloadType.DIRECT,
+                        badgeLabel = "WEB • $host",
+                        isNavigablePage = true,
+                        subtitle = resolved
+                    )
+                )
+                if (items.size >= 40) break
+            }
+            return items
+        }
+
+        internal fun defaultDuckDuckGoSpeedDialItems(): List<DetectedLinkItem> = listOf(
+            DetectedLinkItem(
+                title = "YouTube — Browse & Download Videos / Audio",
+                url = "https://www.youtube.com",
+                downloadType = DownloadType.VIDEO,
+                badgeLabel = "DUCKDUCKGO • VIDEO",
+                isNavigablePage = true,
+                subtitle = "Search or open YouTube videos and extract MP4 / M4A audio"
+            ),
+            DetectedLinkItem(
+                title = "SoundCloud — Discover & Download Audio Tracks",
+                url = "https://soundcloud.com/discover",
+                downloadType = DownloadType.MUSIC,
+                badgeLabel = "DUCKDUCKGO • AUDIO",
+                isNavigablePage = true,
+                subtitle = "Browse SoundCloud tracks and playlists with instant stream detection"
+            ),
+            DetectedLinkItem(
+                title = "Internet Archive (Archive.org) — Public Domain Audio, Video & Torrents",
+                url = "https://archive.org",
+                downloadType = DownloadType.DIRECT,
+                badgeLabel = "DUCKDUCKGO • ARCHIVE",
+                isNavigablePage = true,
+                subtitle = "Millions of free books, movies, audio recordings, software, and torrents"
+            ),
+            DetectedLinkItem(
+                title = "Jamendo Music — Free Creative Commons MP3 Downloads",
+                url = "https://www.jamendo.com",
+                downloadType = DownloadType.MUSIC,
+                badgeLabel = "DUCKDUCKGO • MUSIC",
+                isNavigablePage = true,
+                subtitle = "Independent artists & royalty-free music tracks"
+            ),
+            DetectedLinkItem(
+                title = "Ubuntu Releases — Official Linux ISO & Torrent Downloads",
+                url = "https://releases.ubuntu.com",
+                downloadType = DownloadType.TORRENT,
+                badgeLabel = "DUCKDUCKGO • ISO / TORRENT",
+                isNavigablePage = true,
+                subtitle = "Official Ubuntu desktop and server ISO images and .torrent files"
+            ),
+            DetectedLinkItem(
+                title = "Wikipedia — The Free Encyclopedia",
+                url = "https://www.wikipedia.org",
+                downloadType = DownloadType.DIRECT,
+                badgeLabel = "DUCKDUCKGO • WEB",
+                isNavigablePage = true,
+                subtitle = "Browse articles and media references across languages"
+            )
+        )
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -410,12 +715,16 @@ class BrowserActivity : AppCompatActivity() {
         videoDownloadManager = VideoDownloadManager(application, repository)
 
         val versionBadge = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
-        binding.tvBrowserHeaderVersion.text = "Smart Browser • $versionBadge"
+        binding.tvBrowserHeaderVersion.text = "DuckDuckGo Browser • $versionBadge"
         binding.tvOverlayBadge.text = versionBadge
-        binding.tvSnifferStatus.text = "$versionBadge • Enter a website URL above"
+        binding.tvSnifferStatus.text = "DuckDuckGo • $versionBadge"
 
         inlineDetectedAdapter = DetectedLinkAdapter(emptyList()) { selected ->
-            openInAddDownload(selected)
+            if (selected.isNavigablePage) {
+                navigateTo(selected.url)
+            } else {
+                openInAddDownload(selected)
+            }
         }
         binding.rvBrowserContent.layoutManager = LinearLayoutManager(this)
         binding.rvBrowserContent.adapter = inlineDetectedAdapter
@@ -425,33 +734,44 @@ class BrowserActivity : AppCompatActivity() {
 
         val initialUrl = intent.getStringExtra("url")?.trim()
         if (!initialUrl.isNullOrBlank()) {
-            navigateTo(initialUrl)
+            navigateTo(initialUrl, recordHistory = false)
         } else {
-            showBlankBrowserReadyState()
+            loadDuckDuckGoMainPage(recordHistory = false)
         }
     }
 
-    private fun showBlankBrowserReadyState() {
+    /**
+     * Loads the DuckDuckGo Main Page (`https://duckduckgo.com`) as the browser's home screen,
+     * displaying the interactive DuckDuckGo search hub and speed-dial portals.
+     */
+    private fun loadDuckDuckGoMainPage(recordHistory: Boolean = true) {
         activeScanJob?.cancel()
-        currentUrl = ""
-        currentPageTitle = ""
-        lastScannedUrl = ""
+        if (recordHistory && currentUrl.isNotBlank() && !isDuckDuckGoHomeUrl(currentUrl)) {
+            navBackStack.addLast(currentUrl)
+            navForwardStack.clear()
+        }
+        currentUrl = DEFAULT_HOME_URL
+        currentPageTitle = "DuckDuckGo — Private Search & Browser"
+        lastScannedUrl = DEFAULT_HOME_URL
         detectedLinks.clear()
-        inlineDetectedAdapter.submitList(emptyList())
-        binding.rvBrowserContent.visibility = View.GONE
-        binding.etBrowserUrl.setText("")
+        synchronized(pageNavigationLinks) {
+            pageNavigationLinks.clear()
+            pageNavigationLinks.addAll(defaultDuckDuckGoSpeedDialItems())
+        }
+
+        binding.etBrowserUrl.setText(DEFAULT_HOME_URL)
+        binding.etDuckDuckGoSearch.setText("")
+        binding.duckDuckGoHomeCard.visibility = View.VISIBLE
         binding.pageSummaryCard.visibility = View.GONE
         binding.progressBarWeb.visibility = View.GONE
+        binding.webViewContainer.visibility = View.GONE
+        binding.rvBrowserContent.visibility = View.VISIBLE
         binding.fabDetectedLinks.text = "Detected (0)"
+
         val versionBadge = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
-        binding.tvBrowserHeaderVersion.text = "Smart Browser • $versionBadge"
-        binding.tvSnifferStatus.text = "$versionBadge • Enter a website URL above"
-        binding.tvOverlayBadge.text = versionBadge
-        binding.tvOverlayTitle.text = "Smart Web & Media Detector"
-        binding.tvOverlaySubtitle.text =
-            "Type or paste any website URL in the address bar above to inspect the page and detect downloadable audio, video, torrents, or files."
-        binding.btnOverlayRetry.visibility = View.GONE
-        binding.browserEmptyOverlay.visibility = View.VISIBLE
+        binding.tvBrowserHeaderVersion.text = "DuckDuckGo Browser • $versionBadge"
+        binding.tvSnifferStatus.text = "DuckDuckGo Main Page • Ready to search or browse"
+        syncDetectedUiState()
         updateNavButtonStates()
     }
 
@@ -463,7 +783,13 @@ class BrowserActivity : AppCompatActivity() {
                     if (currentUrl.isNotBlank()) {
                         navForwardStack.addLast(currentUrl)
                     }
-                    navigateTo(prev, recordHistory = false)
+                    if (isDuckDuckGoHomeUrl(prev)) {
+                        loadDuckDuckGoMainPage(recordHistory = false)
+                    } else {
+                        navigateTo(prev, recordHistory = false)
+                    }
+                } else if (!isDuckDuckGoHomeUrl(currentUrl)) {
+                    loadDuckDuckGoMainPage(recordHistory = false)
                 } else {
                     finish()
                 }
@@ -480,6 +806,8 @@ class BrowserActivity : AppCompatActivity() {
             val query = binding.etBrowserUrl.text?.toString()?.trim().orEmpty()
             if (query.isNotEmpty()) {
                 navigateTo(query)
+            } else {
+                loadDuckDuckGoMainPage()
             }
         }
 
@@ -491,6 +819,8 @@ class BrowserActivity : AppCompatActivity() {
                 val query = binding.etBrowserUrl.text?.toString()?.trim().orEmpty()
                 if (query.isNotEmpty()) {
                     navigateTo(query)
+                } else {
+                    loadDuckDuckGoMainPage()
                 }
                 true
             } else {
@@ -498,21 +828,70 @@ class BrowserActivity : AppCompatActivity() {
             }
         }
 
-        binding.btnBrowserReload.setOnClickListener {
-            if (currentUrl.isNotBlank()) {
-                scanCurrentPageAsync(currentUrl, force = true)
+        binding.btnDuckDuckGoSearch.setOnClickListener {
+            val query = binding.etDuckDuckGoSearch.text?.toString()?.trim().orEmpty()
+            if (query.isNotEmpty()) {
+                navigateTo(query)
             } else {
-                showBlankBrowserReadyState()
+                binding.etDuckDuckGoSearch.requestFocus()
             }
         }
 
+        binding.etDuckDuckGoSearch.setOnEditorActionListener { _, actionId, event ->
+            if (actionId == EditorInfo.IME_ACTION_SEARCH ||
+                actionId == EditorInfo.IME_ACTION_GO ||
+                (event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)
+            ) {
+                val query = binding.etDuckDuckGoSearch.text?.toString()?.trim().orEmpty()
+                if (query.isNotEmpty()) {
+                    navigateTo(query)
+                }
+                true
+            } else {
+                false
+            }
+        }
+
+        binding.chipDdgYoutube.setOnClickListener {
+            navigateTo("https://www.youtube.com")
+        }
+        binding.chipDdgSoundCloud.setOnClickListener {
+            navigateTo("https://soundcloud.com/discover")
+        }
+        binding.chipDdgArchive.setOnClickListener {
+            navigateTo("https://archive.org")
+        }
+        binding.chipDdgFreeMusic.setOnClickListener {
+            navigateTo("creative commons mp3 audio download")
+        }
+        binding.chipDdgUbuntuIso.setOnClickListener {
+            navigateTo("https://releases.ubuntu.com")
+        }
+        binding.chipDdgGithub.setOnClickListener {
+            navigateTo("https://github.com/explore")
+        }
+
+        binding.btnBrowserReload.setOnClickListener {
+            if (currentUrl.isNotBlank() && !isDuckDuckGoHomeUrl(currentUrl)) {
+                scanCurrentPageAsync(currentUrl, force = true)
+            } else {
+                loadDuckDuckGoMainPage(recordHistory = false)
+            }
+        }
+
+        binding.btnNavHome.setOnClickListener {
+            loadDuckDuckGoMainPage(recordHistory = true)
+        }
+
         binding.btnScanPage.setOnClickListener {
-            scanCurrentPageAsync(currentUrl, force = true)
+            if (!isDuckDuckGoHomeUrl(currentUrl)) {
+                scanCurrentPageAsync(currentUrl, force = true)
+            }
             val hasLinks = synchronized(detectedLinks) { detectedLinks.isNotEmpty() }
             if (hasLinks) {
                 showDetectedLinksBottomSheet()
             } else {
-                Toast.makeText(this, "Scanning current page for audio, video, and files...", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Scanning current page for downloadable audio, video, and files...", Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -522,7 +901,13 @@ class BrowserActivity : AppCompatActivity() {
                 if (currentUrl.isNotBlank()) {
                     navForwardStack.addLast(currentUrl)
                 }
-                navigateTo(prev, recordHistory = false)
+                if (isDuckDuckGoHomeUrl(prev)) {
+                    loadDuckDuckGoMainPage(recordHistory = false)
+                } else {
+                    navigateTo(prev, recordHistory = false)
+                }
+            } else if (!isDuckDuckGoHomeUrl(currentUrl)) {
+                loadDuckDuckGoMainPage(recordHistory = false)
             } else {
                 finish()
             }
@@ -534,7 +919,11 @@ class BrowserActivity : AppCompatActivity() {
                 if (currentUrl.isNotBlank()) {
                     navBackStack.addLast(currentUrl)
                 }
-                navigateTo(next, recordHistory = false)
+                if (isDuckDuckGoHomeUrl(next)) {
+                    loadDuckDuckGoMainPage(recordHistory = false)
+                } else {
+                    navigateTo(next, recordHistory = false)
+                }
             }
         }
 
@@ -544,13 +933,17 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     private fun updateNavButtonStates() {
-        binding.btnNavBack.alpha = if (navBackStack.isNotEmpty()) 1.0f else 0.45f
+        val canGoBack = navBackStack.isNotEmpty() || !isDuckDuckGoHomeUrl(currentUrl)
+        binding.btnNavBack.alpha = if (canGoBack) 1.0f else 0.45f
         binding.btnNavForward.alpha = if (navForwardStack.isNotEmpty()) 1.0f else 0.45f
     }
 
     private fun navigateTo(rawInput: String, recordHistory: Boolean = true) {
         val trimmed = rawInput.trim()
-        if (trimmed.isEmpty()) return
+        if (trimmed.isEmpty()) {
+            loadDuckDuckGoMainPage(recordHistory = recordHistory)
+            return
+        }
 
         if (trimmed.startsWith("magnet:", ignoreCase = true)) {
             val dn = trimmed.substringAfter("dn=", "").substringBefore("&")
@@ -567,14 +960,10 @@ class BrowserActivity : AppCompatActivity() {
             return
         }
 
-        val targetUrl = when {
-            trimmed.startsWith("http://", ignoreCase = true) ||
-                trimmed.startsWith("https://", ignoreCase = true) -> trimmed
-            !trimmed.contains(" ") && trimmed.contains(".") -> "https://$trimmed"
-            else -> {
-                Toast.makeText(this, R.string.error_invalid_url, Toast.LENGTH_SHORT).show()
-                return
-            }
+        val targetUrl = resolveBrowserInputToUrl(trimmed)
+        if (isDuckDuckGoHomeUrl(targetUrl)) {
+            loadDuckDuckGoMainPage(recordHistory = recordHistory)
+            return
         }
 
         if (recordHistory && currentUrl.isNotBlank() && currentUrl != targetUrl) {
@@ -583,17 +972,30 @@ class BrowserActivity : AppCompatActivity() {
         }
 
         currentUrl = targetUrl
-        currentPageTitle = ""
+        val ddgQuery = extractDuckDuckGoSearchQuery(targetUrl)
+        currentPageTitle = if (ddgQuery != null) "DuckDuckGo: $ddgQuery" else ""
         lastScannedUrl = ""
         binding.etBrowserUrl.setText(targetUrl)
+        if (ddgQuery != null) {
+            binding.etDuckDuckGoSearch.setText(ddgQuery)
+            binding.duckDuckGoHomeCard.visibility = View.VISIBLE
+        } else {
+            binding.duckDuckGoHomeCard.visibility = View.GONE
+        }
         detectedLinks.clear()
+        pageNavigationLinks.clear()
         updateNavButtonStates()
 
         val versionBadge = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
         binding.tvOverlayBadge.text = versionBadge
-        binding.tvOverlayTitle.text = "Inspecting Page & Media Streams..."
+        binding.tvOverlayTitle.text = if (ddgQuery != null) {
+            "Searching DuckDuckGo for \"$ddgQuery\"..."
+        } else {
+            "Loading Page & Detecting Media..."
+        }
         binding.tvOverlaySubtitle.text = targetUrl
         binding.btnOverlayRetry.visibility = View.GONE
+        binding.webViewContainer.visibility = View.VISIBLE
         binding.browserEmptyOverlay.visibility = View.VISIBLE
 
         refreshOfferForCurrentPage(targetUrl, "")
@@ -622,7 +1024,8 @@ class BrowserActivity : AppCompatActivity() {
         if (!force && targetUrl == lastScannedUrl && activeScanJob?.isActive == true) {
             return
         }
-        val hasLinksForLastUrl = synchronized(detectedLinks) { detectedLinks.isNotEmpty() }
+        val hasLinksForLastUrl = synchronized(detectedLinks) { detectedLinks.isNotEmpty() } ||
+            synchronized(pageNavigationLinks) { pageNavigationLinks.isNotEmpty() }
         if (!force && targetUrl == lastScannedUrl && hasLinksForLastUrl) {
             return
         }
@@ -641,9 +1044,13 @@ class BrowserActivity : AppCompatActivity() {
             val versionBadge = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
             binding.tvOverlayBadge.text = versionBadge
             binding.tvOverlayTitle.text = currentPageTitle.ifBlank { sniffed.pageTitle.ifBlank { targetUrl } }
-            binding.tvOverlaySubtitle.text = sniffed.pageDescription.ifBlank { "Inspected $targetUrl" }
+            binding.tvOverlaySubtitle.text = sniffed.pageDescription.ifBlank { "Browsing $targetUrl" }
             for (item in sniffed.links) {
                 insertDetectedItemInternal(item, insertAtFront = false)
+            }
+            synchronized(pageNavigationLinks) {
+                pageNavigationLinks.clear()
+                pageNavigationLinks.addAll(sniffed.pageLinks)
             }
 
             // Deep probe for audio sites (Spotify, SoundCloud, Bandcamp, YouTube Music, etc.)
@@ -758,28 +1165,53 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     private fun syncDetectedUiState() {
-        val snapshot = synchronized(detectedLinks) { detectedLinks.toList() }
-        binding.fabDetectedLinks.text = "Detected (${snapshot.size})"
-        if (::inlineDetectedAdapter.isInitialized) {
-            inlineDetectedAdapter.submitList(snapshot)
+        val downloadableSnapshot = synchronized(detectedLinks) { detectedLinks.toList() }
+        val navSnapshot = synchronized(pageNavigationLinks) { pageNavigationLinks.toList() }
+        val combinedFeed = buildList {
+            addAll(downloadableSnapshot)
+            for (navItem in navSnapshot) {
+                if (none { it.url == navItem.url && !it.isNavigablePage }) {
+                    add(navItem)
+                }
+            }
         }
 
-        if (snapshot.isEmpty()) {
-            binding.pageSummaryCard.visibility = View.GONE
+        binding.fabDetectedLinks.text = "Detected (${downloadableSnapshot.size})"
+        if (::inlineDetectedAdapter.isInitialized) {
+            inlineDetectedAdapter.submitList(combinedFeed)
+        }
+
+        if (combinedFeed.isNotEmpty()) {
+            binding.rvBrowserContent.visibility = View.VISIBLE
+            binding.webViewContainer.visibility = View.GONE
+        } else {
             binding.rvBrowserContent.visibility = View.GONE
-            binding.tvSnifferStatus.text =
-                "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE}) • Browsing"
+            binding.webViewContainer.visibility = View.VISIBLE
+        }
+
+        if (downloadableSnapshot.isEmpty()) {
+            binding.pageSummaryCard.visibility = View.GONE
+            val ddgQuery = extractDuckDuckGoSearchQuery(currentUrl)
+            binding.tvSnifferStatus.text = when {
+                isDuckDuckGoHomeUrl(currentUrl) ->
+                    "DuckDuckGo Main Page • Default Search Engine"
+                ddgQuery != null ->
+                    "DuckDuckGo Search: \"$ddgQuery\" (${navSnapshot.size} results)"
+                navSnapshot.isNotEmpty() ->
+                    "Browsing • ${navSnapshot.size} page links"
+                else ->
+                    "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE}) • Browsing"
+            }
             return
         }
 
         binding.pageSummaryCard.visibility = View.VISIBLE
-        binding.rvBrowserContent.visibility = View.VISIBLE
-        val audioItems = snapshot.filter { it.downloadType == DownloadType.MUSIC }
-        val videoItems = snapshot.filter { it.downloadType == DownloadType.VIDEO }
-        val torrentItems = snapshot.filter {
+        val audioItems = downloadableSnapshot.filter { it.downloadType == DownloadType.MUSIC }
+        val videoItems = downloadableSnapshot.filter { it.downloadType == DownloadType.VIDEO }
+        val torrentItems = downloadableSnapshot.filter {
             it.downloadType == DownloadType.TORRENT || it.downloadType == DownloadType.MAGNET
         }
-        val directItems = snapshot.filter { it.downloadType == DownloadType.DIRECT }
+        val directItems = downloadableSnapshot.filter { it.downloadType == DownloadType.DIRECT }
 
         val isAudioSite = MusicDownloadManager.isMusicUrl(currentUrl)
         val isVideoSite = VideoDownloadManager.isSocialVideoUrl(currentUrl) ||
@@ -799,9 +1231,9 @@ class BrowserActivity : AppCompatActivity() {
                 binding.btnQuickOfferPrimary.setOnClickListener {
                     openInAddDownload(primaryAudio)
                 }
-                if (snapshot.size > 1) {
+                if (downloadableSnapshot.size > 1) {
                     binding.btnQuickOfferSecondary.visibility = View.VISIBLE
-                    binding.btnQuickOfferSecondary.text = "All (${snapshot.size})"
+                    binding.btnQuickOfferSecondary.text = "All (${downloadableSnapshot.size})"
                     binding.btnQuickOfferSecondary.setIconResource(R.drawable.ic_download)
                     binding.btnQuickOfferSecondary.setOnClickListener {
                         showDetectedLinksBottomSheet()
@@ -851,9 +1283,9 @@ class BrowserActivity : AppCompatActivity() {
                 binding.btnQuickOfferPrimary.setOnClickListener {
                     openInAddDownload(primaryTorrent)
                 }
-                if (snapshot.size > 1) {
+                if (downloadableSnapshot.size > 1) {
                     binding.btnQuickOfferSecondary.visibility = View.VISIBLE
-                    binding.btnQuickOfferSecondary.text = "All (${snapshot.size})"
+                    binding.btnQuickOfferSecondary.text = "All (${downloadableSnapshot.size})"
                     binding.btnQuickOfferSecondary.setIconResource(R.drawable.ic_download)
                     binding.btnQuickOfferSecondary.setOnClickListener {
                         showDetectedLinksBottomSheet()
@@ -865,20 +1297,20 @@ class BrowserActivity : AppCompatActivity() {
 
             // General files (.pdf, .zip, .apk, .iso, etc.)
             else -> {
-                val primaryFile = directItems.firstOrNull() ?: snapshot.first()
+                val primaryFile = directItems.firstOrNull() ?: downloadableSnapshot.first()
                 binding.ivOfferIcon.setImageResource(R.drawable.ic_file)
                 binding.tvPageTitle.text = primaryFile.title
-                binding.tvPageBadge.text = "${snapshot.size} FILE(S)"
+                binding.tvPageBadge.text = "${downloadableSnapshot.size} FILE(S)"
                 binding.tvPageDescription.text =
-                    "Detected ${snapshot.size} downloadable file(s) on this page."
+                    "Detected ${downloadableSnapshot.size} downloadable file(s) on this page."
                 binding.btnQuickOfferPrimary.text = "Download File"
                 binding.btnQuickOfferPrimary.setIconResource(R.drawable.ic_download)
                 binding.btnQuickOfferPrimary.setOnClickListener {
                     openInAddDownload(primaryFile)
                 }
-                if (snapshot.size > 1) {
+                if (downloadableSnapshot.size > 1) {
                     binding.btnQuickOfferSecondary.visibility = View.VISIBLE
-                    binding.btnQuickOfferSecondary.text = "View All (${snapshot.size})"
+                    binding.btnQuickOfferSecondary.text = "View All (${downloadableSnapshot.size})"
                     binding.btnQuickOfferSecondary.setIconResource(R.drawable.ic_file)
                     binding.btnQuickOfferSecondary.setOnClickListener {
                         showDetectedLinksBottomSheet()
@@ -890,18 +1322,36 @@ class BrowserActivity : AppCompatActivity() {
         }
 
         binding.tvSnifferStatus.text =
-            "${snapshot.size} downloadable item(s) detected (${audioItems.size} audio, ${videoItems.size} video, ${torrentItems.size + directItems.size} files)"
+            "${downloadableSnapshot.size} downloadable item(s) • ${navSnapshot.size} page links"
     }
 
     internal data class SniffResult(
         val pageTitle: String,
         val pageDescription: String,
-        val links: List<DetectedLinkItem>
+        val links: List<DetectedLinkItem>,
+        val pageLinks: List<DetectedLinkItem> = emptyList()
     )
 
     internal fun sniffWebpageLinks(url: String): SniffResult {
+        if (isDuckDuckGoHomeUrl(url)) {
+            return SniffResult(
+                pageTitle = "DuckDuckGo",
+                pageDescription = "DuckDuckGo Main Page — Default Search Engine",
+                links = emptyList(),
+                pageLinks = defaultDuckDuckGoSpeedDialItems()
+            )
+        }
+
+        val ddgQuery = extractDuckDuckGoSearchQuery(url)
+        val effectiveFetchUrl = if (ddgQuery != null) {
+            val encoded = runCatching { URLEncoder.encode(ddgQuery, "UTF-8") }.getOrDefault(ddgQuery)
+            "$DUCKDUCKGO_HTML_SEARCH_BASE$encoded"
+        } else {
+            url
+        }
+
         val classification = UrlClassifier.classify(url)
-        if (classification.kind == UrlClassifier.SourceKind.UNSUPPORTED) {
+        if (ddgQuery == null && classification.kind == UrlClassifier.SourceKind.UNSUPPORTED) {
             return SniffResult(
                 pageTitle = classification.platformName,
                 pageDescription = classification.unsupportedReason
@@ -911,15 +1361,18 @@ class BrowserActivity : AppCompatActivity() {
         }
 
         val discovered = mutableListOf<DetectedLinkItem>()
-        discovered.addAll(buildOfferItemsForPageUrl(url, currentPageTitle))
+        if (ddgQuery == null) {
+            discovered.addAll(buildOfferItemsForPageUrl(url, currentPageTitle))
+        }
 
         return try {
             val req = Request.Builder()
-                .url(url)
+                .url(effectiveFetchUrl)
                 .header(
                     "User-Agent",
                     "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
                 )
+                .header("Accept-Language", "en-US,en;q=0.9,ar;q=0.8")
                 .build()
 
             httpClient.newCall(req).execute().use { response ->
@@ -973,10 +1426,25 @@ class BrowserActivity : AppCompatActivity() {
 
                 val title = Regex("<title[^>]*>(.*?)</title>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
                     .find(html)?.groupValues?.getOrNull(1)
-                    ?.replace(Regex("\\s+"), " ")
-                    ?.trim()
+                    ?.let { stripHtmlTagsAndEntities(it) }
                     ?.takeIf { it.isNotEmpty() }
-                    ?: finalUrl
+                    ?: if (ddgQuery != null) "DuckDuckGo: $ddgQuery" else finalUrl
+
+                if (ddgQuery != null) {
+                    val ddgResults = parseDuckDuckGoSearchResults(html, finalUrl)
+                    // Also check if any DuckDuckGo search result points directly to a downloadable media/file URL
+                    for (res in ddgResults) {
+                        classifyDiscoveredResourceUrl(res.url, res.title)?.let { mediaItem ->
+                            discovered.add(mediaItem)
+                        }
+                    }
+                    return SniffResult(
+                        pageTitle = title,
+                        pageDescription = "DuckDuckGo Search: \"$ddgQuery\" (${ddgResults.size} results)",
+                        links = discovered.distinctBy { it.url + it.downloadType.name },
+                        pageLinks = ddgResults
+                    )
+                }
 
                 // Refresh page-level offers using the extracted HTML <title>
                 buildOfferItemsForPageUrl(finalUrl, title).forEach { offer ->
@@ -1047,17 +1515,21 @@ class BrowserActivity : AppCompatActivity() {
                     classifyDiscoveredResourceUrl(scriptUrl, title)?.let { discovered.add(it) }
                 }
 
+                val webpageLinks = extractWebpageNavigationItems(html, finalUrl)
+
                 SniffResult(
                     pageTitle = title,
-                    pageDescription = "Scanned $finalUrl — found ${discovered.size} downloadable item(s).",
-                    links = discovered.distinctBy { it.url + it.downloadType.name }
+                    pageDescription = "Scanned $finalUrl — found ${discovered.size} downloadable item(s) and ${webpageLinks.size} page link(s).",
+                    links = discovered.distinctBy { it.url + it.downloadType.name },
+                    pageLinks = webpageLinks
                 )
             }
         } catch (e: Exception) {
             SniffResult(
                 pageTitle = url,
                 pageDescription = "Browsing $url",
-                links = discovered.distinctBy { it.url + it.downloadType.name }
+                links = discovered.distinctBy { it.url + it.downloadType.name },
+                pageLinks = emptyList()
             )
         }
     }
@@ -1075,7 +1547,11 @@ class BrowserActivity : AppCompatActivity() {
 
         val sheetAdapter = DetectedLinkAdapter(snapshot) { selected ->
             dialog.dismiss()
-            openInAddDownload(selected)
+            if (selected.isNavigablePage) {
+                navigateTo(selected.url)
+            } else {
+                openInAddDownload(selected)
+            }
         }
         rvDetected.layoutManager = LinearLayoutManager(this)
         rvDetected.adapter = sheetAdapter
@@ -1131,7 +1607,7 @@ class BrowserActivity : AppCompatActivity() {
 
     private class DetectedLinkAdapter(
         initialItems: List<DetectedLinkItem>,
-        private val onDownloadClicked: (DetectedLinkItem) -> Unit
+        private val onActionClicked: (DetectedLinkItem) -> Unit
     ) : RecyclerView.Adapter<DetectedLinkAdapter.ViewHolder>() {
 
         private val items = initialItems.toMutableList()
@@ -1160,18 +1636,30 @@ class BrowserActivity : AppCompatActivity() {
             val item = items[position]
             holder.tvTitle.text = item.title
             holder.tvBadge.text = item.badgeLabel
-            holder.tvUrl.text = item.url
+            holder.tvUrl.text = item.subtitle.ifBlank { item.url }
 
-            val iconRes = when (item.downloadType) {
-                DownloadType.MUSIC -> R.drawable.ic_music
-                DownloadType.VIDEO -> R.drawable.ic_video
-                DownloadType.TORRENT, DownloadType.MAGNET -> R.drawable.ic_torrent
-                DownloadType.DIRECT -> R.drawable.ic_file
+            if (item.isNavigablePage) {
+                val navIcon = when {
+                    item.badgeLabel.contains("DUCKDUCKGO") -> R.drawable.ic_search
+                    else -> R.drawable.ic_browser
+                }
+                holder.ivIcon.setImageResource(navIcon)
+                holder.btnDownload.text = "Open"
+                holder.btnDownload.setIconResource(R.drawable.ic_open)
+            } else {
+                val iconRes = when (item.downloadType) {
+                    DownloadType.MUSIC -> R.drawable.ic_music
+                    DownloadType.VIDEO -> R.drawable.ic_video
+                    DownloadType.TORRENT, DownloadType.MAGNET -> R.drawable.ic_torrent
+                    DownloadType.DIRECT -> R.drawable.ic_file
+                }
+                holder.ivIcon.setImageResource(iconRes)
+                holder.btnDownload.text = "Get"
+                holder.btnDownload.setIconResource(R.drawable.ic_download)
             }
-            holder.ivIcon.setImageResource(iconRes)
 
-            holder.btnDownload.setOnClickListener { onDownloadClicked(item) }
-            holder.itemView.setOnClickListener { onDownloadClicked(item) }
+            holder.btnDownload.setOnClickListener { onActionClicked(item) }
+            holder.itemView.setOnClickListener { onActionClicked(item) }
         }
 
         override fun getItemCount(): Int = items.size

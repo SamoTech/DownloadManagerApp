@@ -99,7 +99,7 @@
             android:progressDrawable="@drawable/progress_bar_drawable"
             android:visibility="gone" />
 
-        <!-- Real Web Browser Viewport + Contextual Media & File Offer Banner -->
+        <!-- Real Web Browser Viewport + DuckDuckGo Main Page + Contextual Media & File Offer Banner -->
         <LinearLayout
             android:id="@+id/browserContentContainer"
             android:layout_width="match_parent"
@@ -107,69 +107,180 @@
             android:layout_weight="1"
             android:orientation="vertical">
 
-            <!-- Managed WebView Container + Native Ready/Recovery Overlay (avoids idle Chromium renderer process crashes) -->
-            <FrameLayout
-                android:id="@+id/webViewContainer"
+            <!-- DuckDuckGo Main Page Hub (Shown when on https://duckduckgo.com home) -->
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/duckDuckGoHomeCard"
                 android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:layout_weight="1"
-                android:background="#0F172A">
+                android:layout_height="wrap_content"
+                android:layout_marginHorizontal="10dp"
+                android:layout_marginTop="10dp"
+                android:layout_marginBottom="4dp"
+                app:cardBackgroundColor="#1E293B"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="2dp"
+                app:strokeColor="#334155"
+                app:strokeWidth="1dp">
 
                 <LinearLayout
-                    android:id="@+id/browserEmptyOverlay"
                     android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:gravity="center"
+                    android:layout_height="wrap_content"
                     android:orientation="vertical"
-                    android:padding="24dp">
+                    android:padding="14dp">
 
-                    <TextView
-                        android:id="@+id/tvOverlayBadge"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginBottom="14dp"
-                        android:background="@drawable/card_background"
-                        android:backgroundTint="#1E293B"
-                        android:paddingHorizontal="14dp"
-                        android:paddingVertical="6dp"
-                        android:text="Luca v23.0 (Build 23)"
-                        android:textColor="#38BDF8"
-                        android:textSize="12sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/tvOverlayTitle"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginBottom="10dp"
-                        android:gravity="center"
-                        android:text="Real Web Browser &amp; Media Detector"
-                        android:textColor="@android:color/white"
-                        android:textSize="19sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/tvOverlaySubtitle"
+                    <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:gravity="center"
-                        android:maxWidth="360dp"
-                        android:text="Type or paste any website URL in the address bar above to visit the site and detect downloadable audio, video, torrents, or files."
-                        android:textColor="#94A3B8"
-                        android:textSize="14sp" />
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
 
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnOverlayRetry"
-                        style="@style/Widget.Material3.Button"
-                        android:layout_width="wrap_content"
-                        android:layout_height="44dp"
-                        android:layout_marginTop="16dp"
-                        android:text="@string/retry"
-                        android:visibility="gone"
-                        app:cornerRadius="10dp"
-                        app:icon="@drawable/ic_retry" />
+                        <FrameLayout
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:background="@drawable/icon_badge_background"
+                            android:backgroundTint="#DE5833">
+
+                            <ImageView
+                                android:layout_width="20dp"
+                                android:layout_height="20dp"
+                                android:layout_gravity="center"
+                                android:contentDescription="DuckDuckGo"
+                                android:src="@drawable/ic_search"
+                                app:tint="@android:color/white" />
+                        </FrameLayout>
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="10dp"
+                            android:layout_weight="1"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="DuckDuckGo"
+                                android:textColor="@android:color/white"
+                                android:textSize="16sp"
+                                android:textStyle="bold" />
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Default Search Engine • Search Web, Video, Audio &amp; Files"
+                                android:textColor="#94A3B8"
+                                android:textSize="11sp" />
+                        </LinearLayout>
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:background="@drawable/card_background"
+                            android:backgroundTint="#0F172A"
+                            android:paddingHorizontal="8dp"
+                            android:paddingVertical="3dp"
+                            android:text="HOME"
+                            android:textColor="#38BDF8"
+                            android:textSize="10sp"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <EditText
+                            android:id="@+id/etDuckDuckGoSearch"
+                            android:layout_width="0dp"
+                            android:layout_height="42dp"
+                            android:layout_weight="1"
+                            android:background="@drawable/card_background"
+                            android:backgroundTint="#0F172A"
+                            android:hint="Search DuckDuckGo or paste any link..."
+                            android:imeOptions="actionSearch"
+                            android:importantForAutofill="no"
+                            android:inputType="text"
+                            android:paddingHorizontal="14dp"
+                            android:singleLine="true"
+                            android:textColor="@android:color/white"
+                            android:textColorHint="#94A3B8"
+                            android:textSize="13sp" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnDuckDuckGoSearch"
+                            style="@style/Widget.Material3.Button"
+                            android:layout_width="wrap_content"
+                            android:layout_height="42dp"
+                            android:layout_marginStart="8dp"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp"
+                            android:text="Search"
+                            android:textSize="12sp"
+                            app:backgroundTint="#DE5833"
+                            app:cornerRadius="10dp"
+                            app:icon="@drawable/ic_search"
+                            app:iconSize="16dp" />
+                    </LinearLayout>
+
+                    <HorizontalScrollView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:scrollbars="none">
+
+                        <com.google.android.material.chip.ChipGroup
+                            android:id="@+id/chipGroupSpeedDial"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            app:singleLine="true">
+
+                            <com.google.android.material.chip.Chip
+                                android:id="@+id/chipDdgYoutube"
+                                style="@style/Widget.Material3.Chip.Assist"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="YouTube" />
+
+                            <com.google.android.material.chip.Chip
+                                android:id="@+id/chipDdgSoundCloud"
+                                style="@style/Widget.Material3.Chip.Assist"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="SoundCloud" />
+
+                            <com.google.android.material.chip.Chip
+                                android:id="@+id/chipDdgArchive"
+                                style="@style/Widget.Material3.Chip.Assist"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Archive.org Media" />
+
+                            <com.google.android.material.chip.Chip
+                                android:id="@+id/chipDdgFreeMusic"
+                                style="@style/Widget.Material3.Chip.Assist"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Free MP3 Music" />
+
+                            <com.google.android.material.chip.Chip
+                                android:id="@+id/chipDdgUbuntuIso"
+                                style="@style/Widget.Material3.Chip.Assist"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Linux ISO Torrents" />
+
+                            <com.google.android.material.chip.Chip
+                                android:id="@+id/chipDdgGithub"
+                                style="@style/Widget.Material3.Chip.Assist"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="GitHub Releases" />
+                        </com.google.android.material.chip.ChipGroup>
+                    </HorizontalScrollView>
                 </LinearLayout>
-            </FrameLayout>
+            </com.google.android.material.card.MaterialCardView>
 
             <!-- Contextual Detected Download Offer Banner (Audio / Video / Files) -->
             <LinearLayout
@@ -177,7 +288,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginHorizontal="10dp"
-                android:layout_marginVertical="6dp"
+                android:layout_marginVertical="4dp"
                 android:background="@drawable/card_background"
                 android:elevation="3dp"
                 android:orientation="vertical"
@@ -272,11 +383,82 @@
                 </LinearLayout>
             </LinearLayout>
 
+            <!-- Interactive Browser Content Feed (DuckDuckGo Search Results, Webpage Links & Detected Media) -->
             <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/rvBrowserContent"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:visibility="gone" />
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:clipToPadding="false"
+                android:paddingHorizontal="10dp"
+                android:paddingTop="4dp"
+                android:paddingBottom="76dp"
+                android:visibility="visible" />
+
+            <!-- Managed Status / Loading Overlay Container -->
+            <FrameLayout
+                android:id="@+id/webViewContainer"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:background="#0F172A"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:id="@+id/browserEmptyOverlay"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:gravity="center"
+                    android:orientation="vertical"
+                    android:padding="24dp">
+
+                    <TextView
+                        android:id="@+id/tvOverlayBadge"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="14dp"
+                        android:background="@drawable/card_background"
+                        android:backgroundTint="#1E293B"
+                        android:paddingHorizontal="14dp"
+                        android:paddingVertical="6dp"
+                        android:text="Luca v23.0 (Build 23)"
+                        android:textColor="#38BDF8"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tvOverlayTitle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="10dp"
+                        android:gravity="center"
+                        android:text="DuckDuckGo Browser &amp; Media Detector"
+                        android:textColor="@android:color/white"
+                        android:textSize="19sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tvOverlaySubtitle"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center"
+                        android:maxWidth="360dp"
+                        android:text="Search DuckDuckGo or enter any website URL above to browse pages and detect downloadable audio, video, torrents, or files."
+                        android:textColor="#94A3B8"
+                        android:textSize="14sp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnOverlayRetry"
+                        style="@style/Widget.Material3.Button"
+                        android:layout_width="wrap_content"
+                        android:layout_height="44dp"
+                        android:layout_marginTop="16dp"
+                        android:text="@string/retry"
+                        android:visibility="gone"
+                        app:cornerRadius="10dp"
+                        app:icon="@drawable/ic_retry" />
+                </LinearLayout>
+            </FrameLayout>
         </LinearLayout>
 
         <!-- Bottom Browser Navigation & Link Sniffer Status Bar -->
@@ -287,7 +469,7 @@
             android:background="@color/colorHeaderBg"
             android:gravity="center_vertical"
             android:orientation="horizontal"
-            android:paddingHorizontal="12dp">
+            android:paddingHorizontal="10dp">
 
             <ImageButton
                 android:id="@+id/btnNavBack"
@@ -307,15 +489,24 @@
                 android:src="@drawable/ic_forward"
                 app:tint="@android:color/white" />
 
+            <ImageButton
+                android:id="@+id/btnNavHome"
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="DuckDuckGo Home"
+                android:src="@drawable/ic_browser"
+                app:tint="#38BDF8" />
+
             <TextView
                 android:id="@+id/tvSnifferStatus"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_marginHorizontal="8dp"
+                android:layout_marginHorizontal="6dp"
                 android:layout_weight="1"
                 android:ellipsize="end"
                 android:maxLines="1"
-                android:text="Luca v23.0 (Build 23) • Ready"
+                android:text="DuckDuckGo • Ready"
                 android:textColor="#94A3B8"
                 android:textSize="12sp" />
 

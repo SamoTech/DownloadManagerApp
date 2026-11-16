@@ -182,7 +182,7 @@
     <string name="completed_cleared">Completed downloads cleared</string>
     <string name="smart_browser">Smart Browser</string>
     <string name="browser_sniff_links">Browse &amp; Detect Downloadable Links</string>
-    <string name="browser_url_hint">Enter website URL (e.g. https://...)</string>
+    <string name="browser_url_hint">Search DuckDuckGo or enter website URL...</string>
     <string name="detected_links">Detected Downloadable Links</string>
     <string name="download_all">Download All</string>
     <string name="media_player">Media Player</string>

@@ -4320,5 +4320,75 @@ class DownloadManagerCoreVerificationTest {
             scriptUrls.contains("https://cdn.example.org/streams/clip_1080p.mp4?token=abc&exp=999")
         )
     }
+
+    @Test
+    fun phase10_duckDuckGoBrowserMainPageDefaultSearchAndInteractiveResults() {
+        // 1. DuckDuckGo Main Page & Home URL checks
+        assertEquals("https://duckduckgo.com", com.example.downloadmanager.activity.BrowserActivity.DEFAULT_HOME_URL)
+        assertTrue(com.example.downloadmanager.activity.BrowserActivity.isDuckDuckGoHomeUrl(""))
+        assertTrue(com.example.downloadmanager.activity.BrowserActivity.isDuckDuckGoHomeUrl("https://duckduckgo.com"))
+        assertTrue(com.example.downloadmanager.activity.BrowserActivity.isDuckDuckGoHomeUrl("https://www.duckduckgo.com/"))
+        assertFalse(com.example.downloadmanager.activity.BrowserActivity.isDuckDuckGoHomeUrl("https://duckduckgo.com/?q=ubuntu+iso"))
+
+        // 2. Omnibox input resolution: DuckDuckGo as default search engine vs direct domains/URLs
+        assertEquals(
+            "https://duckduckgo.com",
+            com.example.downloadmanager.activity.BrowserActivity.resolveBrowserInputToUrl("   ")
+        )
+        assertEquals(
+            "https://duckduckgo.com/?q=ubuntu+iso+download",
+            com.example.downloadmanager.activity.BrowserActivity.resolveBrowserInputToUrl("ubuntu iso download")
+        )
+        assertEquals(
+            "https://duckduckgo.com/?q=music",
+            com.example.downloadmanager.activity.BrowserActivity.resolveBrowserInputToUrl("music")
+        )
+        assertEquals(
+            "https://youtube.com/watch?v=dQw4w9WgXcQ",
+            com.example.downloadmanager.activity.BrowserActivity.resolveBrowserInputToUrl("youtube.com/watch?v=dQw4w9WgXcQ")
+        )
+        assertEquals(
+            "https://archive.org/details/audio",
+            com.example.downloadmanager.activity.BrowserActivity.resolveBrowserInputToUrl("https://archive.org/details/audio")
+        )
+
+        // 3. DuckDuckGo query extraction & redirect URL unwrapping
+        assertEquals(
+            "creative commons mp3",
+            com.example.downloadmanager.activity.BrowserActivity.extractDuckDuckGoSearchQuery(
+                "https://duckduckgo.com/?q=creative+commons+mp3"
+            )
+        )
+        val unwrapped = com.example.downloadmanager.activity.BrowserActivity.unwrapDuckDuckGoRedirectUrl(
+            "//duckduckgo.com/l/?uddg=https%3A%2F%2Freleases.ubuntu.com%2F24.04%2Fubuntu-24.04-desktop-amd64.iso.torrent&rut=abc"
+        )
+        assertEquals(
+            "https://releases.ubuntu.com/24.04/ubuntu-24.04-desktop-amd64.iso.torrent",
+            unwrapped
+        )
+
+        // 4. Interactive DuckDuckGo HTML search result parsing
+        val sampleDdgHtml = """
+            <html><head><title>ubuntu iso at DuckDuckGo</title></head><body>
+            <div class="result">
+                <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Freleases.ubuntu.com%2F24.04%2F">Ubuntu 24.04 LTS Releases</a>
+                <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Freleases.ubuntu.com%2F24.04%2F">Download official Ubuntu desktop and server ISO images.</a>
+            </div>
+            <div class="result">
+                <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Farchive.org%2Fdetails%2Fopensource_audio">Open Source Audio — Internet Archive</a>
+                <div class="result__snippet">Free MP3 and FLAC community audio recordings.</div>
+            </div>
+            </body></html>
+        """.trimIndent()
+        val parsedResults = com.example.downloadmanager.activity.BrowserActivity.parseDuckDuckGoSearchResults(sampleDdgHtml)
+        assertEquals(2, parsedResults.size)
+        assertEquals("Ubuntu 24.04 LTS Releases", parsedResults[0].title)
+        assertEquals("https://releases.ubuntu.com/24.04/", parsedResults[0].url)
+        assertTrue(parsedResults[0].isNavigablePage)
+        assertTrue(parsedResults[0].subtitle.contains("Download official Ubuntu desktop"))
+        assertEquals("Open Source Audio — Internet Archive", parsedResults[1].title)
+        assertEquals("https://archive.org/details/opensource_audio", parsedResults[1].url)
+    }
 }
+
 
