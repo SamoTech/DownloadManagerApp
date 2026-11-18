@@ -3,6 +3,13 @@ package com.example.downloadmanager.manager
 import android.app.Application
 import android.util.Log
 import androidx.preference.PreferenceManager
+import com.example.downloadmanager.extraction.BrowserSessionBridge
+import com.example.downloadmanager.extraction.ExtractionContext
+import com.example.downloadmanager.extraction.HeadlessWebViewSniffer
+import com.example.downloadmanager.extraction.UrlNormalizer
+import com.example.downloadmanager.extraction.strategies.AudiomackStrategyExtractor
+import com.example.downloadmanager.extraction.strategies.BandcampStrategyExtractor
+import com.example.downloadmanager.extraction.strategies.MixcloudStrategyExtractor
 import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
@@ -64,6 +71,7 @@ class MusicDownloadManager(
 
     private val okHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            .cookieJar(BrowserSessionBridge.createSessionCookieJar())
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(25, TimeUnit.SECONDS)
             .writeTimeout(25, TimeUnit.SECONDS)
@@ -388,6 +396,14 @@ class MusicDownloadManager(
         }.getOrDefault(false)
     }
 
+    private fun isHeadlessSnifferEnabled(): Boolean {
+        val ctx = context ?: return false
+        return runCatching {
+            PreferenceManager.getDefaultSharedPreferences(ctx)
+                .getBoolean("headless_sniffer_fallback", true)
+        }.getOrDefault(true)
+    }
+
     suspend fun stopAndAwait(downloadId: Long) {
         val job = activeJobs.remove(downloadId)
         if (job != null && job.isActive) {
@@ -533,6 +549,87 @@ class MusicDownloadManager(
             return@withContext null
         }
 
+        // 6. Audio Strategy Extractors (Bandcamp, Mixcloud, Audiomack) + BrowserSessionBridge live capture + Layer 3 fallback
+        val cleanedMusicUrl = UrlNormalizer.stripTrackingParameters(validUrl)
+        val liveAudio = BrowserSessionBridge.getCapturedMediaForPage(cleanedMusicUrl)
+            .firstOrNull { it.isAudioOnly || (!it.isImage && (it.container in setOf("mp3", "m4a", "flac", "ogg", "opus", "aac", "m3u8"))) }
+        if (liveAudio != null) {
+            val ext = liveAudio.container?.let { if (it == "m3u8") ".m4a" else ".$it" } ?: ".m4a"
+            val plat = detectMusicPlatform(validUrl) ?: "Browser Audio"
+            val info = MusicTrackInfo(
+                title = liveAudio.title.substringBeforeLast('.').ifBlank { "$plat Track" },
+                artist = plat,
+                platform = plat,
+                sourceUrl = validUrl,
+                directAudioUrl = liveAudio.url,
+                containerExt = ext,
+                estimatedSizeBytes = liveAudio.contentLength.coerceAtLeast(0L),
+                mediaSource = "$plat Live Session Stream",
+                isPreview = false
+            )
+            trackInfoCache[cacheKey] = info
+            return@withContext info
+        }
+
+        val audioStrategies = listOf(
+            BandcampStrategyExtractor(),
+            MixcloudStrategyExtractor(),
+            AudiomackStrategyExtractor()
+        )
+        val matchingStrategy = audioStrategies.firstOrNull { it.supports(validUrl) || it.supports(cleanedMusicUrl) }
+        if (matchingStrategy != null) {
+            val resolvedAudioPage = UrlNormalizer.resolveAndNormalize(cleanedMusicUrl, okHttpClient)
+            val eCtx = ExtractionContext(
+                originalUrl = rawUrl,
+                normalizedUrl = cleanedMusicUrl,
+                resolvedUrl = resolvedAudioPage,
+                httpClient = okHttpClient,
+                allowThirdPartyResolvers = true,
+                desktopUserAgent = VideoDownloadManager.DESKTOP_USER_AGENT,
+                botUserAgent = VideoDownloadManager.DESKTOP_USER_AGENT,
+                requestHeaders = BrowserSessionBridge.getEffectiveHeadersForUrl(resolvedAudioPage)
+            )
+            val stratRes = runCatching { matchingStrategy.extract(eCtx) }.getOrNull()
+            if (stratRes != null && stratRes.formats.isNotEmpty()) {
+                val chosenFmt = stratRes.formats.firstOrNull { it.isAudioOnly } ?: stratRes.formats.first()
+                val ext = ".${chosenFmt.container?.lowercase(Locale.US)?.removePrefix(".") ?: "mp3"}"
+                val info = MusicTrackInfo(
+                    title = stratRes.video.title,
+                    artist = stratRes.video.author?.takeIf { it.isNotBlank() } ?: matchingStrategy.name,
+                    platform = matchingStrategy.name,
+                    sourceUrl = validUrl,
+                    directAudioUrl = chosenFmt.url,
+                    fallbackAudioUrl = stratRes.formats.getOrNull(1)?.url,
+                    containerExt = ext,
+                    estimatedSizeBytes = chosenFmt.fileSize ?: 0L,
+                    mediaSource = "${matchingStrategy.name} Direct Stream",
+                    isPreview = false,
+                    durationSeconds = stratRes.video.duration / 1000L
+                )
+                trackInfoCache[cacheKey] = info
+                return@withContext info
+            }
+            if (isHeadlessSnifferEnabled()) {
+                val sniffed = HeadlessWebViewSniffer.sniffMediaStreams(context, resolvedAudioPage)
+                val sniffedFmt = sniffed?.formats?.firstOrNull { it.isAudioOnly } ?: sniffed?.formats?.firstOrNull()
+                if (sniffed != null && sniffedFmt != null) {
+                    val ext = ".${sniffedFmt.container?.lowercase(Locale.US)?.removePrefix(".") ?: "m4a"}"
+                    val info = MusicTrackInfo(
+                        title = sniffed.video.title,
+                        artist = matchingStrategy.name,
+                        platform = matchingStrategy.name,
+                        sourceUrl = validUrl,
+                        directAudioUrl = sniffedFmt.url,
+                        containerExt = ext,
+                        mediaSource = "${matchingStrategy.name} Sniffed Stream",
+                        isPreview = false
+                    )
+                    trackInfoCache[cacheKey] = info
+                    return@withContext info
+                }
+            }
+        }
+
         val platform = detectMusicPlatform(validUrl) ?: "Audio Stream"
         val decodedSlug = try {
             URLDecoder.decode(
@@ -550,11 +647,14 @@ class MusicDownloadManager(
             .ifBlank { "$platform Track" }
 
         try {
-            val request = Request.Builder()
+            val reqBuilder = Request.Builder()
                 .url(validUrl)
                 .header("User-Agent", VideoDownloadManager.DESKTOP_USER_AGENT)
                 .header("Range", "bytes=0-32767")
-                .build()
+            BrowserSessionBridge.getEffectiveHeadersForUrl(validUrl).forEach { (k, v) ->
+                if (v.isNotBlank()) reqBuilder.header(k, v)
+            }
+            val request = reqBuilder.build()
             okHttpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     return@withContext null

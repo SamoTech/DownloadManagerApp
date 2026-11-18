@@ -15,6 +15,28 @@ import com.example.downloadmanager.model.DownloadType
 import com.example.downloadmanager.model.TorrentFileInfo
 import com.example.downloadmanager.model.TorrentFileState
 import com.example.downloadmanager.model.TorrentMetadata
+import com.example.downloadmanager.browser.WebAdBlockFilter
+import com.example.downloadmanager.browser.WebMediaSniffer
+import com.example.downloadmanager.extraction.BrowserSessionBridge
+import com.example.downloadmanager.extraction.ExtractionContext
+import com.example.downloadmanager.extraction.HeadlessWebViewSniffer
+import com.example.downloadmanager.extraction.SimpleJson
+import com.example.downloadmanager.extraction.UnifiedExtractionRouter
+import com.example.downloadmanager.extraction.UrlNormalizer
+import com.example.downloadmanager.extraction.strategies.AudiomackStrategyExtractor
+import com.example.downloadmanager.extraction.strategies.BandcampStrategyExtractor
+import com.example.downloadmanager.extraction.strategies.BilibiliStrategyExtractor
+import com.example.downloadmanager.extraction.strategies.LinkedInStrategyExtractor
+import com.example.downloadmanager.extraction.strategies.MixcloudStrategyExtractor
+import com.example.downloadmanager.extraction.strategies.PinterestStrategyExtractor
+import com.example.downloadmanager.extraction.strategies.RumbleStrategyExtractor
+import com.example.downloadmanager.extraction.strategies.SnapchatStrategyExtractor
+import com.example.downloadmanager.extraction.strategies.TumblrStrategyExtractor
+import com.example.downloadmanager.extraction.strategies.TwitchStrategyExtractor
+import com.example.downloadmanager.model.VideoFormat
+import com.example.downloadmanager.model.VideoInfo
+import com.example.downloadmanager.model.VideoStreamInfo
+import com.example.downloadmanager.utils.DashManifestParser
 import com.example.downloadmanager.utils.FilenameResolver
 import com.example.downloadmanager.utils.HlsPlaylistParser
 import com.example.downloadmanager.utils.HttpRangeValidator
@@ -22,6 +44,7 @@ import com.example.downloadmanager.utils.MediaAssetHelper
 import com.example.downloadmanager.utils.TorrentPathSafety
 import com.example.downloadmanager.utils.UrlClassifier
 import com.example.downloadmanager.utils.YouTubeExtractor
+import okhttp3.OkHttpClient
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -861,9 +884,17 @@ class DownloadManagerCoreVerificationTest {
             UrlClassifier.classify("https://music.youtube.com/watch?v=dQw4w9WgXcQ").kind
         )
 
-        val twitch = UrlClassifier.classify("https://www.twitch.tv/videos/123456789")
-        assertEquals(UrlClassifier.SourceKind.UNSUPPORTED, twitch.kind)
-        assertNotNull(twitch.unsupportedReason)
+        val twitchVod = UrlClassifier.classify("https://www.twitch.tv/videos/123456789")
+        assertEquals(UrlClassifier.SourceKind.VIDEO_PLATFORM, twitchVod.kind)
+        assertTrue(twitchVod.isSupported)
+
+        val twitchClip = UrlClassifier.classify("https://clips.twitch.tv/FunnyClipSlug")
+        assertEquals(UrlClassifier.SourceKind.VIDEO_PLATFORM, twitchClip.kind)
+        assertTrue(twitchClip.isSupported)
+
+        val twitchLive = UrlClassifier.classify("https://www.twitch.tv/somechannel")
+        assertEquals(UrlClassifier.SourceKind.UNSUPPORTED, twitchLive.kind)
+        assertNotNull(twitchLive.unsupportedReason)
 
         val appleMusic = UrlClassifier.classify("https://music.apple.com/us/album/song/12345")
         assertEquals(UrlClassifier.SourceKind.UNSUPPORTED, appleMusic.kind)
@@ -4596,6 +4627,253 @@ class DownloadManagerCoreVerificationTest {
             assertTrue(capturedGraphQlBody.contains("%22postID%22%3A%2266%22") || capturedGraphQlBody.contains("\"postID\":\"66\""))
         } finally {
             server.stop(0)
+        }
+    }
+
+    @Test
+    fun phase13_unified3LayerArchitecture_dashParser_extractors_browserBridge_andSequentialTorrent() = runBlocking {
+        BrowserSessionBridge.clearAllForTest()
+        HeadlessWebViewSniffer.testSnifferOverride = null
+
+        // 1. UrlNormalizer tracking stripping & shortlink redirect resolution
+        val dirtyUrl = "https://www.instagram.com/reel/C8abc123/?igsh=XYZ&utm_source=ig_web_copy_link&v=keepMe"
+        val stripped = UrlNormalizer.stripTrackingParameters(dirtyUrl)
+        assertEquals("https://www.instagram.com/reel/C8abc123/?v=keepMe", stripped)
+
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val okClient = OkHttpClient.Builder().followRedirects(true).followSslRedirects(true).build()
+        try {
+            server.createContext("/t.co/short1") { ex ->
+                val port = server.address.port
+                ex.responseHeaders.add("Location", "http://127.0.0.1:$port/final/video.html?utm_medium=social&id=42")
+                ex.sendResponseHeaders(302, -1)
+            }
+            server.createContext("/final/video.html") { ex ->
+                val body = "<html><title>Final Redirected</title></html>".toByteArray(StandardCharsets.UTF_8)
+                ex.sendResponseHeaders(200, body.size.toLong())
+                ex.responseBody.use { it.write(body) }
+            }
+
+            // DASH manifest endpoint for Layer 2 router expansion test
+            server.createContext("/manifest.mpd") { ex ->
+                val mpdXml = """
+                    <?xml version="1.0" encoding="utf-8"?>
+                    <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" mediaPresentationDuration="PT0M10S">
+                      <Period>
+                        <AdaptationSet mimeType="video/mp4" contentType="video">
+                          <Representation id="v1080" width="1920" height="1080" bandwidth="5000000">
+                            <BaseURL>video_1080.mp4</BaseURL>
+                          </Representation>
+                          <Representation id="v720" width="1280" height="720" bandwidth="2500000">
+                            <BaseURL>video_720.mp4</BaseURL>
+                          </Representation>
+                        </AdaptationSet>
+                        <AdaptationSet mimeType="audio/mp4" contentType="audio">
+                          <Representation id="a128" bandwidth="128000">
+                            <BaseURL>audio_128.m4a</BaseURL>
+                          </Representation>
+                        </AdaptationSet>
+                      </Period>
+                    </MPD>
+                """.trimIndent().toByteArray(StandardCharsets.UTF_8)
+                ex.responseHeaders.add("Content-Type", "application/dash+xml")
+                ex.sendResponseHeaders(200, mpdXml.size.toLong())
+                ex.responseBody.use { it.write(mpdXml) }
+            }
+
+            // Protected binary endpoint verifying BrowserSessionBridge cookies & Auth header pass-through
+            val receivedHeaders = ConcurrentHashMap<String, String>()
+            val protectedPayload = "SESSION_PROTECTED_BINARY_PAYLOAD_1234567890".toByteArray(StandardCharsets.UTF_8)
+            server.createContext("/protected/archive.bin") { ex ->
+                ex.requestHeaders["Cookie"]?.firstOrNull()?.let { receivedHeaders["Cookie"] = it }
+                ex.requestHeaders["Authorization"]?.firstOrNull()?.let { receivedHeaders["Authorization"] = it }
+                ex.requestHeaders["Referer"]?.firstOrNull()?.let { receivedHeaders["Referer"] = it }
+                ex.requestHeaders["User-Agent"]?.firstOrNull()?.let { receivedHeaders["User-Agent"] = it }
+                ex.responseHeaders.add("Content-Type", "application/octet-stream")
+                ex.responseHeaders.add("ETag", "\"prot-etag-1\"")
+                ex.sendResponseHeaders(200, protectedPayload.size.toLong())
+                ex.responseBody.use { it.write(protectedPayload) }
+            }
+
+            server.start()
+            val port = server.address.port
+            val baseUrl = "http://127.0.0.1:$port"
+
+            // Verify redirect resolution + tracking strip (only on known shortlink or stripTrackingParameters)
+            assertEquals("$baseUrl/final/video.html?id=42", UrlNormalizer.stripTrackingParameters("$baseUrl/final/video.html?utm_medium=social&id=42"))
+
+            // 2. DashManifestParser verification (BaseURL + SegmentTemplate + SegmentTimeline)
+            val templateMpd = """
+                <MPD mediaPresentationDuration="PT12S">
+                  <Period>
+                    <AdaptationSet mimeType="video/mp4">
+                      <Representation id="v1" width="1280" height="720" bandwidth="2200000">
+                        <SegmentTemplate timescale="1000" initialization="init_${'$'}RepresentationID${'$'}.mp4" media="chunk_${'$'}RepresentationID${'$'}_${'$'}Time${'$'}.m4s">
+                          <SegmentTimeline>
+                            <S t="0" d="4000" r="1"/>
+                            <S d="4000"/>
+                          </SegmentTimeline>
+                        </SegmentTemplate>
+                      </Representation>
+                    </AdaptationSet>
+                  </Period>
+                </MPD>
+            """.trimIndent()
+            val parsedTemplateMpd = DashManifestParser.parse(templateMpd, "$baseUrl/dash/stream.mpd")
+            assertEquals(1, parsedTemplateMpd.videoTracks.size)
+            val vt = parsedTemplateMpd.videoTracks.first()
+            assertEquals(720, vt.height)
+            assertEquals("$baseUrl/dash/init_v1.mp4", vt.initUrl)
+            assertEquals(
+                listOf("$baseUrl/dash/chunk_v1_0.m4s", "$baseUrl/dash/chunk_v1_4000.m4s", "$baseUrl/dash/chunk_v1_8000.m4s"),
+                vt.segmentUrls
+            )
+
+            // 3. SimpleJson pure-Kotlin parser & Mixcloud XOR decoder
+            val obj = SimpleJson.parse("""{"a":{"b":[{"url":"https:\/\/cdn.test\/v.mp4\u0026x=1"}]}}""") as Map<*, *>
+            val list = (obj["a"] as Map<*, *>)["b"] as List<*>
+            assertEquals("https://cdn.test/v.mp4&x=1", SimpleJson.unescapeUrl((list[0] as Map<*, *>)["url"] as String))
+            assertTrue(UrlClassifier.classify("https://pin.it/abc123").category == UrlClassifier.PlatformCategory.PINTEREST)
+            assertTrue(UrlClassifier.classify("https://www.snapchat.com/spotlight/xyz").category == UrlClassifier.PlatformCategory.SNAPCHAT)
+            assertTrue(UrlClassifier.classify("https://www.linkedin.com/posts/dev_123").category == UrlClassifier.PlatformCategory.LINKEDIN)
+            assertTrue(UrlClassifier.classify("https://staff.tumblr.com/post/12345").category == UrlClassifier.PlatformCategory.TUMBLR)
+            assertTrue(UrlClassifier.classify("https://rumble.com/v1234-clip.html").category == UrlClassifier.PlatformCategory.RUMBLE)
+            assertTrue(UrlClassifier.classify("https://www.bilibili.com/video/BV1xx411c7mD").category == UrlClassifier.PlatformCategory.BILIBILI)
+            assertTrue(UrlClassifier.classify("https://artist.bandcamp.com/track/demo").category == UrlClassifier.PlatformCategory.BANDCAMP)
+            assertTrue(UrlClassifier.classify("https://www.mixcloud.com/dj/mix/").category == UrlClassifier.PlatformCategory.MIXCLOUD)
+            assertTrue(UrlClassifier.classify("https://audiomack.com/artist/song/track").category == UrlClassifier.PlatformCategory.AUDIOMACK)
+
+            // 4. UnifiedExtractionRouter Layer 1 -> Layer 2 (.mpd expansion) & Layer 3 HeadlessWebViewSniffer fallback
+            val router = UnifiedExtractionRouter(
+                context = null,
+                httpClient = okClient,
+                desktopUserAgent = VideoDownloadManager.DESKTOP_USER_AGENT,
+                botUserAgent = VideoDownloadManager.DISCORD_BOT_USER_AGENT
+            )
+            val mpdResolved = router.resolve(
+                rawUrl = "$baseUrl/post/dash1",
+                enableHeadlessFallback = false
+            ) {
+                VideoStreamInfo(
+                    video = VideoInfo("d1", "DASH Test", "$baseUrl/post/dash1", author = "Test"),
+                    formats = listOf(VideoFormat("mpd_root", "$baseUrl/manifest.mpd", "DASH", "mp4"))
+                )
+            }
+            assertNotNull(mpdResolved)
+            assertTrue("Layer 2 must expand .mpd into adaptive video heights", mpdResolved!!.formats.any { it.formatId.startsWith("adaptive_dash_1080p") })
+            assertTrue("Layer 2 must expand .mpd into adaptive audio track", mpdResolved.formats.any { it.isAudioOnly && it.url == "$baseUrl/audio_128.m4a" })
+
+            // Layer 3 HeadlessWebViewSniffer fallback test (invoked automatically when Layer 1 returns null)
+            HeadlessWebViewSniffer.testSnifferOverride = { target ->
+                VideoStreamInfo(
+                    video = VideoInfo("l3", "Threads Dynamic Sniffed", target, author = "Sniffer"),
+                    formats = listOf(VideoFormat("webview_sniff_0_mp4", "$baseUrl/sniffed_1080.mp4", "1080p HD", "mp4"))
+                )
+            }
+            val layer3Resolved = router.resolve(
+                rawUrl = "https://www.threads.com/@user/post/TOKEN123?xmt=track",
+                enableHeadlessFallback = true
+            ) { null }
+            assertNotNull("Layer 3 fallback should rescue failed Layer 1 extraction", layer3Resolved)
+            assertEquals("1080p HD", layer3Resolved!!.formats.first().quality)
+            HeadlessWebViewSniffer.testSnifferOverride = null
+
+            // 5. BrowserSessionBridge cookie & header sync -> DownloadManager transfer verification
+            BrowserSessionBridge.recordRequestHeaders(
+                "$baseUrl/protected/archive.bin",
+                mapOf(
+                    "Cookie" to "session=luca_session_99",
+                    "Authorization" to "Bearer test_tok",
+                    "Referer" to "$baseUrl/member/page",
+                    "User-Agent" to "LucaBrowserCustomUA/29.0"
+                )
+            )
+            val tempDir = createTempDirectory("phase13_bridge").toFile()
+            try {
+                val repo = DownloadRepository(InMemoryDownloadDao())
+                val dm = DownloadManager(null, repo)
+                val jobItem = DownloadItem(
+                    id = 9001L,
+                    url = "$baseUrl/protected/archive.bin",
+                    filename = "archive.bin",
+                    savePath = tempDir.absolutePath,
+                    downloadType = DownloadType.DIRECT,
+                    status = DownloadStatus.QUEUED
+                )
+                repo.insert(jobItem)
+                var completed: DownloadItem? = null
+                dm.executeDownloadJob(jobItem, { _, _, _, _ -> }, { completed = it }, { _, err -> fail(err) })
+                assertNotNull(completed)
+                assertEquals(DownloadStatus.COMPLETED, completed!!.status)
+                assertEquals("session=luca_session_99", receivedHeaders["Cookie"])
+                assertEquals("Bearer test_tok", receivedHeaders["Authorization"])
+                assertEquals("$baseUrl/member/page", receivedHeaders["Referer"])
+                assertEquals("LucaBrowserCustomUA/29.0", receivedHeaders["User-Agent"])
+            } finally {
+                tempDir.deleteRecursively()
+            }
+
+            // 6. WebAdBlockFilter & WebMediaSniffer filtering verification
+            assertTrue(WebAdBlockFilter.isAdOrTrackerUrl("https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"))
+            assertFalse(WebAdBlockFilter.isAdOrTrackerUrl("https://video-iad3-1.cdninstagram.com/v/t50.2886-16/clip.mp4"))
+            assertNull(WebMediaSniffer.classifyInterceptedUrl("https://pbs.twimg.com/profile_images/123/avatar_normal.jpg", "https://x.com"))
+            assertNull(WebMediaSniffer.classifyInterceptedUrl("https://static.cdninstagram.com/rsrc.php/v3/sound.mp3", "https://threads.com"))
+            val capturedStream = WebMediaSniffer.classifyInterceptedUrl(
+                "https://cdn.example.org/streams/movie_1080p.mp4?token=abc",
+                "https://example.org/watch"
+            )
+            assertNotNull(capturedStream)
+            assertEquals("1080p HD", capturedStream!!.qualityLabel)
+
+            // 7. TorrentDownloadManager Sequential vs Rarest-First piece selection
+            val needed = listOf(0, 1, 2, 3)
+            val peerBits = java.util.BitSet(4).apply { set(0, 4) }
+            val avail = java.util.concurrent.atomic.AtomicIntegerArray(4).apply {
+                set(0, 10)
+                set(1, 8)
+                set(2, 1) // rarest is piece 2
+                set(3, 5)
+            }
+            val inFlightSeq = mutableSetOf<Int>()
+            val firstSeq = TorrentDownloadManager.selectNextPieceIndexForMode(
+                neededPiecesList = needed,
+                completedPieces = emptySet(),
+                inFlightPieces = inFlightSeq,
+                peerBitfield = peerBits,
+                sawBitfieldOrHave = true,
+                peerRejected = emptySet(),
+                pieceAvailability = avail,
+                sequentialMode = true
+            )
+            val secondSeq = TorrentDownloadManager.selectNextPieceIndexForMode(
+                neededPiecesList = needed,
+                completedPieces = emptySet(),
+                inFlightPieces = inFlightSeq,
+                peerBitfield = peerBits,
+                sawBitfieldOrHave = true,
+                peerRejected = emptySet(),
+                pieceAvailability = avail,
+                sequentialMode = true
+            )
+            assertEquals("Sequential mode must pick piece 0 then piece 1", 0, firstSeq)
+            assertEquals("Sequential mode must pick piece 1 next", 1, secondSeq)
+
+            val inFlightRarest = mutableSetOf(0, 3) // boundary pieces already in flight
+            val rarestNext = TorrentDownloadManager.selectNextPieceIndexForMode(
+                neededPiecesList = needed,
+                completedPieces = emptySet(),
+                inFlightPieces = inFlightRarest,
+                peerBitfield = peerBits,
+                sawBitfieldOrHave = true,
+                peerRejected = emptySet(),
+                pieceAvailability = avail,
+                sequentialMode = false
+            )
+            assertEquals("Non-sequential mode must pick rarest piece (2)", 2, rarestNext)
+        } finally {
+            HeadlessWebViewSniffer.testSnifferOverride = null
+            BrowserSessionBridge.clearAllForTest()
+            runCatching { server.stop(0) }
         }
     }
 }

@@ -31,7 +31,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="4dp"
                 android:paddingHorizontal="4dp"
-                android:text="Smart Browser • Luca v28.0 (Build 28)"
+                android:text="Smart Browser • Luca v29.0 (Build 29)"
                 android:textColor="#38BDF8"
                 android:textSize="11sp"
                 android:textStyle="bold" />
@@ -421,7 +421,7 @@
                         android:backgroundTint="#1E293B"
                         android:paddingHorizontal="14dp"
                         android:paddingVertical="6dp"
-                        android:text="Luca v28.0 (Build 28)"
+                        android:text="Luca v29.0 (Build 29)"
                         android:textColor="#38BDF8"
                         android:textSize="12sp"
                         android:textStyle="bold" />
@@ -502,24 +502,52 @@
                 android:id="@+id/tvSnifferStatus"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_marginHorizontal="6dp"
+                android:layout_marginHorizontal="4dp"
                 android:layout_weight="1"
                 android:ellipsize="end"
                 android:maxLines="1"
                 android:text="DuckDuckGo • Ready"
                 android:textColor="#94A3B8"
-                android:textSize="12sp" />
+                android:textSize="11sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnToggleDesktop"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:minWidth="0dp"
+                android:paddingHorizontal="6dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:text="@string/browser_desktop_mode"
+                android:textColor="#94A3B8"
+                android:textSize="11sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnToggleAdBlock"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:minWidth="0dp"
+                android:paddingHorizontal="6dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:text="@string/browser_adblock_short"
+                android:textColor="#38BDF8"
+                android:textSize="11sp" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnScanPage"
                 style="@style/Widget.Material3.Button.TextButton"
                 android:layout_width="wrap_content"
-                android:layout_height="38dp"
+                android:layout_height="40dp"
+                android:minWidth="0dp"
+                android:paddingHorizontal="8dp"
                 android:insetTop="0dp"
                 android:insetBottom="0dp"
-                android:text="Scan Page"
+                android:text="Scan"
                 android:textColor="@color/colorAccent"
-                android:textSize="12sp" />
+                android:textSize="11sp" />
         </LinearLayout>
     </LinearLayout>
 

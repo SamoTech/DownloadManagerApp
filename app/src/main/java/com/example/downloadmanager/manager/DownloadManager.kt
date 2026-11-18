@@ -5,6 +5,7 @@ import android.os.Environment
 import android.util.Log
 import android.webkit.MimeTypeMap
 import androidx.preference.PreferenceManager
+import com.example.downloadmanager.extraction.BrowserSessionBridge
 import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
@@ -49,6 +50,7 @@ class DownloadManager(
 
     private val okHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            .cookieJar(BrowserSessionBridge.createSessionCookieJar())
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(25, TimeUnit.SECONDS)
             .writeTimeout(25, TimeUnit.SECONDS)
@@ -234,12 +236,24 @@ class DownloadManager(
     )
 
     private fun applyDirectRequestHeaders(reqBuilder: Request.Builder, url: String) {
-        reqBuilder.header("User-Agent", DEFAULT_USER_AGENT)
+        val sessionHeaders = BrowserSessionBridge.getEffectiveHeadersForUrl(url)
+        reqBuilder.header("User-Agent", sessionHeaders["User-Agent"] ?: DEFAULT_USER_AGENT)
         reqBuilder.header("Accept", "*/*")
         reqBuilder.header("Accept-Encoding", "identity")
         val parsed = url.toHttpUrlOrNull()
-        if (parsed != null) {
-            reqBuilder.header("Referer", "${parsed.scheme}://${parsed.host}/")
+        val referer = sessionHeaders["Referer"] ?: parsed?.let { "${it.scheme}://${it.host}/" }
+        if (!referer.isNullOrBlank()) {
+            reqBuilder.header("Referer", referer)
+        }
+        sessionHeaders.forEach { (k, v) ->
+            if (!k.equals("User-Agent", ignoreCase = true) &&
+                !k.equals("Referer", ignoreCase = true) &&
+                !k.equals("Accept", ignoreCase = true) &&
+                !k.equals("Accept-Encoding", ignoreCase = true) &&
+                v.isNotBlank()
+            ) {
+                reqBuilder.header(k, v)
+            }
         }
     }
 

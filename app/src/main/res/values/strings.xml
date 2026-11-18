@@ -186,4 +186,12 @@
     <string name="detected_links">Detected Downloadable Links</string>
     <string name="download_all">Download All</string>
     <string name="media_player">Media Player</string>
+    <string name="headless_sniffer_fallback">Automatic Headless Stream Sniffer</string>
+    <string name="headless_sniffer_fallback_summary">Use background WebView stream capture automatically if direct post extraction fails</string>
+    <string name="browser_ad_block">Browser Ad &amp; Tracker Blocker</string>
+    <string name="browser_ad_block_summary">Block known ad networks, analytics beacons, and static tracking assets inside Smart Browser</string>
+    <string name="torrent_sequential_download">Sequential Piece Download</string>
+    <string name="torrent_sequential_download_summary">Download torrent pieces in ascending sequential order for faster media previewing</string>
+    <string name="browser_desktop_mode">Desktop</string>
+    <string name="browser_adblock_short">Shield</string>
 </resources>

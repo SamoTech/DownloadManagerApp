@@ -1,6 +1,8 @@
 package com.example.downloadmanager.activity
 
+import android.annotation.SuppressLint
 import android.content.Intent
+import android.graphics.Bitmap
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -9,17 +11,31 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
+import android.webkit.CookieManager
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import androidx.preference.PreferenceManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.example.downloadmanager.BuildConfig
 import com.example.downloadmanager.R
+import com.example.downloadmanager.browser.WebAdBlockFilter
+import com.example.downloadmanager.browser.WebMediaSniffer
 import com.example.downloadmanager.databinding.ActivityBrowserBinding
+import com.example.downloadmanager.extraction.BrowserSessionBridge
+import com.example.downloadmanager.extraction.SimpleJson
 import com.example.downloadmanager.manager.MusicDownloadManager
 import com.example.downloadmanager.manager.VideoDownloadManager
 import com.example.downloadmanager.model.DownloadDatabase
@@ -38,6 +54,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -64,9 +81,16 @@ class BrowserActivity : AppCompatActivity() {
     private val navBackStack = ArrayDeque<String>()
     private val navForwardStack = ArrayDeque<String>()
     private lateinit var inlineDetectedAdapter: DetectedLinkAdapter
+    private var liveWebView: WebView? = null
+    private var isDesktopMode: Boolean = false
+    private var isAdBlockEnabled: Boolean = true
+    private var isForegroundResumed: Boolean = false
+    private var rendererCrashCount: Int = 0
+    private var deferredCrashRecoveryUrl: String? = null
 
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            .cookieJar(BrowserSessionBridge.createSessionCookieJar())
             .connectTimeout(12, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .followRedirects(true)
@@ -86,11 +110,15 @@ class BrowserActivity : AppCompatActivity() {
     companion object {
         const val DEFAULT_HOME_URL = "https://duckduckgo.com"
         const val DUCKDUCKGO_HTML_SEARCH_BASE = "https://html.duckduckgo.com/html/?q="
+        private const val CHROME_MOBILE_UA =
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        private const val CHROME_DESKTOP_UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         private val AUDIO_EXTENSIONS = setOf(
             "mp3", "flac", "m4a", "wav", "ogg", "aac", "opus", "wma"
         )
         private val VIDEO_EXTENSIONS = setOf(
-            "mp4", "mkv", "webm", "mov", "avi", "m4v", "3gp", "m3u8"
+            "mp4", "mkv", "webm", "mov", "avi", "m4v", "3gp", "m3u8", "mpd"
         )
         private val DIRECT_FILE_EXTENSIONS = setOf(
             "zip", "rar", "7z", "tar", "gz", "bz2", "xz",
@@ -717,6 +745,9 @@ class BrowserActivity : AppCompatActivity() {
         musicDownloadManager = MusicDownloadManager(application, repository)
         videoDownloadManager = VideoDownloadManager(application, repository)
 
+        isAdBlockEnabled = PreferenceManager.getDefaultSharedPreferences(this)
+            .getBoolean("browser_ad_block", true)
+
         val versionBadge = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
         binding.tvBrowserHeaderVersion.text = "DuckDuckGo Browser • $versionBadge"
         binding.tvOverlayBadge.text = versionBadge
@@ -734,6 +765,7 @@ class BrowserActivity : AppCompatActivity() {
 
         setupListeners()
         setupBackNavigation()
+        updateToggleButtonAppearances()
 
         val initialUrl = intent.getStringExtra("url")?.trim()
         if (!initialUrl.isNullOrBlank()) {
@@ -743,12 +775,310 @@ class BrowserActivity : AppCompatActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        isForegroundResumed = true
+        liveWebView?.onResume()
+        val deferredUrl = deferredCrashRecoveryUrl
+        if (deferredUrl != null) {
+            deferredCrashRecoveryUrl = null
+            showRendererRecoveryOverlay(deferredUrl)
+        }
+    }
+
+    override fun onPause() {
+        isForegroundResumed = false
+        liveWebView?.onPause()
+        super.onPause()
+    }
+
+    private fun updateToggleButtonAppearances() {
+        binding.btnToggleDesktop.setTextColor(
+            if (isDesktopMode) getColor(R.color.colorAccent) else 0xFF94A3B8.toInt()
+        )
+        binding.btnToggleAdBlock.setTextColor(
+            if (isAdBlockEnabled) 0xFF38BDF8.toInt() else 0xFF64748B.toInt()
+        )
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun ensureWebView(): WebView {
+        liveWebView?.let { return it }
+        val wv = WebView(this)
+        val cookieManager = runCatching { CookieManager.getInstance() }.getOrNull()
+        cookieManager?.setAcceptCookie(true)
+        cookieManager?.setAcceptThirdPartyCookies(wv, true)
+
+        val ua = if (isDesktopMode) CHROME_DESKTOP_UA else CHROME_MOBILE_UA
+        BrowserSessionBridge.lastWebViewUserAgent = ua
+
+        wv.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            databaseEnabled = true
+            useWideViewPort = isDesktopMode
+            loadWithOverviewMode = true
+            builtInZoomControls = true
+            displayZoomControls = false
+            mediaPlaybackRequiresUserGesture = true
+            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            userAgentString = ua
+        }
+
+        wv.setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
+            if (url.isNullOrBlank()) return@setDownloadListener
+            val referer = currentUrl
+            val headers = buildMap {
+                put("User-Agent", userAgent ?: ua)
+                if (referer.isNotBlank()) put("Referer", referer)
+                cookieManager?.getCookie(url)?.takeIf { it.isNotBlank() }?.let { put("Cookie", it) }
+            }
+            BrowserSessionBridge.recordRequestHeaders(url, headers)
+            val suggested = FilenameResolver.parseContentDisposition(contentDisposition)
+                ?: FilenameResolver.extractFilenameFromUrl(url)
+            val dlType = when {
+                suggested.endsWith(".torrent", true) || mimetype.contains("bittorrent", true) -> DownloadType.TORRENT
+                mimetype.startsWith("audio/", true) -> DownloadType.MUSIC
+                mimetype.startsWith("video/", true) -> DownloadType.VIDEO
+                else -> DownloadType.DIRECT
+            }
+            val sizeText = if (contentLength > 0) " (${contentLength / 1024} KB)" else ""
+            openInAddDownload(
+                DetectedLinkItem(
+                    title = suggested,
+                    url = url,
+                    downloadType = dlType,
+                    badgeLabel = "${dlType.name}$sizeText"
+                )
+            )
+        }
+
+        wv.webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                if (newProgress in 1..99) {
+                    binding.progressBarWeb.visibility = View.VISIBLE
+                    binding.progressBarWeb.progress = newProgress
+                } else if (newProgress >= 100) {
+                    binding.progressBarWeb.visibility = View.GONE
+                }
+            }
+
+            override fun onReceivedTitle(view: WebView?, title: String?) {
+                val clean = title?.trim().orEmpty()
+                if (clean.isNotBlank()) {
+                    currentPageTitle = clean
+                }
+            }
+        }
+
+        wv.webViewClient = object : WebViewClient() {
+            override fun shouldInterceptRequest(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): WebResourceResponse? {
+                val reqUrl = request?.url?.toString() ?: return null
+                if (isAdBlockEnabled && WebAdBlockFilter.isAdOrTrackerUrl(reqUrl)) {
+                    return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+                }
+
+                val activePage = currentUrl
+                val reqHeaders = HashMap<String, String>()
+                request.requestHeaders?.forEach { (k, v) -> reqHeaders[k] = v }
+                if (!reqHeaders.containsKey("Referer") && activePage.startsWith("http")) {
+                    reqHeaders["Referer"] = activePage
+                }
+                if (!reqHeaders.containsKey("User-Agent")) {
+                    reqHeaders["User-Agent"] = if (isDesktopMode) CHROME_DESKTOP_UA else CHROME_MOBILE_UA
+                }
+                cookieManager?.getCookie(reqUrl)?.takeIf { it.isNotBlank() }?.let { c ->
+                    reqHeaders["Cookie"] = c
+                }
+                BrowserSessionBridge.recordRequestHeaders(reqUrl, reqHeaders)
+                MusicDownloadManager.recordInterceptedSoundCloudStream(activePage, reqUrl)
+
+                WebMediaSniffer.classifyInterceptedUrl(
+                    url = reqUrl,
+                    pageUrl = activePage,
+                    pageTitle = currentPageTitle,
+                    headers = reqHeaders
+                )?.let { captured ->
+                    BrowserSessionBridge.recordCapturedMedia(captured)
+                    val dlType = when {
+                        captured.isAudioOnly -> DownloadType.MUSIC
+                        captured.isImage || captured.container in setOf("apk", "zip", "rar", "7z", "pdf", "iso", "tar", "gz") -> DownloadType.DIRECT
+                        captured.container == "torrent" -> DownloadType.TORRENT
+                        else -> DownloadType.VIDEO
+                    }
+                    val badge = when {
+                        captured.isImage -> captured.qualityLabel ?: "IMAGE"
+                        captured.isAudioOnly -> "AUDIO • ${captured.qualityLabel ?: "STREAM"}"
+                        dlType == DownloadType.TORRENT -> "TORRENT"
+                        dlType == DownloadType.DIRECT -> "FILE • ${(captured.container ?: "BIN").uppercase(Locale.US)}"
+                        else -> "VIDEO • ${captured.qualityLabel ?: "STREAM"}"
+                    }
+                    val detected = DetectedLinkItem(
+                        title = captured.title,
+                        url = captured.url,
+                        downloadType = dlType,
+                        badgeLabel = badge
+                    )
+                    mainHandler.post {
+                        if (!isFinishing && !isDestroyed) {
+                            addDetectedItemIfNew(detected, insertAtFront = !captured.isImage && dlType != DownloadType.DIRECT)
+                        }
+                    }
+                }
+                return super.shouldInterceptRequest(view, request)
+            }
+
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                val cleanUrl = url?.trim().orEmpty()
+                if (cleanUrl.startsWith("http")) {
+                    currentUrl = cleanUrl
+                    binding.etBrowserUrl.setText(cleanUrl)
+                    cookieManager?.getCookie(cleanUrl)?.let { cookies ->
+                        BrowserSessionBridge.recordCookieHeader(cleanUrl, cookies)
+                    }
+                }
+                if (!isDuckDuckGoHomeUrl(currentUrl) && extractDuckDuckGoSearchQuery(currentUrl) == null) {
+                    binding.browserEmptyOverlay.visibility = View.GONE
+                    binding.webViewContainer.visibility = View.VISIBLE
+                    binding.rvBrowserContent.visibility = View.GONE
+                }
+                updateNavButtonStates()
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                val activePageUrl = url?.takeIf { it.startsWith("http") } ?: currentUrl
+                binding.progressBarWeb.visibility = View.GONE
+                if (!isDuckDuckGoHomeUrl(activePageUrl) && extractDuckDuckGoSearchQuery(activePageUrl) == null) {
+                    binding.browserEmptyOverlay.visibility = View.GONE
+                }
+                cookieManager?.getCookie(activePageUrl)?.let { cookies ->
+                    BrowserSessionBridge.recordCookieHeader(activePageUrl, cookies)
+                }
+                cookieManager?.flush()
+                view?.title?.trim()?.takeIf { it.isNotBlank() }?.let { currentPageTitle = it }
+                refreshOfferForCurrentPage(activePageUrl, currentPageTitle)
+                updateNavButtonStates()
+
+                // DOM resource probe to capture <video>, <audio>, and <source> nodes injected dynamically
+                val domJs = """
+                    (function(){
+                      try {
+                        var u = [];
+                        document.querySelectorAll('video, audio, source').forEach(function(el){
+                          var s = el.currentSrc || el.src;
+                          if (s && s.indexOf('http') === 0) u.push(s);
+                        });
+                        return JSON.stringify(u);
+                      } catch(e) { return '[]'; }
+                    })();
+                """.trimIndent()
+                view?.evaluateJavascript(domJs) { raw ->
+                    val unquoted = raw?.trim()?.let { r ->
+                        if (r.startsWith("\"") && r.endsWith("\"")) SimpleJson.parse(r) as? String else r
+                    }.orEmpty()
+                    val urls = SimpleJson.parse(unquoted) as? List<*> ?: return@evaluateJavascript
+                    urls.forEach { entry ->
+                        val sUrl = (entry as? String)?.trim().orEmpty()
+                        if (sUrl.startsWith("http")) {
+                            val hdrs = mapOf(
+                                "User-Agent" to (if (isDesktopMode) CHROME_DESKTOP_UA else CHROME_MOBILE_UA),
+                                "Referer" to activePageUrl
+                            )
+                            WebMediaSniffer.classifyInterceptedUrl(
+                                url = sUrl,
+                                pageUrl = activePageUrl,
+                                pageTitle = currentPageTitle,
+                                headers = hdrs
+                            )?.let { cap ->
+                                BrowserSessionBridge.recordCapturedMedia(cap)
+                                val dType = if (cap.isAudioOnly) DownloadType.MUSIC else DownloadType.VIDEO
+                                addDetectedItemIfNew(
+                                    DetectedLinkItem(
+                                        title = cap.title,
+                                        url = cap.url,
+                                        downloadType = dType,
+                                        badgeLabel = cap.qualityLabel ?: dType.name
+                                    ),
+                                    insertAtFront = true
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                rendererCrashCount++
+                destroyWebViewSafely()
+                when (resolveRendererRecoveryAction(isForegroundResumed, rendererCrashCount)) {
+                    RendererRecoveryAction.DEFER_UNTIL_RESUME -> {
+                        deferredCrashRecoveryUrl = currentUrl
+                    }
+                    RendererRecoveryAction.SHOW_RECOVERY_OVERLAY -> {
+                        showRendererRecoveryOverlay(currentUrl)
+                    }
+                    RendererRecoveryAction.CIRCUIT_BREAKER_LIMIT -> {
+                        binding.browserEmptyOverlay.visibility = View.VISIBLE
+                        binding.tvOverlayTitle.text = "Web Renderer Reset"
+                        binding.tvOverlaySubtitle.text = "Repeated renderer interrupts for $currentUrl. Tap Retry or Home."
+                        binding.btnOverlayRetry.visibility = View.VISIBLE
+                        binding.btnOverlayRetry.setOnClickListener {
+                            rendererCrashCount = 0
+                            navigateTo(currentUrl, recordHistory = false)
+                        }
+                    }
+                }
+                return true
+            }
+        }
+
+        binding.webViewContainer.addView(
+            wv,
+            0,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        liveWebView = wv
+        return wv
+    }
+
+    private fun showRendererRecoveryOverlay(targetUrl: String) {
+        binding.webViewContainer.visibility = View.VISIBLE
+        binding.browserEmptyOverlay.visibility = View.VISIBLE
+        binding.tvOverlayTitle.text = "Page Interrupted — Ready to Reload"
+        binding.tvOverlaySubtitle.text = targetUrl
+        binding.btnOverlayRetry.visibility = View.VISIBLE
+        binding.btnOverlayRetry.setOnClickListener {
+            binding.browserEmptyOverlay.visibility = View.GONE
+            navigateTo(targetUrl, recordHistory = false)
+        }
+    }
+
+    private fun destroyWebViewSafely() {
+        val wv = liveWebView ?: return
+        liveWebView = null
+        runCatching {
+            wv.stopLoading()
+            wv.loadUrl("about:blank")
+            wv.clearHistory()
+            binding.webViewContainer.removeView(wv)
+            wv.removeAllViews()
+            wv.destroy()
+        }
+    }
+
     /**
      * Loads the DuckDuckGo Main Page (`https://duckduckgo.com`) as the browser's home screen,
      * displaying the interactive DuckDuckGo search hub and speed-dial portals.
      */
     private fun loadDuckDuckGoMainPage(recordHistory: Boolean = true) {
         activeScanJob?.cancel()
+        liveWebView?.stopLoading()
         if (recordHistory && currentUrl.isNotBlank() && !isDuckDuckGoHomeUrl(currentUrl)) {
             navBackStack.addLast(currentUrl)
             navForwardStack.clear()
@@ -768,6 +1098,7 @@ class BrowserActivity : AppCompatActivity() {
         binding.pageSummaryCard.visibility = View.GONE
         binding.progressBarWeb.visibility = View.GONE
         binding.webViewContainer.visibility = View.GONE
+        binding.browserEmptyOverlay.visibility = View.GONE
         binding.rvBrowserContent.visibility = View.VISIBLE
         binding.fabDetectedLinks.text = "Detected (0)"
 
@@ -781,7 +1112,11 @@ class BrowserActivity : AppCompatActivity() {
     private fun setupBackNavigation() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (navBackStack.isNotEmpty()) {
+                val wv = liveWebView
+                if (binding.webViewContainer.visibility == View.VISIBLE && wv != null && wv.canGoBack()) {
+                    wv.goBack()
+                    updateNavButtonStates()
+                } else if (navBackStack.isNotEmpty()) {
                     val prev = navBackStack.removeLast()
                     if (currentUrl.isNotBlank()) {
                         navForwardStack.addLast(currentUrl)
@@ -876,6 +1211,9 @@ class BrowserActivity : AppCompatActivity() {
 
         binding.btnBrowserReload.setOnClickListener {
             if (currentUrl.isNotBlank() && !isDuckDuckGoHomeUrl(currentUrl)) {
+                if (extractDuckDuckGoSearchQuery(currentUrl) == null && liveWebView != null) {
+                    liveWebView?.reload()
+                }
                 scanCurrentPageAsync(currentUrl, force = true)
             } else {
                 loadDuckDuckGoMainPage(recordHistory = false)
@@ -884,6 +1222,38 @@ class BrowserActivity : AppCompatActivity() {
 
         binding.btnNavHome.setOnClickListener {
             loadDuckDuckGoMainPage(recordHistory = true)
+        }
+
+        binding.btnToggleDesktop.setOnClickListener {
+            isDesktopMode = !isDesktopMode
+            val ua = if (isDesktopMode) CHROME_DESKTOP_UA else CHROME_MOBILE_UA
+            BrowserSessionBridge.lastWebViewUserAgent = ua
+            liveWebView?.settings?.apply {
+                userAgentString = ua
+                useWideViewPort = isDesktopMode
+            }
+            updateToggleButtonAppearances()
+            Toast.makeText(
+                this,
+                if (isDesktopMode) "Desktop mode enabled" else "Mobile mode enabled",
+                Toast.LENGTH_SHORT
+            ).show()
+            if (!isDuckDuckGoHomeUrl(currentUrl) && extractDuckDuckGoSearchQuery(currentUrl) == null) {
+                liveWebView?.reload()
+            }
+        }
+
+        binding.btnToggleAdBlock.setOnClickListener {
+            isAdBlockEnabled = !isAdBlockEnabled
+            PreferenceManager.getDefaultSharedPreferences(this).edit()
+                .putBoolean("browser_ad_block", isAdBlockEnabled)
+                .apply()
+            updateToggleButtonAppearances()
+            Toast.makeText(
+                this,
+                if (isAdBlockEnabled) "Ad & Tracker Blocker enabled" else "Ad & Tracker Blocker paused",
+                Toast.LENGTH_SHORT
+            ).show()
         }
 
         binding.btnScanPage.setOnClickListener {
@@ -899,7 +1269,11 @@ class BrowserActivity : AppCompatActivity() {
         }
 
         binding.btnNavBack.setOnClickListener {
-            if (navBackStack.isNotEmpty()) {
+            val wv = liveWebView
+            if (binding.webViewContainer.visibility == View.VISIBLE && wv != null && wv.canGoBack()) {
+                wv.goBack()
+                updateNavButtonStates()
+            } else if (navBackStack.isNotEmpty()) {
                 val prev = navBackStack.removeLast()
                 if (currentUrl.isNotBlank()) {
                     navForwardStack.addLast(currentUrl)
@@ -917,7 +1291,11 @@ class BrowserActivity : AppCompatActivity() {
         }
 
         binding.btnNavForward.setOnClickListener {
-            if (navForwardStack.isNotEmpty()) {
+            val wv = liveWebView
+            if (binding.webViewContainer.visibility == View.VISIBLE && wv != null && wv.canGoForward()) {
+                wv.goForward()
+                updateNavButtonStates()
+            } else if (navForwardStack.isNotEmpty()) {
                 val next = navForwardStack.removeLast()
                 if (currentUrl.isNotBlank()) {
                     navBackStack.addLast(currentUrl)
@@ -936,9 +1314,12 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     private fun updateNavButtonStates() {
-        val canGoBack = navBackStack.isNotEmpty() || !isDuckDuckGoHomeUrl(currentUrl)
+        val wvCanBack = binding.webViewContainer.visibility == View.VISIBLE && liveWebView?.canGoBack() == true
+        val wvCanFwd = binding.webViewContainer.visibility == View.VISIBLE && liveWebView?.canGoForward() == true
+        val canGoBack = wvCanBack || navBackStack.isNotEmpty() || !isDuckDuckGoHomeUrl(currentUrl)
+        val canGoFwd = wvCanFwd || navForwardStack.isNotEmpty()
         binding.btnNavBack.alpha = if (canGoBack) 1.0f else 0.45f
-        binding.btnNavForward.alpha = if (navForwardStack.isNotEmpty()) 1.0f else 0.45f
+        binding.btnNavForward.alpha = if (canGoFwd) 1.0f else 0.45f
     }
 
     private fun navigateTo(rawInput: String, recordHistory: Boolean = true) {
@@ -982,8 +1363,13 @@ class BrowserActivity : AppCompatActivity() {
         if (ddgQuery != null) {
             binding.etDuckDuckGoSearch.setText(ddgQuery)
             binding.duckDuckGoHomeCard.visibility = View.VISIBLE
+            binding.rvBrowserContent.visibility = View.VISIBLE
+            binding.webViewContainer.visibility = View.GONE
+            liveWebView?.stopLoading()
         } else {
             binding.duckDuckGoHomeCard.visibility = View.GONE
+            binding.rvBrowserContent.visibility = View.GONE
+            binding.webViewContainer.visibility = View.VISIBLE
         }
         detectedLinks.clear()
         pageNavigationLinks.clear()
@@ -994,12 +1380,15 @@ class BrowserActivity : AppCompatActivity() {
         binding.tvOverlayTitle.text = if (ddgQuery != null) {
             "Searching DuckDuckGo for \"$ddgQuery\"..."
         } else {
-            "Loading Page & Detecting Media..."
+            "Loading Live Page & Sniffing Media..."
         }
         binding.tvOverlaySubtitle.text = targetUrl
         binding.btnOverlayRetry.visibility = View.GONE
-        binding.webViewContainer.visibility = View.VISIBLE
-        binding.browserEmptyOverlay.visibility = View.VISIBLE
+        binding.browserEmptyOverlay.visibility = if (ddgQuery == null) View.VISIBLE else View.GONE
+
+        if (ddgQuery == null) {
+            ensureWebView().loadUrl(targetUrl)
+        }
 
         refreshOfferForCurrentPage(targetUrl, "")
         scanCurrentPageAsync(targetUrl, force = true)
@@ -1179,12 +1568,20 @@ class BrowserActivity : AppCompatActivity() {
             }
         }
 
-        binding.fabDetectedLinks.text = "Detected (${downloadableSnapshot.size})"
+        val hasHdStream = downloadableSnapshot.any {
+            it.badgeLabel.contains("1080", true) || it.badgeLabel.contains("720", true) || it.badgeLabel.contains("HD", true)
+        }
+        binding.fabDetectedLinks.text = if (hasHdStream && downloadableSnapshot.isNotEmpty()) {
+            "Detected (${downloadableSnapshot.size}) • HD"
+        } else {
+            "Detected (${downloadableSnapshot.size})"
+        }
         if (::inlineDetectedAdapter.isInitialized) {
             inlineDetectedAdapter.submitList(combinedFeed)
         }
 
-        if (combinedFeed.isNotEmpty()) {
+        val isDdgMode = isDuckDuckGoHomeUrl(currentUrl) || extractDuckDuckGoSearchQuery(currentUrl) != null
+        if (isDdgMode) {
             binding.rvBrowserContent.visibility = View.VISIBLE
             binding.webViewContainer.visibility = View.GONE
         } else {
@@ -1203,7 +1600,7 @@ class BrowserActivity : AppCompatActivity() {
                 navSnapshot.isNotEmpty() ->
                     "Browsing • ${navSnapshot.size} page links"
                 else ->
-                    "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE}) • Browsing"
+                    "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE}) • Live Web"
             }
             return
         }
@@ -1611,6 +2008,7 @@ class BrowserActivity : AppCompatActivity() {
     override fun onDestroy() {
         activeScanJob?.cancel()
         mainHandler.removeCallbacksAndMessages(null)
+        destroyWebViewSafely()
         super.onDestroy()
     }
 

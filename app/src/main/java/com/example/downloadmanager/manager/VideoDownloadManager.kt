@@ -3,6 +3,9 @@ package com.example.downloadmanager.manager
 import android.app.Application
 import android.util.Log
 import androidx.preference.PreferenceManager
+import com.example.downloadmanager.extraction.BrowserSessionBridge
+import com.example.downloadmanager.extraction.HeadlessWebViewSniffer
+import com.example.downloadmanager.extraction.UnifiedExtractionRouter
 import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
 import com.example.downloadmanager.model.DownloadStatus
@@ -10,6 +13,7 @@ import com.example.downloadmanager.model.DownloadType
 import com.example.downloadmanager.model.VideoFormat
 import com.example.downloadmanager.model.VideoInfo
 import com.example.downloadmanager.model.VideoStreamInfo
+import com.example.downloadmanager.utils.DashManifestParser
 import com.example.downloadmanager.utils.FilenameResolver
 import com.example.downloadmanager.utils.HlsPlaylistParser
 import com.example.downloadmanager.utils.HttpRangeValidator
@@ -56,6 +60,7 @@ class VideoDownloadManager(
 
     private val okHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            .cookieJar(BrowserSessionBridge.createSessionCookieJar())
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(25, TimeUnit.SECONDS)
             .writeTimeout(25, TimeUnit.SECONDS)
@@ -150,7 +155,16 @@ class VideoDownloadManager(
             "dai.ly" to "Dailymotion",
             "pinterest.com" to "Pinterest",
             "pin.it" to "Pinterest",
-            "twitch.tv" to "Twitch (Unsupported)",
+            "snapchat.com" to "Snapchat",
+            "t.snapchat.com" to "Snapchat",
+            "linkedin.com" to "LinkedIn",
+            "lnkd.in" to "LinkedIn",
+            "tumblr.com" to "Tumblr",
+            "tmblr.co" to "Tumblr",
+            "twitch.tv" to "Twitch",
+            "rumble.com" to "Rumble",
+            "bilibili.com" to "Bilibili",
+            "b23.tv" to "Bilibili",
             "archive.org" to "Internet Archive",
             "threads.net" to "Threads",
             "threads.com" to "Threads",
@@ -167,7 +181,7 @@ class VideoDownloadManager(
             }
             val clean = httpUrl.encodedPath.lowercase(Locale.US)
             val ext = clean.substringAfterLast(".", "")
-            if (ext in listOf("mp4", "mkv", "webm", "mov", "m3u8")) {
+            if (ext in listOf("mp4", "mkv", "webm", "mov", "m3u8", "mpd")) {
                 return "Direct Video (${ext.uppercase(Locale.US)})"
             }
             return null
@@ -284,6 +298,31 @@ class VideoDownloadManager(
             return UrlClassifier.matchesAnyDomain(host, "threads.net", "threads.com", "threads.instagram.com")
         }
 
+        fun isSnapchatUrl(url: String): Boolean {
+            val host = parseHost(url) ?: return false
+            return UrlClassifier.matchesAnyDomain(host, "snapchat.com", "t.snapchat.com")
+        }
+
+        fun isLinkedInUrl(url: String): Boolean {
+            val host = parseHost(url) ?: return false
+            return UrlClassifier.matchesAnyDomain(host, "linkedin.com", "lnkd.in")
+        }
+
+        fun isTumblrUrl(url: String): Boolean {
+            val host = parseHost(url) ?: return false
+            return UrlClassifier.matchesAnyDomain(host, "tumblr.com", "tmblr.co")
+        }
+
+        fun isRumbleUrl(url: String): Boolean {
+            val host = parseHost(url) ?: return false
+            return UrlClassifier.matchesDomain(host, "rumble.com")
+        }
+
+        fun isBilibiliUrl(url: String): Boolean {
+            val host = parseHost(url) ?: return false
+            return UrlClassifier.matchesAnyDomain(host, "bilibili.com", "b23.tv")
+        }
+
         fun isSocialVideoUrl(url: String): Boolean {
             return isYouTubeUrl(url) ||
                 isTikTokUrl(url) ||
@@ -294,7 +333,13 @@ class VideoDownloadManager(
                 isRedditUrl(url) ||
                 isVimeoUrl(url) ||
                 isDailymotionUrl(url) ||
-                isPinterestUrl(url)
+                isPinterestUrl(url) ||
+                isSnapchatUrl(url) ||
+                isLinkedInUrl(url) ||
+                isTumblrUrl(url) ||
+                isTwitchUrl(url) ||
+                isRumbleUrl(url) ||
+                isBilibiliUrl(url)
         }
 
         fun isWatchPageUrl(url: String): Boolean {
@@ -302,7 +347,8 @@ class VideoDownloadManager(
             val host = httpUrl.host.lowercase(Locale.US)
             val clean = httpUrl.encodedPath.lowercase(Locale.US)
             if (clean.endsWith(".mp4") || clean.endsWith(".m4a") || clean.endsWith(".mp3") ||
-                clean.endsWith(".webm") || clean.endsWith(".mkv") || clean.endsWith(".m3u8")
+                clean.endsWith(".webm") || clean.endsWith(".mkv") || clean.endsWith(".m3u8") ||
+                clean.endsWith(".mpd")
             ) {
                 return false
             }
@@ -315,7 +361,9 @@ class VideoDownloadManager(
                     "tikwm.com",
                     "tiktokcdn.com",
                     "vimeocdn.com",
-                    "pinimg.com"
+                    "pinimg.com",
+                    "bilivideo.com",
+                    "ttvnw.net"
                 )
             ) {
                 return false
@@ -331,7 +379,12 @@ class VideoDownloadManager(
                 (isVimeoUrl(url) && !UrlClassifier.matchesDomain(host, "vimeocdn.com")) ||
                 isDailymotionUrl(url) ||
                 isPinterestUrl(url) ||
-                isTwitchUrl(url)
+                isTwitchUrl(url) ||
+                isSnapchatUrl(url) ||
+                isLinkedInUrl(url) ||
+                isTumblrUrl(url) ||
+                isRumbleUrl(url) ||
+                isBilibiliUrl(url)
         }
     }
 
@@ -341,6 +394,23 @@ class VideoDownloadManager(
             PreferenceManager.getDefaultSharedPreferences(ctx)
                 .getBoolean("allow_third_party_resolvers", true)
         }.getOrDefault(true)
+    }
+
+    private fun isHeadlessSnifferEnabled(): Boolean {
+        val ctx = context ?: return false
+        return runCatching {
+            PreferenceManager.getDefaultSharedPreferences(ctx)
+                .getBoolean("headless_sniffer_fallback", true)
+        }.getOrDefault(true)
+    }
+
+    private fun createUnifiedRouter(): UnifiedExtractionRouter {
+        return UnifiedExtractionRouter(
+            context = context,
+            httpClient = okHttpClient,
+            desktopUserAgent = DESKTOP_USER_AGENT,
+            botUserAgent = DISCORD_BOT_USER_AGENT
+        )
     }
 
     suspend fun stopAndAwait(downloadId: Long) {
@@ -360,29 +430,39 @@ class VideoDownloadManager(
         excludedClients: Set<String> = emptySet()
     ): VideoStreamInfo? = withContext(Dispatchers.IO) {
         val validUrl = normalizeHttpUrl(url) ?: return@withContext null
-        if (isTwitchUrl(validUrl)) {
+        if (isTwitchUrl(validUrl) && !UrlClassifier.classify(validUrl).isSupported) {
             return@withContext null
         }
         if (!forceRefresh && excludedClients.isEmpty()) {
             streamInfoCache[validUrl]?.let { return@withContext it }
         }
         try {
-            val info = when {
-                isYouTubeUrl(validUrl) -> extractYouTubeInfo(validUrl, forceRefresh, excludedClients)
-                isArchiveDetailsUrl(validUrl) -> extractArchiveOrgVideoInfo(validUrl)
-                isTikTokUrl(validUrl) -> extractTikTokVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
-                isTwitterUrl(validUrl) -> extractTwitterVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
-                isInstagramUrl(validUrl) -> extractInstagramVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
-                isThreadsUrl(validUrl) -> extractThreadsVideoInfo(validUrl)
-                isFacebookUrl(validUrl) -> extractFacebookVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
-                isRedditUrl(validUrl) -> extractRedditVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
-                isVimeoUrl(validUrl) -> extractVimeoVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
-                isDailymotionUrl(validUrl) -> extractDailymotionVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
-                isPinterestUrl(validUrl) -> extractPinterestVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
-                else -> extractGenericOrWebVideoInfo(validUrl)
+            val router = createUnifiedRouter()
+            val info = router.resolve(
+                rawUrl = validUrl,
+                allowThirdPartyResolvers = isThirdPartyResolverEnabled(),
+                enableHeadlessFallback = !forceRefresh && excludedClients.isEmpty() && isHeadlessSnifferEnabled()
+            ) { resolvedUrl ->
+                when {
+                    isYouTubeUrl(resolvedUrl) -> extractYouTubeInfo(resolvedUrl, forceRefresh, excludedClients)
+                    isArchiveDetailsUrl(resolvedUrl) -> extractArchiveOrgVideoInfo(resolvedUrl)
+                    isTikTokUrl(resolvedUrl) -> extractTikTokVideoInfo(resolvedUrl) ?: extractGenericOrWebVideoInfo(resolvedUrl)
+                    isTwitterUrl(resolvedUrl) -> extractTwitterVideoInfo(resolvedUrl) ?: extractGenericOrWebVideoInfo(resolvedUrl)
+                    isInstagramUrl(resolvedUrl) -> extractInstagramVideoInfo(resolvedUrl) ?: extractGenericOrWebVideoInfo(resolvedUrl)
+                    isThreadsUrl(resolvedUrl) -> extractThreadsVideoInfo(resolvedUrl)
+                    isFacebookUrl(resolvedUrl) -> extractFacebookVideoInfo(resolvedUrl) ?: extractGenericOrWebVideoInfo(resolvedUrl)
+                    isRedditUrl(resolvedUrl) -> extractRedditVideoInfo(resolvedUrl) ?: extractGenericOrWebVideoInfo(resolvedUrl)
+                    isVimeoUrl(resolvedUrl) -> extractVimeoVideoInfo(resolvedUrl) ?: extractGenericOrWebVideoInfo(resolvedUrl)
+                    isDailymotionUrl(resolvedUrl) -> extractDailymotionVideoInfo(resolvedUrl) ?: extractGenericOrWebVideoInfo(resolvedUrl)
+                    isPinterestUrl(resolvedUrl) -> extractPinterestVideoInfo(resolvedUrl) ?: extractGenericOrWebVideoInfo(resolvedUrl)
+                    else -> extractGenericOrWebVideoInfo(resolvedUrl)
+                }
             }
             if (info != null && info.formats.isNotEmpty() && excludedClients.isEmpty()) {
                 streamInfoCache[validUrl] = info
+                if (info.video.url.isNotBlank() && info.video.url != validUrl) {
+                    streamInfoCache[info.video.url] = info
+                }
             }
             info
         } catch (e: Exception) {
@@ -825,7 +905,7 @@ class VideoDownloadManager(
 
     private fun extractInstagramVideoInfo(url: String): VideoStreamInfo? {
         return try {
-            val shortcode = Regex("""instagram\.com/(?:[^/]+/)?(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)""", RegexOption.IGNORE_CASE)
+            val shortcode = Regex("""instagram\.com/(?:[^/]+/)?(?:p|reel|reels|tv|stories/[^/]+)/([A-Za-z0-9_-]+)""", RegexOption.IGNORE_CASE)
                 .find(url)?.groupValues?.getOrNull(1) ?: return null
 
             val formats = mutableListOf<VideoFormat>()
@@ -2386,8 +2466,8 @@ class VideoDownloadManager(
         val validUrl = normalizeHttpUrl(downloadItem.url)
             ?: throw IllegalArgumentException("Invalid URL: ${downloadItem.url}")
 
-        if (isTwitchUrl(validUrl)) {
-            throw IllegalArgumentException("Twitch streams and VODs are not supported")
+        if (isTwitchUrl(validUrl) && !UrlClassifier.classify(validUrl).isSupported) {
+            throw IllegalArgumentException("Only Twitch VODs (/videos/<id>) and Clips are supported; live streams cannot be downloaded")
         }
 
         val wantAudioOnly = downloadItem.isAudioOnly || quality.equals("audio", ignoreCase = true)
@@ -2564,8 +2644,8 @@ class VideoDownloadManager(
         }
 
         val lookupUrl = sourceUrl ?: currentStreamUrl!!
-        if (isTwitchUrl(lookupUrl)) {
-            val msg = "Twitch streams and VODs are not supported"
+        if (isTwitchUrl(lookupUrl) && !UrlClassifier.classify(lookupUrl).isSupported) {
+            val msg = "Only Twitch VODs (/videos/<id>) and Clips are supported; live streams cannot be downloaded"
             repository.updateStatus(downloadItem.id, DownloadStatus.FAILED, msg)
             val errorItem = downloadItem.copy(status = DownloadStatus.FAILED, errorMessage = msg)
             onError(errorItem, msg)
@@ -3085,7 +3165,14 @@ class VideoDownloadManager(
     }
 
     private fun applyStreamHeaders(reqBuilder: Request.Builder, url: String, userAgent: String) {
-        reqBuilder.header("User-Agent", userAgent)
+        val bridgedHeaders = BrowserSessionBridge.getEffectiveHeadersForUrl(url)
+        val effectiveUa = bridgedHeaders["User-Agent"] ?: userAgent
+        reqBuilder.header("User-Agent", effectiveUa)
+        bridgedHeaders.forEach { (k, v) ->
+            if (!k.equals("User-Agent", ignoreCase = true) && !k.equals("Range", ignoreCase = true)) {
+                reqBuilder.header(k, v)
+            }
+        }
         val parsed = url.toHttpUrlOrNull()
         val host = parsed?.host?.lowercase(Locale.US).orEmpty()
         val isGoogleVideoHost = UrlClassifier.matchesDomain(host, "googlevideo.com") ||
@@ -3108,10 +3195,15 @@ class VideoDownloadManager(
             host.contains("twimg.com") || host.contains("twitter.com") || host.contains("x.com") -> "https://x.com/"
             host.contains("redd.it") || host.contains("reddit.com") -> "https://www.reddit.com/"
             host.contains("pinimg.com") || host.contains("pinterest.com") -> "https://www.pinterest.com/"
+            host.contains("bilivideo.com") || host.contains("bilibili.com") -> "https://www.bilibili.com/"
+            host.contains("twitch.tv") || host.contains("ttvnw.net") -> "https://www.twitch.tv/"
+            host.contains("mixcloud") -> "https://www.mixcloud.com/"
+            host.contains("audiomack") -> "https://audiomack.com/"
+            host.contains("bandcamp") || host.contains("bcbits.com") -> "https://bandcamp.com/"
             parsed != null -> "${parsed.scheme}://${parsed.host}/"
             else -> null
         }
-        if (referer != null) {
+        if (referer != null && !bridgedHeaders.containsKey("Referer")) {
             reqBuilder.header("Referer", referer)
         }
         if (host.contains("sndcdn.com") || host.contains("soundcloud.com")) {
@@ -3120,7 +3212,7 @@ class VideoDownloadManager(
     }
 
     /**
-     * Downloads a media stream (direct MP4/WebM, chunked GoogleVideo, or HLS `.m3u8` playlist) to [destFile].
+     * Downloads a media stream (direct MP4/WebM, chunked GoogleVideo, HLS `.m3u8`, or MPEG-DASH `.mpd`) to [destFile].
      * Verifies declared length framing from authoritative HTTP `Content-Length` headers so truncated transfers
      * fail rather than completing silently, while never rejecting streams whose size was only bitrate-estimated.
      */
@@ -3151,6 +3243,23 @@ class VideoDownloadManager(
             UrlClassifier.matchesDomain(it, "googlevideo.com")
         } == true || (parsedEffective?.encodedPath?.startsWith("/videoplayback") == true &&
             (effectiveUrl.contains("clen=") || effectiveUrl.contains("itag=")))
+
+        if (effectiveUrl.substringBefore("?").endsWith(".mpd", ignoreCase = true) ||
+            effectiveUrl.contains(".mpd?", ignoreCase = true)
+        ) {
+            return try {
+                downloadDashManifestToFile(downloadId, effectiveUrl, ua, destFile, onProgress)
+            } catch (e: IOException) {
+                val msg = e.message.orEmpty()
+                if ((msg.contains("403") || msg.contains("401") || msg.contains("410")) && onRefreshUrl != null) {
+                    val freshUrl = runCatching { onRefreshUrl.invoke() }.getOrNull()
+                    if (!freshUrl.isNullOrBlank() && freshUrl != effectiveUrl) {
+                        return streamUrlToFile(downloadId, freshUrl, destFile, expectedSize, onRefreshUrl, onProgress)
+                    }
+                }
+                throw e
+            }
+        }
 
         if (effectiveUrl.substringBefore("?").endsWith(".m3u8", ignoreCase = true) ||
             effectiveUrl.contains(".m3u8?", ignoreCase = true)
@@ -3709,10 +3818,117 @@ class VideoDownloadManager(
         applyStreamHeaders(reqBuilder, url, userAgent)
         okHttpClient.newCall(reqBuilder.build()).execute().use { resp ->
             if (!resp.isSuccessful) {
-                throw IOException("HLS playlist HTTP ${resp.code}: $url")
+                throw IOException("Playlist HTTP ${resp.code}: $url")
             }
-            return resp.body?.string() ?: throw IOException("Empty HLS playlist: $url")
+            return resp.body?.string() ?: throw IOException("Empty playlist body: $url")
         }
+    }
+
+    /**
+     * Downloads a pure-Kotlin MPEG-DASH (`.mpd`) stream, downloading video and audio tracks cleanly
+     * (supporting both single-file `<BaseURL>` and segmented `<SegmentTemplate>` / `<SegmentList>`)
+     * and muxing them via Android [MediaMuxer] inside [MediaAssetHelper.muxMp4VideoAndM4aAudio].
+     */
+    suspend fun downloadDashManifestToFile(
+        downloadId: Long,
+        mpdUrl: String,
+        userAgent: String,
+        destFile: File,
+        onProgress: (Long, Long, Int, Long) -> Unit
+    ): Boolean {
+        val xml = fetchTextStrict(mpdUrl, userAgent)
+        val parsed = DashManifestParser.parse(xml, mpdUrl)
+        val bestVideo = parsed.videoTracks.firstOrNull()
+        val bestAudio = parsed.audioTracks.firstOrNull()
+
+        if (bestVideo != null && bestAudio != null) {
+            val parentDir = destFile.parentFile
+            val tmpVid = File(parentDir, "${destFile.name}.dashvid.tmp")
+            val tmpAud = File(parentDir, "${destFile.name}.dashaud.tmp")
+            try {
+                val vidOk = downloadDashTrackToFile(downloadId, bestVideo, userAgent, tmpVid) { r, t, pct, spd ->
+                    onProgress(r, t, (pct * 80) / 100, spd)
+                }
+                val audOk = vidOk && downloadDashTrackToFile(downloadId, bestAudio, userAgent, tmpAud) { r, t, pct, spd ->
+                    onProgress(tmpVid.length() + r, tmpVid.length() + t, 80 + (pct * 15) / 100, spd)
+                }
+                if (audOk && MediaAssetHelper.muxMp4VideoAndM4aAudio(tmpVid, tmpAud, destFile)) {
+                    onProgress(destFile.length(), destFile.length(), 100, 0L)
+                    return destFile.exists() && destFile.length() > 0L
+                }
+                if (vidOk && tmpVid.exists() && tmpVid.length() > 0L) {
+                    tmpVid.copyTo(destFile, overwrite = true)
+                    onProgress(destFile.length(), destFile.length(), 100, 0L)
+                    return true
+                }
+            } finally {
+                tmpVid.delete()
+                tmpAud.delete()
+            }
+        }
+
+        val singleTrack = bestVideo ?: bestAudio
+            ?: throw IOException("MPEG-DASH manifest contains no downloadable tracks")
+        return downloadDashTrackToFile(downloadId, singleTrack, userAgent, destFile, onProgress)
+    }
+
+    private suspend fun downloadDashTrackToFile(
+        downloadId: Long,
+        track: DashManifestParser.DashTrack,
+        userAgent: String,
+        destFile: File,
+        onProgress: (Long, Long, Int, Long) -> Unit
+    ): Boolean {
+        if (!track.isSegmented && !track.directUrl.isNullOrBlank()) {
+            return streamUrlToFile(
+                downloadId = downloadId,
+                streamUrl = track.directUrl,
+                destFile = destFile,
+                expectedSize = 0L,
+                onRefreshUrl = null,
+                onProgress = onProgress
+            )
+        }
+        val parts = buildList {
+            track.initUrl?.takeIf { it.isNotBlank() }?.let { add(it) }
+            addAll(track.segmentUrls)
+        }
+        if (parts.isEmpty()) {
+            throw IOException("DASH track ${track.id} contains no segment URLs")
+        }
+        FileOutputStream(destFile, false).use { out ->
+            val buf = ByteArray(BUFFER_SIZE)
+            var totalBytes = 0L
+            var lastBytes = 0L
+            var lastTime = System.currentTimeMillis()
+            for ((idx, partUrl) in parts.withIndex()) {
+                val status = repository.getDownloadById(downloadId)?.status
+                if (status == DownloadStatus.PAUSED || status == DownloadStatus.CANCELLED) {
+                    throw CancellationException()
+                }
+                totalBytes += fetchHlsPartToStream(
+                    url = partUrl,
+                    byteRange = null,
+                    userAgent = userAgent,
+                    out = out,
+                    buf = buf
+                )
+                val now = System.currentTimeMillis()
+                if (now - lastTime >= 300 || idx == parts.lastIndex) {
+                    val elapsedSec = ((now - lastTime) / 1000.0).coerceAtLeast(0.05)
+                    val speed = ((totalBytes - lastBytes) / elapsedSec).toLong()
+                    val pct = (((idx + 1) * 100) / parts.size).coerceIn(1, 99)
+                    val estTotal = if (idx > 0) (totalBytes * parts.size) / (idx + 1) else totalBytes * parts.size
+                    onProgress(totalBytes, estTotal.coerceAtLeast(totalBytes), pct, speed)
+                    lastTime = now
+                    lastBytes = totalBytes
+                }
+            }
+            out.flush()
+            runCatching { out.fd.sync() }
+            onProgress(totalBytes, totalBytes, 100, 0L)
+        }
+        return destFile.exists() && destFile.length() > 0L
     }
 
     internal suspend fun downloadGoogleVideoChunked(

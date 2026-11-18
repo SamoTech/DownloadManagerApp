@@ -21,15 +21,26 @@ object UrlClassifier {
         VIMEO,
         TIKTOK,
         INSTAGRAM,
+        THREADS,
         FACEBOOK,
         TWITTER,
+        PINTEREST,
+        SNAPCHAT,
+        LINKEDIN,
+        TUMBLR,
+        TWITCH,
+        RUMBLE,
+        BILIBILI,
         SOUNDCLOUD,
         SPOTIFY,
+        BANDCAMP,
+        MIXCLOUD,
+        AUDIOMACK,
         DAILYMOTION,
         REDDIT,
-        TWITCH_UNSUPPORTED,
         DRM_OR_UNSUPPORTED,
         HLS_STREAM,
+        DASH_STREAM,
         DIRECT_AUDIO,
         DIRECT_VIDEO,
         DIRECT_FILE,
@@ -67,19 +78,33 @@ object UrlClassifier {
                 !isSupported -> SourceKind.UNSUPPORTED
                 category == PlatformCategory.MAGNET -> SourceKind.MAGNET
                 category == PlatformCategory.TORRENT_FILE -> SourceKind.TORRENT_FILE
-                category == PlatformCategory.SOUNDCLOUD || category == PlatformCategory.SPOTIFY -> SourceKind.MUSIC_PLATFORM
+                category in setOf(
+                    PlatformCategory.SOUNDCLOUD,
+                    PlatformCategory.SPOTIFY,
+                    PlatformCategory.BANDCAMP,
+                    PlatformCategory.MIXCLOUD,
+                    PlatformCategory.AUDIOMACK
+                ) -> SourceKind.MUSIC_PLATFORM
                 category == PlatformCategory.YOUTUBE && canonicalHost.startsWith("music.") -> SourceKind.MUSIC_PLATFORM
                 category in setOf(
                     PlatformCategory.YOUTUBE,
                     PlatformCategory.VIMEO,
                     PlatformCategory.TIKTOK,
                     PlatformCategory.INSTAGRAM,
+                    PlatformCategory.THREADS,
                     PlatformCategory.FACEBOOK,
                     PlatformCategory.TWITTER,
+                    PlatformCategory.PINTEREST,
+                    PlatformCategory.SNAPCHAT,
+                    PlatformCategory.LINKEDIN,
+                    PlatformCategory.TUMBLR,
+                    PlatformCategory.TWITCH,
+                    PlatformCategory.RUMBLE,
+                    PlatformCategory.BILIBILI,
                     PlatformCategory.DAILYMOTION,
                     PlatformCategory.REDDIT
                 ) -> SourceKind.VIDEO_PLATFORM
-                category == PlatformCategory.HLS_STREAM -> SourceKind.HLS_PLAYLIST
+                category == PlatformCategory.HLS_STREAM || category == PlatformCategory.DASH_STREAM -> SourceKind.HLS_PLAYLIST
                 category == PlatformCategory.DIRECT_AUDIO -> SourceKind.DIRECT_AUDIO
                 category == PlatformCategory.DIRECT_VIDEO -> SourceKind.DIRECT_VIDEO
                 else -> SourceKind.DIRECT_FILE
@@ -207,15 +232,18 @@ object UrlClassifier {
             )
         }
 
-        // 2. Check Twitch (explicitly unsupported live/VOD platform)
+        // 2. Twitch (VODs and Clips supported via Strategy + HLS; live channel streams unsupported)
         if (matchesAnyDomain(host, "twitch.tv")) {
+            val isVod = pathLower.contains("/videos/") || Regex("""^/videos/\d+""").containsMatchIn(pathLower)
+            val isClip = host.startsWith("clips.") || pathLower.contains("/clip/")
+            val supported = isVod || isClip
             return UrlClassification(
-                category = PlatformCategory.TWITCH_UNSUPPORTED,
+                category = PlatformCategory.TWITCH,
                 downloadType = DownloadType.VIDEO,
                 providerName = "Twitch",
                 canonicalHost = "twitch.tv",
-                isSupported = false,
-                unsupportedReason = "Twitch streams and VODs are not supported"
+                isSupported = supported,
+                unsupportedReason = if (supported) null else "Only Twitch VODs (/videos/<id>) and Clips are supported; live streams cannot be downloaded"
             )
         }
 
@@ -333,13 +361,13 @@ object UrlClassifier {
             val hasPost = (postIdx >= 0 && postIdx + 1 < nonEmptySegments.size) ||
                 (nonEmptySegments.size >= 2 && nonEmptySegments[0].equals("t", ignoreCase = true))
             return UrlClassification(
-                category = PlatformCategory.INSTAGRAM,
+                category = PlatformCategory.THREADS,
                 downloadType = DownloadType.VIDEO,
                 providerName = "Threads",
                 canonicalHost = "threads.com",
                 isSupported = hasPost,
                 requiresThirdPartyIntermediary = false,
-                intermediaryHostDescription = "Direct Threads SSR / GraphQL resolver",
+                intermediaryHostDescription = "Direct Threads SSR / GraphQL + Headless Sniffer",
                 unsupportedReason = if (hasPost) null else "Threads URL must point to a specific post (/post/<id> or /t/<id>)"
             )
         }
@@ -469,17 +497,100 @@ object UrlClassifier {
             )
         }
 
+        // 11b. Pinterest, Snapchat, LinkedIn, Tumblr, Rumble, Bilibili
+        if (matchesAnyDomain(host, "pinterest.com", "pin.it") || Regex("""(?:^|\.)pinterest\.[a-z]{2,}$""").containsMatchIn(host)) {
+            val isShort = matchesDomain(host, "pin.it")
+            val hasPin = isShort || pathLower.contains("/pin/")
+            return UrlClassification(
+                category = PlatformCategory.PINTEREST,
+                downloadType = DownloadType.VIDEO,
+                providerName = "Pinterest",
+                canonicalHost = "pinterest.com",
+                isSupported = hasPin,
+                isShortLink = isShort,
+                unsupportedReason = if (hasPin) null else "Pinterest URL must point to a pin (/pin/<id>)"
+            )
+        }
+
+        if (matchesAnyDomain(host, "snapchat.com", "t.snapchat.com")) {
+            val isShort = matchesDomain(host, "t.snapchat.com")
+            val hasVideo = isShort || pathLower.contains("/spotlight/") || pathLower.contains("/p/")
+            return UrlClassification(
+                category = PlatformCategory.SNAPCHAT,
+                downloadType = DownloadType.VIDEO,
+                providerName = "Snapchat",
+                canonicalHost = "snapchat.com",
+                isSupported = hasVideo,
+                isShortLink = isShort,
+                unsupportedReason = if (hasVideo) null else "Snapchat URL must point to a Spotlight or Story post"
+            )
+        }
+
+        if (matchesAnyDomain(host, "linkedin.com", "lnkd.in")) {
+            val isShort = matchesDomain(host, "lnkd.in")
+            val hasPost = isShort || pathLower.contains("/posts/") || pathLower.contains("/feed/update/") || pathLower.contains("/video/")
+            return UrlClassification(
+                category = PlatformCategory.LINKEDIN,
+                downloadType = DownloadType.VIDEO,
+                providerName = "LinkedIn",
+                canonicalHost = "linkedin.com",
+                isSupported = hasPost,
+                isShortLink = isShort,
+                unsupportedReason = if (hasPost) null else "LinkedIn URL must point to a post or video update"
+            )
+        }
+
+        if (matchesAnyDomain(host, "tumblr.com", "tmblr.co")) {
+            val isShort = matchesDomain(host, "tmblr.co")
+            val hasPost = isShort || pathLower.contains("/post/") || nonEmptySegments.size >= 2
+            return UrlClassification(
+                category = PlatformCategory.TUMBLR,
+                downloadType = DownloadType.VIDEO,
+                providerName = "Tumblr",
+                canonicalHost = "tumblr.com",
+                isSupported = hasPost,
+                isShortLink = isShort,
+                unsupportedReason = if (hasPost) null else "Tumblr URL must point to a specific post"
+            )
+        }
+
+        if (matchesDomain(host, "rumble.com")) {
+            val hasVideo = pathLower.endsWith(".html") || pathLower.startsWith("/embed/") || pathLower.startsWith("/v")
+            return UrlClassification(
+                category = PlatformCategory.RUMBLE,
+                downloadType = DownloadType.VIDEO,
+                providerName = "Rumble",
+                canonicalHost = "rumble.com",
+                isSupported = hasVideo,
+                unsupportedReason = if (hasVideo) null else "Rumble URL must point to a video page"
+            )
+        }
+
+        if (matchesAnyDomain(host, "bilibili.com", "b23.tv")) {
+            val isShort = matchesDomain(host, "b23.tv")
+            val hasVideo = isShort || pathLower.contains("/video/") || pathLower.contains("/bangumi/")
+            return UrlClassification(
+                category = PlatformCategory.BILIBILI,
+                downloadType = DownloadType.VIDEO,
+                providerName = "Bilibili",
+                canonicalHost = "bilibili.com",
+                isSupported = hasVideo,
+                isShortLink = isShort,
+                unsupportedReason = if (hasVideo) null else "Bilibili URL must point to a /video/BV... page"
+            )
+        }
+
         // 13b. Bandcamp, Audiomack, Mixcloud, Jamendo, FreeMusicArchive
         if (matchesAnyDomain(host, "bandcamp.com", "audiomack.com", "mixcloud.com", "jamendo.com", "freemusicarchive.org")) {
-            val provider = when {
-                matchesDomain(host, "bandcamp.com") -> "Bandcamp"
-                matchesDomain(host, "audiomack.com") -> "Audiomack"
-                matchesDomain(host, "mixcloud.com") -> "Mixcloud"
-                matchesDomain(host, "jamendo.com") -> "Jamendo"
-                else -> "Free Music Archive"
+            val (category, provider) = when {
+                matchesDomain(host, "bandcamp.com") -> PlatformCategory.BANDCAMP to "Bandcamp"
+                matchesDomain(host, "audiomack.com") -> PlatformCategory.AUDIOMACK to "Audiomack"
+                matchesDomain(host, "mixcloud.com") -> PlatformCategory.MIXCLOUD to "Mixcloud"
+                matchesDomain(host, "jamendo.com") -> PlatformCategory.SOUNDCLOUD to "Jamendo"
+                else -> PlatformCategory.SOUNDCLOUD to "Free Music Archive"
             }
             return UrlClassification(
-                category = PlatformCategory.SOUNDCLOUD,
+                category = category,
                 downloadType = DownloadType.MUSIC,
                 providerName = provider,
                 canonicalHost = host,
@@ -487,13 +598,22 @@ object UrlClassifier {
             )
         }
 
-        // 14. HLS Playlist (.m3u8)
+        // 14. HLS Playlist (.m3u8) & MPEG-DASH Manifest (.mpd)
         val ext = pathLower.substringAfterLast('.', "")
         if (ext == "m3u8") {
             return UrlClassification(
                 category = PlatformCategory.HLS_STREAM,
                 downloadType = DownloadType.VIDEO,
                 providerName = "HLS Stream",
+                canonicalHost = host,
+                isSupported = true
+            )
+        }
+        if (ext == "mpd") {
+            return UrlClassification(
+                category = PlatformCategory.DASH_STREAM,
+                downloadType = DownloadType.VIDEO,
+                providerName = "DASH Stream",
                 canonicalHost = host,
                 isSupported = true
             )

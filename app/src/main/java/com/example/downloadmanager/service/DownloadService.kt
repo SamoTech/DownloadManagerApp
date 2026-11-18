@@ -15,6 +15,7 @@ import android.net.NetworkCapabilities
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.preference.PreferenceManager
@@ -65,6 +66,7 @@ class DownloadService : Service() {
     private val queueMutex = Mutex()
     @Volatile
     private var isInForeground = false
+    private var transferWakeLock: PowerManager.WakeLock? = null
 
     companion object {
         private const val TAG = "DownloadService"
@@ -312,6 +314,7 @@ class DownloadService : Service() {
     }
 
     private fun ensureForegroundStarted() {
+        acquireTransferWakeLock()
         if (isInForeground) return
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -329,14 +332,44 @@ class DownloadService : Service() {
         }
     }
 
+    private fun acquireTransferWakeLock() {
+        runCatching {
+            if (transferWakeLock == null) {
+                val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                transferWakeLock = pm?.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "LucaDownloadManager:TransferWakeLock"
+                )?.apply {
+                    setReferenceCounted(false)
+                }
+            }
+            val wl = transferWakeLock
+            if (wl != null && !wl.isHeld) {
+                wl.acquire(15 * 60 * 1000L)
+            }
+        }
+    }
+
+    private fun releaseTransferWakeLock() {
+        runCatching {
+            val wl = transferWakeLock
+            if (wl != null && wl.isHeld) {
+                wl.release()
+            }
+        }
+    }
+
     private fun demoteForegroundIfIdle() {
         val hasSeeding = TorrentDownloadManager.hasAnyActiveSeeding()
-        if (activeDownloadIds.isEmpty() && !hasSeeding && isInForeground) {
-            try {
-                stopForeground(STOP_FOREGROUND_DETACH)
-                notificationManager.cancel(FOREGROUND_NOTIFICATION_ID)
-            } catch (_: Exception) {}
-            isInForeground = false
+        if (activeDownloadIds.isEmpty() && !hasSeeding) {
+            releaseTransferWakeLock()
+            if (isInForeground) {
+                try {
+                    stopForeground(STOP_FOREGROUND_DETACH)
+                    notificationManager.cancel(FOREGROUND_NOTIFICATION_ID)
+                } catch (_: Exception) {}
+                isInForeground = false
+            }
         }
     }
 
@@ -912,6 +945,7 @@ class DownloadService : Service() {
     }
 
     override fun onDestroy() {
+        releaseTransferWakeLock()
         runningInProcessIds.clear()
         runCatching {
             if (::torrentDownloadManager.isInitialized) {

@@ -211,7 +211,9 @@ class TorrentDownloadManager(
             "router.bittorrent.com" to 6881,
             "dht.transmissionbt.com" to 6881,
             "router.utorrent.com" to 6881,
-            "dht.libtorrent.org" to 25401
+            "dht.libtorrent.org" to 25401,
+            "dht.aelitis.com" to 6881,
+            "router.silotis.us" to 6881
         )
 
         private fun isLoopbackTracker(trackerUrl: String): Boolean {
@@ -277,6 +279,83 @@ class TorrentDownloadManager(
             }
             return out.toByteArray()
         }
+
+        internal fun selectNextPieceIndexForMode(
+            neededPiecesList: List<Int>,
+            completedPieces: Set<Int>,
+            inFlightPieces: MutableSet<Int>,
+            peerBitfield: BitSet,
+            sawBitfieldOrHave: Boolean,
+            peerRejected: Set<Int>,
+            pieceAvailability: java.util.concurrent.atomic.AtomicIntegerArray,
+            sequentialMode: Boolean,
+            allowedOnly: Set<Int>? = null
+        ): Int? {
+            if (sequentialMode && sawBitfieldOrHave) {
+                for (p in neededPiecesList) {
+                    if (p in completedPieces || p in inFlightPieces || p in peerRejected) continue
+                    if (allowedOnly != null && p !in allowedOnly) continue
+                    if (peerBitfield.get(p) && inFlightPieces.add(p)) {
+                        return p
+                    }
+                }
+            }
+            if (sawBitfieldOrHave && neededPiecesList.isNotEmpty()) {
+                val boundaryCandidates = if (neededPiecesList.size > 1) {
+                    listOf(neededPiecesList.first(), neededPiecesList.last())
+                } else {
+                    listOf(neededPiecesList.first())
+                }
+                for (boundaryPiece in boundaryCandidates) {
+                    if (boundaryPiece in completedPieces || boundaryPiece in inFlightPieces || boundaryPiece in peerRejected) continue
+                    if (allowedOnly != null && boundaryPiece !in allowedOnly) continue
+                    if (peerBitfield.get(boundaryPiece) && inFlightPieces.add(boundaryPiece)) {
+                        return boundaryPiece
+                    }
+                }
+            }
+            if (sawBitfieldOrHave) {
+                var bestPiece = -1
+                var bestAvail = Int.MAX_VALUE
+                for (p in neededPiecesList) {
+                    if (p in completedPieces || p in inFlightPieces || p in peerRejected) continue
+                    if (allowedOnly != null && p !in allowedOnly) continue
+                    if (peerBitfield.get(p)) {
+                        val avail = pieceAvailability.get(p).coerceAtLeast(1)
+                        if (avail < bestAvail) {
+                            bestAvail = avail
+                            bestPiece = p
+                            if (avail <= 1) break
+                        }
+                    }
+                }
+                if (bestPiece >= 0 && inFlightPieces.add(bestPiece)) {
+                    return bestPiece
+                }
+            }
+            if (!sawBitfieldOrHave && allowedOnly == null) {
+                for (p in neededPiecesList) {
+                    if (p in completedPieces || p in inFlightPieces || p in peerRejected) continue
+                    if (inFlightPieces.add(p)) return p
+                }
+            }
+            if (allowedOnly == null) {
+                for (p in neededPiecesList) {
+                    if (p !in completedPieces && p !in peerRejected && (!sawBitfieldOrHave || peerBitfield.get(p))) {
+                        return p
+                    }
+                }
+            }
+            return null
+        }
+    }
+
+    fun isSequentialDownloadEnabled(): Boolean {
+        val ctx = context ?: return false
+        return runCatching {
+            PreferenceManager.getDefaultSharedPreferences(ctx)
+                .getBoolean("torrent_sequential_download", false)
+        }.getOrDefault(false)
     }
 
     private fun isThirdPartyTorrentCacheEnabled(): Boolean {
@@ -2299,61 +2378,17 @@ class TorrentDownloadManager(
             peerRejected: Set<Int>,
             allowedOnly: Set<Int>? = null
         ): Int? {
-            // 0. First/Last Piece Priority (`ezoo-download/crates/engine/src/bt.rs` `first_last` pattern):
-            // Prioritize the very first and very last needed pieces so container headers/trailers
-            // (e.g., MP4 `ftyp` and trailing `moov` atoms) arrive first for immediate inspection/preview.
-            if (sawBitfieldOrHave && neededPiecesList.isNotEmpty()) {
-                val boundaryCandidates = if (neededPiecesList.size > 1) {
-                    listOf(neededPiecesList.first(), neededPiecesList.last())
-                } else {
-                    listOf(neededPiecesList.first())
-                }
-                for (boundaryPiece in boundaryCandidates) {
-                    if (boundaryPiece in completedPieces || boundaryPiece in inFlightPieces || boundaryPiece in peerRejected) continue
-                    if (allowedOnly != null && boundaryPiece !in allowedOnly) continue
-                    if (peerBitfield.get(boundaryPiece) && inFlightPieces.add(boundaryPiece)) {
-                        return boundaryPiece
-                    }
-                }
-            }
-            // 1. Rarest-First Piece Picker (libtorrent / anacrolix pattern):
-            // Among unclaimed needed pieces held by this peer, pick the one with the lowest positive swarm availability
-            // (breaking ties sequentially for disk locality).
-            if (sawBitfieldOrHave) {
-                var bestPiece = -1
-                var bestAvail = Int.MAX_VALUE
-                for (p in neededPiecesList) {
-                    if (p in completedPieces || p in inFlightPieces || p in peerRejected) continue
-                    if (allowedOnly != null && p !in allowedOnly) continue
-                    if (peerBitfield.get(p)) {
-                        val avail = pieceAvailability.get(p).coerceAtLeast(1)
-                        if (avail < bestAvail) {
-                            bestAvail = avail
-                            bestPiece = p
-                            if (avail <= 1) break
-                        }
-                    }
-                }
-                if (bestPiece >= 0 && inFlightPieces.add(bestPiece)) {
-                    return bestPiece
-                }
-            }
-            // 2. Fallback ONLY if peer never sent BITFIELD / HAVE / HAVE_ALL / HAVE_NONE
-            if (!sawBitfieldOrHave && allowedOnly == null) {
-                for (p in neededPiecesList) {
-                    if (p in completedPieces || p in inFlightPieces || p in peerRejected) continue
-                    if (inFlightPieces.add(p)) return p
-                }
-            }
-            // 3. Endgame mode: race an already in-flight piece that this peer actually possesses
-            if (allowedOnly == null) {
-                for (p in neededPiecesList) {
-                    if (p !in completedPieces && p !in peerRejected && (!sawBitfieldOrHave || peerBitfield.get(p))) {
-                        return p
-                    }
-                }
-            }
-            return null
+            return selectNextPieceIndexForMode(
+                neededPiecesList = neededPiecesList,
+                completedPieces = completedPieces,
+                inFlightPieces = inFlightPieces,
+                peerBitfield = peerBitfield,
+                sawBitfieldOrHave = sawBitfieldOrHave,
+                peerRejected = peerRejected,
+                pieceAvailability = pieceAvailability,
+                sequentialMode = isSequentialDownloadEnabled(),
+                allowedOnly = allowedOnly
+            )
         }
 
         suspend fun runPeerWorkerWave(workerCount: Int) = coroutineScope {
