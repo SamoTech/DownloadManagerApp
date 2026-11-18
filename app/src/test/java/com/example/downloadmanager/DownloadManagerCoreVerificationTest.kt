@@ -1495,8 +1495,8 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun phase7_activeTorrentSelectedFile_compactAndDictTrackers_andDistinctStatuses() = runBlocking {
-        // 0. Verify Luca Version 25.0 (Build 25)
-        assertTrue(BuildConfig.VERSION_CODE >= 25)
+        // 0. Verify Luca Version 26.0 (Build 26)
+        assertTrue(BuildConfig.VERSION_CODE >= 26)
         assertEquals("${BuildConfig.VERSION_CODE}.0", BuildConfig.VERSION_NAME)
 
         val tempRoot = createTempDirectory("phase7_torrent_trace").toFile()
@@ -2752,7 +2752,7 @@ class DownloadManagerCoreVerificationTest {
             assertTrue(MediaAssetHelper.hasVideoTrack(tailMoovMp4))
             assertEquals("H.264 • AAC 44.1kHz Stereo", MediaAssetHelper.inspectMediaCodecSummary(tailMoovMp4, isVideo = true))
 
-            assertTrue(BuildConfig.VERSION_CODE >= 25)
+            assertTrue(BuildConfig.VERSION_CODE >= 26)
             assertEquals("${BuildConfig.VERSION_CODE}.0", BuildConfig.VERSION_NAME)
         } finally {
             try { peerServer.close() } catch (_: Exception) {}
@@ -2823,7 +2823,7 @@ class DownloadManagerCoreVerificationTest {
             val vp9Video = com.example.downloadmanager.model.VideoFormat("adaptive_248", "https://ex/v.webm", "1080p", container = "webm")
             val avcVideo = com.example.downloadmanager.model.VideoFormat("adaptive_137", "https://ex/v.mp4", "1080p", container = "mp4")
             val m4aAudio = com.example.downloadmanager.model.VideoFormat("audio_140", "https://ex/a.m4a", "128k", container = "m4a", isAudioOnly = true, audioBitrate = 128)
-            val opusAudio = com.example.downloadmanager.model.VideoFormat("audio_251", "https://ex/a.webm", "160k", container = "webm", isAudioOnly = true, audioBitrate = 160)
+            val opusAudio = com.example.downloadmanager.model.VideoFormat("audio_261", "https://ex/a.webm", "160k", container = "webm", isAudioOnly = true, audioBitrate = 160)
             val allFormats = listOf(vp9Video, avcVideo, m4aAudio, opusAudio)
 
             assertEquals(opusAudio, videoManager.selectCompanionAudioFormat(allFormats, vp9Video))
@@ -3804,7 +3804,7 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun v21_youtubeChunkedResume_midStream403Refresh_progressivePreference_andHlsSegmentRetry() = runBlocking {
-        assertTrue(BuildConfig.VERSION_CODE >= 25)
+        assertTrue(BuildConfig.VERSION_CODE >= 26)
         assertEquals("${BuildConfig.VERSION_CODE}.0", BuildConfig.VERSION_NAME)
 
         // 1. Path-based client detection (/c/IOS/) for manifest.googlevideo.com HLS URLs
