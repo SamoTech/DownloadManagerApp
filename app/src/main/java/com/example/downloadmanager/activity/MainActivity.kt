@@ -711,13 +711,12 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun syncAppVersionHeader() {
-        val versionTitle = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
-        val appSubtitle = getString(R.string.app_name)
-        supportActionBar?.title = versionTitle
-        supportActionBar?.subtitle = appSubtitle
-        binding.toolbar.title = versionTitle
-        binding.toolbar.subtitle = appSubtitle
-        binding.tvAppVersion.text = versionTitle
+        val appTitle = getString(R.string.app_name)
+        supportActionBar?.title = appTitle
+        supportActionBar?.subtitle = null
+        binding.toolbar.title = appTitle
+        binding.toolbar.subtitle = null
+        binding.tvAppVersion.text = "v${BuildConfig.VERSION_NAME}"
     }
 
     override fun onResume() {

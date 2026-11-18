@@ -6,6 +6,7 @@ import androidx.preference.PreferenceManager
 import com.example.downloadmanager.extraction.BrowserSessionBridge
 import com.example.downloadmanager.extraction.ExtractionContext
 import com.example.downloadmanager.extraction.HeadlessWebViewSniffer
+import com.example.downloadmanager.extraction.UnifiedExtractionRouter
 import com.example.downloadmanager.extraction.UrlNormalizer
 import com.example.downloadmanager.extraction.strategies.AudiomackStrategyExtractor
 import com.example.downloadmanager.extraction.strategies.BandcampStrategyExtractor
@@ -421,7 +422,17 @@ class MusicDownloadManager(
         allowAlternateSource: Boolean? = null,
         excludedClients: Set<String> = emptySet()
     ): MusicTrackInfo? = withContext(Dispatchers.IO) {
-        val validUrl = VideoDownloadManager.normalizeHttpUrl(rawUrl) ?: return@withContext null
+        val initialValidUrl = VideoDownloadManager.normalizeHttpUrl(rawUrl) ?: return@withContext null
+        val validUrl = if (UrlNormalizer.isShortenedOrTrackingRedirect(initialValidUrl)) {
+            UnifiedExtractionRouter(
+                context = context,
+                httpClient = okHttpClient,
+                desktopUserAgent = VideoDownloadManager.DESKTOP_USER_AGENT,
+                botUserAgent = VideoDownloadManager.DISCORD_BOT_USER_AGENT
+            ).resolveCanonicalUrlHybrid(initialValidUrl, enableWebViewFallback = isHeadlessSnifferEnabled())
+        } else {
+            initialValidUrl
+        }
         val useAlternate = allowAlternateSource ?: isAlternateSourceAllowedByPrefs()
         val cacheKey = "$validUrl|${preferredFormatCode ?: "default"}|alt=$useAlternate"
         if (excludedClients.isEmpty()) {
@@ -578,7 +589,12 @@ class MusicDownloadManager(
         )
         val matchingStrategy = audioStrategies.firstOrNull { it.supports(validUrl) || it.supports(cleanedMusicUrl) }
         if (matchingStrategy != null) {
-            val resolvedAudioPage = UrlNormalizer.resolveAndNormalize(cleanedMusicUrl, okHttpClient)
+            val resolvedAudioPage = UnifiedExtractionRouter(
+                context = context,
+                httpClient = okHttpClient,
+                desktopUserAgent = VideoDownloadManager.DESKTOP_USER_AGENT,
+                botUserAgent = VideoDownloadManager.DISCORD_BOT_USER_AGENT
+            ).resolveCanonicalUrlHybrid(cleanedMusicUrl, enableWebViewFallback = isHeadlessSnifferEnabled())
             val eCtx = ExtractionContext(
                 originalUrl = rawUrl,
                 normalizedUrl = cleanedMusicUrl,

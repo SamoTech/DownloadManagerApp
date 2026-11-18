@@ -13,7 +13,7 @@
         android:layout_height="match_parent"
         android:orientation="vertical">
 
-        <!-- Top Browser Header & Address Bar -->
+        <!-- Top Smart Browser Header & Address Bar -->
         <LinearLayout
             android:id="@+id/browserHeaderContainer"
             android:layout_width="match_parent"
@@ -21,21 +21,46 @@
             android:background="@color/colorHeaderBg"
             android:elevation="4dp"
             android:orientation="vertical"
-            android:paddingHorizontal="10dp"
+            android:paddingHorizontal="8dp"
             android:paddingTop="8dp"
-            android:paddingBottom="10dp">
+            android:paddingBottom="8dp">
 
-            <TextView
-                android:id="@+id/tvBrowserHeaderVersion"
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="4dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
                 android:paddingHorizontal="4dp"
-                android:text="Smart Browser • Luca v29.0 (Build 29)"
-                android:textColor="#38BDF8"
-                android:textSize="11sp"
-                android:textStyle="bold" />
+                android:paddingBottom="4dp">
 
+                <TextView
+                    android:id="@+id/tvBrowserHeaderVersion"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:text="Luca Browser • Ready"
+                    android:textColor="#38BDF8"
+                    android:textSize="11sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvHeaderSniffCount"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/card_background"
+                    android:backgroundTint="#1E293B"
+                    android:paddingHorizontal="8dp"
+                    android:paddingVertical="2dp"
+                    android:text="0 Media"
+                    android:textColor="#10B981"
+                    android:textSize="10sp"
+                    android:textStyle="bold"
+                    android:visibility="gone" />
+            </LinearLayout>
+
+            <!-- Smart Omnibox Row: Exit | [Lock + URL/Search] | Copy | Share | Refresh/Stop -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -44,44 +69,82 @@
 
                 <ImageButton
                     android:id="@+id/btnCloseBrowser"
-                    android:layout_width="44dp"
-                    android:layout_height="44dp"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
                     android:background="?attr/selectableItemBackgroundBorderless"
                     android:contentDescription="@string/exit"
                     android:src="@drawable/ic_back"
                     app:tint="@android:color/white" />
 
-                <EditText
-                    android:id="@+id/etBrowserUrl"
+                <LinearLayout
                     android:layout_width="0dp"
-                    android:layout_height="42dp"
-                    android:layout_marginHorizontal="6dp"
+                    android:layout_height="44dp"
+                    android:layout_marginHorizontal="2dp"
                     android:layout_weight="1"
                     android:background="@drawable/card_background"
                     android:backgroundTint="@color/colorDashboardCard"
-                    android:hint="@string/browser_url_hint"
-                    android:imeOptions="actionGo"
-                    android:importantForAutofill="no"
-                    android:inputType="textUri"
-                    android:paddingHorizontal="14dp"
-                    android:singleLine="true"
-                    android:textColor="@android:color/white"
-                    android:textColorHint="#94A3B8"
-                    android:textSize="13sp" />
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingStart="10dp"
+                    android:paddingEnd="6dp">
+
+                    <ImageView
+                        android:id="@+id/ivSecurityLock"
+                        android:layout_width="18dp"
+                        android:layout_height="18dp"
+                        android:contentDescription="HTTPS Security Status"
+                        android:src="@drawable/ic_lock"
+                        app:tint="#10B981" />
+
+                    <EditText
+                        android:id="@+id/etBrowserUrl"
+                        android:layout_width="0dp"
+                        android:layout_height="match_parent"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
+                        android:background="@null"
+                        android:hint="@string/browser_url_hint"
+                        android:imeOptions="actionGo"
+                        android:importantForAutofill="no"
+                        android:inputType="textUri"
+                        android:selectAllOnFocus="true"
+                        android:singleLine="true"
+                        android:textColor="@android:color/white"
+                        android:textColorHint="#94A3B8"
+                        android:textSize="13sp" />
+
+                    <ImageButton
+                        android:id="@+id/btnBrowserGo"
+                        android:layout_width="36dp"
+                        android:layout_height="36dp"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:contentDescription="@string/search_hint"
+                        android:src="@drawable/ic_search"
+                        app:tint="#38BDF8" />
+                </LinearLayout>
 
                 <ImageButton
-                    android:id="@+id/btnBrowserGo"
+                    android:id="@+id/btnCopyUrl"
                     android:layout_width="44dp"
-                    android:layout_height="44dp"
+                    android:layout_height="48dp"
                     android:background="?attr/selectableItemBackgroundBorderless"
-                    android:contentDescription="@string/search_hint"
-                    android:src="@drawable/ic_search"
-                    app:tint="@color/colorAccent" />
+                    android:contentDescription="@string/copy_link"
+                    android:src="@drawable/ic_copy"
+                    app:tint="#CBD5E1" />
+
+                <ImageButton
+                    android:id="@+id/btnShareUrl"
+                    android:layout_width="44dp"
+                    android:layout_height="48dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="@string/share"
+                    android:src="@drawable/ic_share"
+                    app:tint="#CBD5E1" />
 
                 <ImageButton
                     android:id="@+id/btnBrowserReload"
                     android:layout_width="44dp"
-                    android:layout_height="44dp"
+                    android:layout_height="48dp"
                     android:background="?attr/selectableItemBackgroundBorderless"
                     android:contentDescription="@string/retry"
                     android:src="@drawable/ic_retry"
@@ -99,382 +162,227 @@
             android:progressDrawable="@drawable/progress_bar_drawable"
             android:visibility="gone" />
 
-        <!-- Real Web Browser Viewport + DuckDuckGo Main Page + Contextual Media & File Offer Banner -->
-        <LinearLayout
+        <!-- Browser Viewport Container: Speed Dial Home Hub + Full Live WebView + Renderer Recovery -->
+        <FrameLayout
             android:id="@+id/browserContentContainer"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
-            android:orientation="vertical">
+            android:background="#0F172A">
 
-            <!-- DuckDuckGo Main Page Hub (Shown when on https://duckduckgo.com home) -->
-            <com.google.android.material.card.MaterialCardView
-                android:id="@+id/duckDuckGoHomeCard"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginHorizontal="10dp"
-                android:layout_marginTop="10dp"
-                android:layout_marginBottom="4dp"
-                app:cardBackgroundColor="#1E293B"
-                app:cardCornerRadius="16dp"
-                app:cardElevation="2dp"
-                app:strokeColor="#334155"
-                app:strokeWidth="1dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:padding="14dp">
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:gravity="center_vertical"
-                        android:orientation="horizontal">
-
-                        <FrameLayout
-                            android:layout_width="36dp"
-                            android:layout_height="36dp"
-                            android:background="@drawable/icon_badge_background"
-                            android:backgroundTint="#DE5833">
-
-                            <ImageView
-                                android:layout_width="20dp"
-                                android:layout_height="20dp"
-                                android:layout_gravity="center"
-                                android:contentDescription="DuckDuckGo"
-                                android:src="@drawable/ic_search"
-                                app:tint="@android:color/white" />
-                        </FrameLayout>
-
-                        <LinearLayout
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_marginStart="10dp"
-                            android:layout_weight="1"
-                            android:orientation="vertical">
-
-                            <TextView
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="DuckDuckGo"
-                                android:textColor="@android:color/white"
-                                android:textSize="16sp"
-                                android:textStyle="bold" />
-
-                            <TextView
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="Default Search Engine • Search Web, Video, Audio &amp; Files"
-                                android:textColor="#94A3B8"
-                                android:textSize="11sp" />
-                        </LinearLayout>
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:background="@drawable/card_background"
-                            android:backgroundTint="#0F172A"
-                            android:paddingHorizontal="8dp"
-                            android:paddingVertical="3dp"
-                            android:text="HOME"
-                            android:textColor="#38BDF8"
-                            android:textSize="10sp"
-                            android:textStyle="bold" />
-                    </LinearLayout>
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="10dp"
-                        android:gravity="center_vertical"
-                        android:orientation="horizontal">
-
-                        <EditText
-                            android:id="@+id/etDuckDuckGoSearch"
-                            android:layout_width="0dp"
-                            android:layout_height="42dp"
-                            android:layout_weight="1"
-                            android:background="@drawable/card_background"
-                            android:backgroundTint="#0F172A"
-                            android:hint="Search DuckDuckGo or paste any link..."
-                            android:imeOptions="actionSearch"
-                            android:importantForAutofill="no"
-                            android:inputType="text"
-                            android:paddingHorizontal="14dp"
-                            android:singleLine="true"
-                            android:textColor="@android:color/white"
-                            android:textColorHint="#94A3B8"
-                            android:textSize="13sp" />
-
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btnDuckDuckGoSearch"
-                            style="@style/Widget.Material3.Button"
-                            android:layout_width="wrap_content"
-                            android:layout_height="42dp"
-                            android:layout_marginStart="8dp"
-                            android:insetTop="0dp"
-                            android:insetBottom="0dp"
-                            android:text="Search"
-                            android:textSize="12sp"
-                            app:backgroundTint="#DE5833"
-                            app:cornerRadius="10dp"
-                            app:icon="@drawable/ic_search"
-                            app:iconSize="16dp" />
-                    </LinearLayout>
-
-                    <HorizontalScrollView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:scrollbars="none">
-
-                        <com.google.android.material.chip.ChipGroup
-                            android:id="@+id/chipGroupSpeedDial"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            app:singleLine="true">
-
-                            <com.google.android.material.chip.Chip
-                                android:id="@+id/chipDdgYoutube"
-                                style="@style/Widget.Material3.Chip.Assist"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="YouTube" />
-
-                            <com.google.android.material.chip.Chip
-                                android:id="@+id/chipDdgSoundCloud"
-                                style="@style/Widget.Material3.Chip.Assist"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="SoundCloud" />
-
-                            <com.google.android.material.chip.Chip
-                                android:id="@+id/chipDdgArchive"
-                                style="@style/Widget.Material3.Chip.Assist"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="Archive.org Media" />
-
-                            <com.google.android.material.chip.Chip
-                                android:id="@+id/chipDdgFreeMusic"
-                                style="@style/Widget.Material3.Chip.Assist"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="Free MP3 Music" />
-
-                            <com.google.android.material.chip.Chip
-                                android:id="@+id/chipDdgUbuntuIso"
-                                style="@style/Widget.Material3.Chip.Assist"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="Linux ISO Torrents" />
-
-                            <com.google.android.material.chip.Chip
-                                android:id="@+id/chipDdgGithub"
-                                style="@style/Widget.Material3.Chip.Assist"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="GitHub Releases" />
-                        </com.google.android.material.chip.ChipGroup>
-                    </HorizontalScrollView>
-                </LinearLayout>
-            </com.google.android.material.card.MaterialCardView>
-
-            <!-- Contextual Detected Download Offer Banner (Audio / Video / Files) -->
-            <LinearLayout
-                android:id="@+id/pageSummaryCard"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginHorizontal="10dp"
-                android:layout_marginVertical="4dp"
-                android:background="@drawable/card_background"
-                android:elevation="3dp"
-                android:orientation="vertical"
-                android:padding="12dp"
-                android:visibility="gone">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <ImageView
-                        android:id="@+id/ivOfferIcon"
-                        android:layout_width="20dp"
-                        android:layout_height="20dp"
-                        android:contentDescription="@string/smart_browser"
-                        android:src="@drawable/ic_download"
-                        app:tint="@color/colorPrimary" />
-
-                    <TextView
-                        android:id="@+id/tvPageTitle"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:layout_weight="1"
-                        android:ellipsize="end"
-                        android:maxLines="1"
-                        android:text="Download Available"
-                        android:textColor="@color/colorOnSurface"
-                        android:textSize="14sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/tvPageBadge"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:background="@drawable/icon_badge_background"
-                        android:paddingHorizontal="8dp"
-                        android:paddingVertical="3dp"
-                        android:text="DETECTED"
-                        android:textColor="@color/colorPrimary"
-                        android:textSize="10sp"
-                        android:textStyle="bold" />
-                </LinearLayout>
-
-                <TextView
-                    android:id="@+id/tvPageDescription"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:ellipsize="end"
-                    android:maxLines="2"
-                    android:text="Downloadable media or file detected on this page."
-                    android:textColor="@color/gray"
-                    android:textSize="12sp" />
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:gravity="end|center_vertical"
-                    android:orientation="horizontal">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnQuickOfferSecondary"
-                        style="@style/Widget.Material3.Button.OutlinedButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="36dp"
-                        android:layout_marginEnd="8dp"
-                        android:insetTop="0dp"
-                        android:insetBottom="0dp"
-                        android:text="Download Audio"
-                        android:textSize="12sp"
-                        android:visibility="gone"
-                        app:cornerRadius="10dp"
-                        app:icon="@drawable/ic_music"
-                        app:iconSize="15dp" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnQuickOfferPrimary"
-                        style="@style/Widget.Material3.Button"
-                        android:layout_width="wrap_content"
-                        android:layout_height="36dp"
-                        android:insetTop="0dp"
-                        android:insetBottom="0dp"
-                        android:text="Download"
-                        android:textSize="12sp"
-                        app:cornerRadius="10dp"
-                        app:icon="@drawable/ic_download"
-                        app:iconSize="15dp" />
-                </LinearLayout>
-            </LinearLayout>
-
-            <!-- Interactive Browser Content Feed (DuckDuckGo Search Results, Webpage Links & Detected Media) -->
-            <androidx.recyclerview.widget.RecyclerView
-                android:id="@+id/rvBrowserContent"
-                android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:layout_weight="1"
-                android:clipToPadding="false"
-                android:paddingHorizontal="10dp"
-                android:paddingTop="4dp"
-                android:paddingBottom="76dp"
-                android:visibility="visible" />
-
-            <!-- Managed Status / Loading Overlay Container -->
+            <!-- Live WebView Container (Always active for web browsing, media playback & sniffing) -->
             <FrameLayout
                 android:id="@+id/webViewContainer"
                 android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:layout_weight="1"
+                android:layout_height="match_parent"
+                android:background="@android:color/white" />
+
+            <!-- Home Hub & Platform Speed Dial (Shown only on Browser Home) -->
+            <androidx.core.widget.NestedScrollView
+                android:id="@+id/homeSpeedDialContainer"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
                 android:background="#0F172A"
+                android:fillViewport="true"
                 android:visibility="gone">
 
                 <LinearLayout
-                    android:id="@+id/browserEmptyOverlay"
                     android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:gravity="center"
+                    android:layout_height="wrap_content"
                     android:orientation="vertical"
-                    android:padding="24dp">
+                    android:padding="16dp">
 
-                    <TextView
-                        android:id="@+id/tvOverlayBadge"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginBottom="14dp"
-                        android:background="@drawable/card_background"
-                        android:backgroundTint="#1E293B"
-                        android:paddingHorizontal="14dp"
-                        android:paddingVertical="6dp"
-                        android:text="Luca v29.0 (Build 29)"
-                        android:textColor="#38BDF8"
-                        android:textSize="12sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/tvOverlayTitle"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginBottom="10dp"
-                        android:gravity="center"
-                        android:text="DuckDuckGo Browser &amp; Media Detector"
-                        android:textColor="@android:color/white"
-                        android:textSize="19sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/tvOverlaySubtitle"
+                    <com.google.android.material.card.MaterialCardView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:gravity="center"
-                        android:maxWidth="360dp"
-                        android:text="Search DuckDuckGo or enter any website URL above to browse pages and detect downloadable audio, video, torrents, or files."
-                        android:textColor="#94A3B8"
-                        android:textSize="14sp" />
+                        app:cardBackgroundColor="#1E293B"
+                        app:cardCornerRadius="18dp"
+                        app:cardElevation="2dp"
+                        app:strokeColor="#334155"
+                        app:strokeWidth="1dp">
 
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnOverlayRetry"
-                        style="@style/Widget.Material3.Button"
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical"
+                            android:padding="16dp">
+
+                            <LinearLayout
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:gravity="center_vertical"
+                                android:orientation="horizontal">
+
+                                <FrameLayout
+                                    android:layout_width="40dp"
+                                    android:layout_height="40dp"
+                                    android:background="@drawable/icon_badge_background"
+                                    android:backgroundTint="#0284C7">
+
+                                    <ImageView
+                                        android:layout_width="22dp"
+                                        android:layout_height="22dp"
+                                        android:layout_gravity="center"
+                                        android:contentDescription="@string/smart_browser"
+                                        android:src="@drawable/ic_browser"
+                                        app:tint="@android:color/white" />
+                                </FrameLayout>
+
+                                <LinearLayout
+                                    android:layout_width="0dp"
+                                    android:layout_height="wrap_content"
+                                    android:layout_marginStart="12dp"
+                                    android:layout_weight="1"
+                                    android:orientation="vertical">
+
+                                    <TextView
+                                        android:layout_width="wrap_content"
+                                        android:layout_height="wrap_content"
+                                        android:text="Luca Media Browser"
+                                        android:textColor="@android:color/white"
+                                        android:textSize="17sp"
+                                        android:textStyle="bold" />
+
+                                    <TextView
+                                        android:layout_width="wrap_content"
+                                        android:layout_height="wrap_content"
+                                        android:text="Browse &amp; sniff MP4, HLS, DASH, MP3 &amp; files in real time"
+                                        android:textColor="#94A3B8"
+                                        android:textSize="12sp" />
+                                </LinearLayout>
+                            </LinearLayout>
+
+                            <LinearLayout
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="14dp"
+                                android:gravity="center_vertical"
+                                android:orientation="horizontal">
+
+                                <EditText
+                                    android:id="@+id/etHomeSearch"
+                                    android:layout_width="0dp"
+                                    android:layout_height="48dp"
+                                    android:layout_weight="1"
+                                    android:background="@drawable/card_background"
+                                    android:backgroundTint="#0F172A"
+                                    android:hint="@string/browser_url_hint"
+                                    android:imeOptions="actionSearch"
+                                    android:importantForAutofill="no"
+                                    android:inputType="text"
+                                    android:paddingHorizontal="14dp"
+                                    android:singleLine="true"
+                                    android:textColor="@android:color/white"
+                                    android:textColorHint="#94A3B8"
+                                    android:textSize="14sp" />
+
+                                <com.google.android.material.button.MaterialButton
+                                    android:id="@+id/btnHomeSearch"
+                                    style="@style/Widget.Material3.Button"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="48dp"
+                                    android:layout_marginStart="8dp"
+                                    android:text="Go"
+                                    android:textSize="13sp"
+                                    app:backgroundTint="@color/colorPrimary"
+                                    app:cornerRadius="12dp"
+                                    app:icon="@drawable/ic_search"
+                                    app:iconSize="16dp" />
+                            </LinearLayout>
+                        </LinearLayout>
+                    </com.google.android.material.card.MaterialCardView>
+
+                    <TextView
                         android:layout_width="wrap_content"
-                        android:layout_height="44dp"
-                        android:layout_marginTop="16dp"
-                        android:text="@string/retry"
-                        android:visibility="gone"
-                        app:cornerRadius="10dp"
-                        app:icon="@drawable/ic_retry" />
-                </LinearLayout>
-            </FrameLayout>
-        </LinearLayout>
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="20dp"
+                        android:layout_marginBottom="10dp"
+                        android:text="@string/browser_speed_dial_title"
+                        android:textColor="#CBD5E1"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
 
-        <!-- Bottom Browser Navigation & Link Sniffer Status Bar -->
+                    <!-- Supported Platform Quick Bookmarks Grid -->
+                    <androidx.recyclerview.widget.RecyclerView
+                        android:id="@+id/rvSpeedDial"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:nestedScrollingEnabled="false" />
+                </LinearLayout>
+            </androidx.core.widget.NestedScrollView>
+
+            <!-- Renderer Crash / Offline Recovery Overlay -->
+            <LinearLayout
+                android:id="@+id/browserRecoveryOverlay"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="#0F172A"
+                android:gravity="center"
+                android:orientation="vertical"
+                android:padding="24dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/tvOverlayBadge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="12dp"
+                    android:background="@drawable/card_background"
+                    android:backgroundTint="#1E293B"
+                    android:paddingHorizontal="14dp"
+                    android:paddingVertical="6dp"
+                    android:text="Luca Browser"
+                    android:textColor="#38BDF8"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvOverlayTitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="8dp"
+                    android:gravity="center"
+                    android:text="Web Page Interrupted"
+                    android:textColor="@android:color/white"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvOverlaySubtitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:maxWidth="360dp"
+                    android:text="Tap Retry to reload this page and resume stream detection."
+                    android:textColor="#94A3B8"
+                    android:textSize="14sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnOverlayRetry"
+                    style="@style/Widget.Material3.Button"
+                    android:layout_width="wrap_content"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="16dp"
+                    android:text="@string/retry"
+                    app:cornerRadius="12dp"
+                    app:icon="@drawable/ic_retry" />
+            </LinearLayout>
+        </FrameLayout>
+
+        <!-- Bottom Browser Navigation, Multi-Tab Switcher & Engine Toggles -->
         <LinearLayout
             android:id="@+id/browserBottomBar"
             android:layout_width="match_parent"
-            android:layout_height="52dp"
+            android:layout_height="54dp"
             android:background="@color/colorHeaderBg"
             android:gravity="center_vertical"
             android:orientation="horizontal"
-            android:paddingHorizontal="10dp">
+            android:paddingHorizontal="8dp">
 
             <ImageButton
                 android:id="@+id/btnNavBack"
-                android:layout_width="44dp"
-                android:layout_height="44dp"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
                 android:background="?attr/selectableItemBackgroundBorderless"
                 android:contentDescription="Back"
                 android:src="@drawable/ic_back"
@@ -482,8 +390,8 @@
 
             <ImageButton
                 android:id="@+id/btnNavForward"
-                android:layout_width="44dp"
-                android:layout_height="44dp"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
                 android:background="?attr/selectableItemBackgroundBorderless"
                 android:contentDescription="Forward"
                 android:src="@drawable/ic_forward"
@@ -491,22 +399,40 @@
 
             <ImageButton
                 android:id="@+id/btnNavHome"
-                android:layout_width="44dp"
-                android:layout_height="44dp"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
                 android:background="?attr/selectableItemBackgroundBorderless"
-                android:contentDescription="DuckDuckGo Home"
+                android:contentDescription="Speed Dial Home"
                 android:src="@drawable/ic_browser"
                 app:tint="#38BDF8" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnTabs"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:layout_marginStart="4dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="48dp"
+                android:paddingHorizontal="10dp"
+                android:text="1"
+                android:textColor="@android:color/white"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                app:cornerRadius="10dp"
+                app:strokeColor="#475569"
+                app:strokeWidth="1.5dp" />
 
             <TextView
                 android:id="@+id/tvSnifferStatus"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_marginHorizontal="4dp"
+                android:layout_marginHorizontal="6dp"
                 android:layout_weight="1"
                 android:ellipsize="end"
                 android:maxLines="1"
-                android:text="DuckDuckGo • Ready"
+                android:text="Sniffer Active"
                 android:textColor="#94A3B8"
                 android:textSize="11sp" />
 
@@ -514,11 +440,11 @@
                 android:id="@+id/btnToggleDesktop"
                 style="@style/Widget.Material3.Button.TextButton"
                 android:layout_width="wrap_content"
-                android:layout_height="40dp"
-                android:minWidth="0dp"
-                android:paddingHorizontal="6dp"
+                android:layout_height="48dp"
                 android:insetTop="0dp"
                 android:insetBottom="0dp"
+                android:minWidth="48dp"
+                android:paddingHorizontal="8dp"
                 android:text="@string/browser_desktop_mode"
                 android:textColor="#94A3B8"
                 android:textSize="11sp" />
@@ -527,42 +453,30 @@
                 android:id="@+id/btnToggleAdBlock"
                 style="@style/Widget.Material3.Button.TextButton"
                 android:layout_width="wrap_content"
-                android:layout_height="40dp"
-                android:minWidth="0dp"
-                android:paddingHorizontal="6dp"
+                android:layout_height="48dp"
                 android:insetTop="0dp"
                 android:insetBottom="0dp"
+                android:minWidth="48dp"
+                android:paddingHorizontal="8dp"
                 android:text="@string/browser_adblock_short"
                 android:textColor="#38BDF8"
-                android:textSize="11sp" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnScanPage"
-                style="@style/Widget.Material3.Button.TextButton"
-                android:layout_width="wrap_content"
-                android:layout_height="40dp"
-                android:minWidth="0dp"
-                android:paddingHorizontal="8dp"
-                android:insetTop="0dp"
-                android:insetBottom="0dp"
-                android:text="Scan"
-                android:textColor="@color/colorAccent"
                 android:textSize="11sp" />
         </LinearLayout>
     </LinearLayout>
 
-    <!-- Floating Detected Links Button -->
+    <!-- Animated Floating Media Detection Badge ("Download Media (N)") -->
     <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
         android:id="@+id/fabDetectedLinks"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|end"
         android:layout_marginEnd="16dp"
-        android:layout_marginBottom="68dp"
+        android:layout_marginBottom="72dp"
         android:contentDescription="@string/detected_links"
-        android:text="Detected (0)"
+        android:text="Download Media (0)"
         android:textColor="@android:color/white"
         android:textStyle="bold"
+        android:visibility="gone"
         app:backgroundTint="@color/colorPrimary"
         app:icon="@drawable/ic_download"
         app:iconTint="@android:color/white" />

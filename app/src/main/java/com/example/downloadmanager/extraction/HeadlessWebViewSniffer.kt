@@ -3,7 +3,10 @@ package com.example.downloadmanager.extraction
 import android.annotation.SuppressLint
 import android.app.Application
 import android.graphics.Bitmap
+import android.os.Build
+import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -15,29 +18,256 @@ import com.example.downloadmanager.model.VideoFormat
 import com.example.downloadmanager.model.VideoInfo
 import com.example.downloadmanager.model.VideoStreamInfo
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayInputStream
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Layer 3 — Headless WebView Sniffer Fallback (Zero-Friction):
+ * Layer 3 — Headless WebView Shortlink Resolver & Stream Sniffer Fallback:
  *
- * When Layer 1 HTTP/SSR/API extraction fails due to dynamic JS tokens, obfuscated share links,
- * or anti-bot verification (e.g., Threads share tokens, TikTok/Instagram challenges, Bilibili),
- * loads the URL in an offscreen background `WebView` with a `shouldInterceptRequest` network
- * interceptor and JS DOM resource scanner to capture the exact direct stream URLs, cookies,
- * User-Agent, and Referer headers seamlessly.
+ * 1. **`resolveShortlinkViaWebView`**: When OkHttp shortlink resolution still ends on a shortener,
+ *    JavaScript redirect interstitial, Cloudflare challenge, or `intent://` deep link, executes
+ *    Chromium WebView silently offscreen, intercepts `intent://` / app schemes to stay in-browser,
+ *    captures the canonical final `WebView.getUrl()`, syncs cookies to `BrowserSessionBridge`, and
+ *    feeds the canonical post URL back into Layer 1 extractors.
+ *
+ * 2. **`sniffMediaStreams`**: When Layer 1 SSR/API extraction fails completely on dynamic pages,
+ *    captures live network `.mp4`/`.m3u8`/`.mpd`/audio streams and DOM `<video>`/`<audio>` tags.
  */
 object HeadlessWebViewSniffer {
 
     internal var testSnifferOverride: (suspend (String) -> VideoStreamInfo?)? = null
+    internal var testShortlinkResolverOverride: (suspend (String) -> String?)? = null
 
     private const val CHROME_MOBILE_UA =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+
+    /**
+     * Resolves JS-gated / Cloudflare / intent:// shortlinks inside an invisible Chromium WebView,
+     * syncing cookies & intercepted streams to [BrowserSessionBridge] and returning the final canonical URL.
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    suspend fun resolveShortlinkViaWebView(
+        context: Application?,
+        shortUrl: String,
+        timeoutMs: Long = 10_000L
+    ): String? {
+        testShortlinkResolverOverride?.let { overrideFn ->
+            return overrideFn(shortUrl)
+        }
+        if (context == null) return null
+
+        val cleanedInput = UrlNormalizer.stripTrackingParameters(shortUrl)
+        val resultDeferred = CompletableDeferred<String?>()
+        var webViewRef: WebView? = null
+        val latestUrl = AtomicReference(cleanedInput)
+        val isDestroyed = AtomicBoolean(false)
+        var settleJob: Job? = null
+
+        try {
+            withContext(Dispatchers.Main) {
+                val wv = WebView(context.applicationContext)
+                webViewRef = wv
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+                }
+
+                val cookieManager = runCatching { CookieManager.getInstance() }.getOrNull()
+                cookieManager?.setAcceptCookie(true)
+                cookieManager?.setAcceptThirdPartyCookies(wv, true)
+                BrowserSessionBridge.lastWebViewUserAgent = CHROME_MOBILE_UA
+
+                wv.settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    databaseEnabled = true
+                    mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                    userAgentString = CHROME_MOBILE_UA
+                    loadsImagesAutomatically = false
+                    blockNetworkImage = true
+                    cacheMode = WebSettings.LOAD_DEFAULT
+                }
+
+                var settleScheduled = false
+                fun tryCompleteWith(candidateRaw: String?) {
+                    if (isDestroyed.get()) return
+                    val candidate = candidateRaw?.trim().orEmpty()
+                    if (!candidate.startsWith("http://", true) && !candidate.startsWith("https://", true)) {
+                        return
+                    }
+                    val clean = UrlNormalizer.stripTrackingParameters(candidate)
+                    latestUrl.set(clean)
+                    cookieManager?.getCookie(clean)?.let { c ->
+                        BrowserSessionBridge.recordCookieHeader(clean, c)
+                    }
+                    if (!UrlNormalizer.isShortenedOrTrackingRedirect(clean) &&
+                        !UrlNormalizer.isLoginOrChallengeGate(clean) &&
+                        !settleScheduled &&
+                        !resultDeferred.isCompleted
+                    ) {
+                        settleScheduled = true
+                        settleJob = CoroutineScope(Dispatchers.Main).launch {
+                            delay(650L)
+                            if (isDestroyed.get()) return@launch
+                            val finalFromView = runCatching { wv.url }.getOrNull()
+                                ?.takeIf { it.startsWith("http") }
+                                ?.let { UrlNormalizer.stripTrackingParameters(it) }
+                                ?: latestUrl.get()
+                            cookieManager?.getCookie(finalFromView)?.let { c ->
+                                BrowserSessionBridge.recordCookieHeader(finalFromView, c)
+                            }
+                            runCatching { cookieManager?.flush() }
+                            if (!resultDeferred.isCompleted) {
+                                resultDeferred.complete(finalFromView)
+                            }
+                        }
+                    }
+                }
+
+                wv.webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(
+                        view: WebView?,
+                        request: WebResourceRequest?
+                    ): Boolean {
+                        if (isDestroyed.get()) return true
+                        val target = request?.url?.toString() ?: return false
+                        if (UrlNormalizer.isCustomAppScheme(target)) {
+                            val fallback = UrlNormalizer.extractFallbackUrlFromAppScheme(target)
+                            if (!fallback.isNullOrBlank()) {
+                                val cleanFb = UrlNormalizer.stripTrackingParameters(fallback)
+                                view?.loadUrl(cleanFb)
+                                tryCompleteWith(cleanFb)
+                            }
+                            return true // Block external app hijacking inside headless resolver
+                        }
+                        tryCompleteWith(target)
+                        return false
+                    }
+
+                    override fun shouldInterceptRequest(
+                        view: WebView?,
+                        request: WebResourceRequest?
+                    ): WebResourceResponse? {
+                        if (isDestroyed.get()) return null
+                        val reqUrl = request?.url?.toString() ?: return null
+                        if (WebAdBlockFilter.isAdOrTrackerUrl(reqUrl)) {
+                            return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+                        }
+                        val reqHeaders = HashMap<String, String>()
+                        request.requestHeaders?.forEach { (k, v) -> reqHeaders[k] = v }
+                        if (!reqHeaders.containsKey("User-Agent")) {
+                            reqHeaders["User-Agent"] = CHROME_MOBILE_UA
+                        }
+                        cookieManager?.getCookie(reqUrl)?.takeIf { it.isNotBlank() }?.let { c ->
+                            reqHeaders["Cookie"] = c
+                        }
+                        BrowserSessionBridge.recordRequestHeaders(reqUrl, reqHeaders)
+
+                        // Opportunistically capture playable streams discovered during shortlink resolution
+                        WebMediaSniffer.classifyInterceptedUrl(
+                            url = reqUrl,
+                            pageUrl = latestUrl.get(),
+                            headers = reqHeaders
+                        )?.takeIf { !it.isImage }?.let { captured ->
+                            BrowserSessionBridge.recordCapturedMedia(captured)
+                        }
+                        return null
+                    }
+
+                    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                        if (!isDestroyed.get()) tryCompleteWith(url)
+                    }
+
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        if (isDestroyed.get()) return
+                        tryCompleteWith(url)
+                        val probeJs = """
+                            (function() {
+                              try {
+                                var canon = document.querySelector('link[rel="canonical"]');
+                                var og = document.querySelector('meta[property="og:url"]');
+                                return JSON.stringify({
+                                  href: window.location.href || '',
+                                  canonical: (canon && canon.href) ? canon.href : '',
+                                  ogUrl: (og && og.content) ? og.content : ''
+                                });
+                              } catch(e) { return ''; }
+                            })();
+                        """.trimIndent()
+                        if (isDestroyed.get()) return
+                        view?.evaluateJavascript(probeJs) { raw ->
+                            if (isDestroyed.get()) return@evaluateJavascript
+                            val unquoted = raw?.trim()?.let { r ->
+                                if (r.startsWith("\"") && r.endsWith("\"")) SimpleJson.parse(r) as? String else r
+                            }.orEmpty()
+                            val obj = SimpleJson.parse(unquoted) as? Map<*, *> ?: return@evaluateJavascript
+                            val candidates = listOf(
+                                obj["href"] as? String,
+                                obj["canonical"] as? String,
+                                obj["ogUrl"] as? String
+                            )
+                            val best = candidates.firstOrNull { cand ->
+                                !cand.isNullOrBlank() &&
+                                    cand.startsWith("http") &&
+                                    !UrlNormalizer.isShortenedOrTrackingRedirect(cand) &&
+                                    !UrlNormalizer.isLoginOrChallengeGate(cand)
+                            } ?: candidates.firstOrNull { !it.isNullOrBlank() && it.startsWith("http") }
+                            tryCompleteWith(best)
+                        }
+                    }
+
+                    override fun onRenderProcessGone(
+                        view: WebView?,
+                        detail: RenderProcessGoneDetail?
+                    ): Boolean {
+                        isDestroyed.set(true)
+                        settleJob?.cancel()
+                        (view?.parent as? ViewGroup)?.removeView(view)
+                        runCatching { view?.destroy() }
+                        webViewRef = null
+                        val recovered = latestUrl.get().takeIf {
+                            it != cleanedInput && !UrlNormalizer.isShortenedOrTrackingRedirect(it)
+                        }
+                        if (!resultDeferred.isCompleted) {
+                            resultDeferred.complete(recovered)
+                        }
+                        return true
+                    }
+                }
+
+                wv.loadUrl(cleanedInput)
+            }
+
+            return withTimeoutOrNull(timeoutMs) {
+                resultDeferred.await()
+            } ?: latestUrl.get().takeIf { it != cleanedInput && !UrlNormalizer.isShortenedOrTrackingRedirect(it) }
+        } catch (_: Exception) {
+            return null
+        } finally {
+            isDestroyed.set(true)
+            settleJob?.cancel()
+            withContext(Dispatchers.Main) {
+                runCatching {
+                    webViewRef?.apply {
+                        stopLoading()
+                        (parent as? ViewGroup)?.removeView(this)
+                        clearHistory()
+                        removeAllViews()
+                        destroy()
+                    }
+                    webViewRef = null
+                }
+            }
+        }
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     suspend fun sniffMediaStreams(
@@ -55,11 +285,16 @@ object HeadlessWebViewSniffer {
 
         val resultDeferred = CompletableDeferred<VideoStreamInfo?>()
         var webViewRef: WebView? = null
+        val isDestroyed = AtomicBoolean(false)
+        var settleJob: Job? = null
 
         try {
             withContext(Dispatchers.Main) {
                 val wv = WebView(context.applicationContext)
                 webViewRef = wv
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+                }
 
                 val cookieManager = runCatching { CookieManager.getInstance() }.getOrNull()
                 cookieManager?.setAcceptCookie(true)
@@ -71,6 +306,7 @@ object HeadlessWebViewSniffer {
                 wv.settings.apply {
                     javaScriptEnabled = true
                     domStorageEnabled = true
+                    databaseEnabled = true
                     mediaPlaybackRequiresUserGesture = false
                     mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                     userAgentString = ua
@@ -82,9 +318,10 @@ object HeadlessWebViewSniffer {
                 val capturedResources = java.util.Collections.synchronizedList(ArrayList<BrowserSessionBridge.CapturedMediaResource>())
                 var capturedTitle = ""
                 var settleScheduled = false
+                val activeUrl = AtomicReference(normalizedTarget)
 
                 fun recordCaptured(res: BrowserSessionBridge.CapturedMediaResource) {
-                    if (res.isImage) return // Prioritize playable video/audio/playlist streams for downloader fallback
+                    if (res.isImage || isDestroyed.get()) return
                     BrowserSessionBridge.recordCapturedMedia(res)
                     synchronized(capturedResources) {
                         if (capturedResources.none { it.url == res.url }) {
@@ -93,12 +330,13 @@ object HeadlessWebViewSniffer {
                     }
                     if (!settleScheduled && !resultDeferred.isCompleted) {
                         settleScheduled = true
-                        kotlinx.coroutines.CoroutineScope(Dispatchers.Main).launch {
-                            delay(900L) // Brief grace period to capture paired video+audio or HD variants
+                        settleJob = CoroutineScope(Dispatchers.Main).launch {
+                            delay(900L)
+                            if (isDestroyed.get()) return@launch
                             val snapshot = synchronized(capturedResources) { capturedResources.toList() }
                             if (snapshot.isNotEmpty() && !resultDeferred.isCompleted) {
                                 resultDeferred.complete(
-                                    buildStreamInfoFromCaptured(normalizedTarget, capturedTitle, snapshot)
+                                    buildStreamInfoFromCaptured(activeUrl.get(), capturedTitle, snapshot)
                                 )
                             }
                         }
@@ -106,10 +344,27 @@ object HeadlessWebViewSniffer {
                 }
 
                 wv.webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(
+                        view: WebView?,
+                        request: WebResourceRequest?
+                    ): Boolean {
+                        if (isDestroyed.get()) return true
+                        val target = request?.url?.toString() ?: return false
+                        if (UrlNormalizer.isCustomAppScheme(target)) {
+                            val fb = UrlNormalizer.extractFallbackUrlFromAppScheme(target)
+                            if (!fb.isNullOrBlank()) {
+                                view?.loadUrl(fb)
+                            }
+                            return true
+                        }
+                        return false
+                    }
+
                     override fun shouldInterceptRequest(
                         view: WebView?,
                         request: WebResourceRequest?
                     ): WebResourceResponse? {
+                        if (isDestroyed.get()) return null
                         val reqUrl = request?.url?.toString() ?: return null
                         if (WebAdBlockFilter.isAdOrTrackerUrl(reqUrl)) {
                             return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
@@ -117,7 +372,7 @@ object HeadlessWebViewSniffer {
                         val reqHeaders = HashMap<String, String>()
                         request.requestHeaders?.forEach { (k, v) -> reqHeaders[k] = v }
                         if (!reqHeaders.containsKey("Referer")) {
-                            reqHeaders["Referer"] = normalizedTarget
+                            reqHeaders["Referer"] = activeUrl.get()
                         }
                         if (!reqHeaders.containsKey("User-Agent")) {
                             reqHeaders["User-Agent"] = ua
@@ -139,7 +394,9 @@ object HeadlessWebViewSniffer {
                     }
 
                     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                        url?.let {
+                        if (isDestroyed.get()) return
+                        url?.takeIf { it.startsWith("http") }?.let {
+                            activeUrl.set(it)
                             cookieManager?.getCookie(it)?.let { c ->
                                 BrowserSessionBridge.recordCookieHeader(it, c)
                             }
@@ -147,11 +404,13 @@ object HeadlessWebViewSniffer {
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
-                        val activePageUrl = url ?: normalizedTarget
+                        if (isDestroyed.get()) return
+                        val activePageUrl = url?.takeIf { it.startsWith("http") } ?: activeUrl.get()
+                        activeUrl.set(activePageUrl)
                         cookieManager?.getCookie(activePageUrl)?.let { c ->
                             BrowserSessionBridge.recordCookieHeader(activePageUrl, c)
                         }
-                        cookieManager?.flush()
+                        runCatching { cookieManager?.flush() }
 
                         val domProbeJs = """
                             (function() {
@@ -173,7 +432,9 @@ object HeadlessWebViewSniffer {
                             })();
                         """.trimIndent()
 
+                        if (isDestroyed.get()) return
                         view?.evaluateJavascript(domProbeJs) { jsonRaw ->
+                            if (isDestroyed.get()) return@evaluateJavascript
                             val unquoted = jsonRaw?.trim()?.let { raw ->
                                 if (raw.startsWith("\"") && raw.endsWith("\"")) {
                                     SimpleJson.parse(raw) as? String
@@ -204,6 +465,27 @@ object HeadlessWebViewSniffer {
                             }
                         }
                     }
+
+                    override fun onRenderProcessGone(
+                        view: WebView?,
+                        detail: RenderProcessGoneDetail?
+                    ): Boolean {
+                        isDestroyed.set(true)
+                        settleJob?.cancel()
+                        (view?.parent as? ViewGroup)?.removeView(view)
+                        runCatching { view?.destroy() }
+                        webViewRef = null
+                        val snapshot = synchronized(capturedResources) { capturedResources.toList() }
+                        val recovered = if (snapshot.isNotEmpty()) {
+                            buildStreamInfoFromCaptured(activeUrl.get(), capturedTitle, snapshot)
+                        } else {
+                            null
+                        }
+                        if (!resultDeferred.isCompleted) {
+                            resultDeferred.complete(recovered)
+                        }
+                        return true
+                    }
                 }
 
                 wv.loadUrl(normalizedTarget)
@@ -223,15 +505,18 @@ object HeadlessWebViewSniffer {
         } catch (_: Exception) {
             return null
         } finally {
+            isDestroyed.set(true)
+            settleJob?.cancel()
             withContext(Dispatchers.Main) {
                 runCatching {
                     webViewRef?.apply {
                         stopLoading()
-                        loadUrl("about:blank")
+                        (parent as? ViewGroup)?.removeView(this)
                         clearHistory()
                         removeAllViews()
                         destroy()
                     }
+                    webViewRef = null
                 }
             }
         }

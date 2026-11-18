@@ -74,7 +74,7 @@ class DownloadDetailActivity : AppCompatActivity() {
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         supportActionBar?.title = getString(R.string.download_details)
-        supportActionBar?.subtitle = "Luca v${com.example.downloadmanager.BuildConfig.VERSION_NAME} (Build ${com.example.downloadmanager.BuildConfig.VERSION_CODE})"
+        supportActionBar?.subtitle = null
         
         downloadId = intent.getLongExtra("download_id", -1L)
         if (downloadId == -1L) {

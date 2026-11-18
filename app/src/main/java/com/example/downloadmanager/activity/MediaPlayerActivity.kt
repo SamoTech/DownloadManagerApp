@@ -132,7 +132,7 @@ class MediaPlayerActivity : AppCompatActivity() {
 
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
-        supportActionBar?.subtitle = "Luca v${com.example.downloadmanager.BuildConfig.VERSION_NAME} (Build ${com.example.downloadmanager.BuildConfig.VERSION_CODE})"
+        supportActionBar?.subtitle = null
         binding.toolbar.setNavigationOnClickListener {
             onBackPressedDispatcher.onBackPressed()
         }

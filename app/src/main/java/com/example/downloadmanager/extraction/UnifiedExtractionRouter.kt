@@ -53,9 +53,45 @@ class UnifiedExtractionRouter(
     }
 
     /**
+     * Two-stage hybrid shortlink & canonical URL resolution:
+     * 1. Strip tracking params and run 10-hop manual OkHttp resolution (blocking `intent://` & app schemes).
+     * 2. If the URL is still a shortener, JS interstitial, or Cloudflare/login gate, invoke
+     *    [HeadlessWebViewSniffer.resolveShortlinkViaWebView] so Chromium executes JS redirects,
+     *    syncs cookies to [BrowserSessionBridge], and returns the canonical post URL.
+     */
+    suspend fun resolveCanonicalUrlHybrid(
+        rawUrl: String,
+        enableWebViewFallback: Boolean = true
+    ): String {
+        val cleanedInput = UrlNormalizer.stripTrackingParameters(rawUrl)
+        val okHttpResolved = UrlNormalizer.resolveAndNormalize(cleanedInput, httpClient)
+        if (!enableWebViewFallback) {
+            return okHttpResolved
+        }
+        if (UrlNormalizer.needsWebViewShortlinkFallback(cleanedInput, okHttpResolved)) {
+            val targetForWebView = if (UrlNormalizer.isLoginOrChallengeGate(okHttpResolved) ||
+                UrlNormalizer.isBarePlatformHomepage(okHttpResolved)
+            ) {
+                cleanedInput
+            } else {
+                okHttpResolved
+            }
+            val webViewResolved = HeadlessWebViewSniffer.resolveShortlinkViaWebView(context, targetForWebView)
+            if (!webViewResolved.isNullOrBlank()) {
+                val cleanedWebView = UrlNormalizer.stripTrackingParameters(webViewResolved)
+                if (!UrlNormalizer.isLoginOrChallengeGate(cleanedWebView)) {
+                    return cleanedWebView
+                }
+            }
+        }
+        return okHttpResolved
+    }
+
+    /**
      * Resolves [rawUrl] through the 3-layer pipeline:
      * 1. Check live WebView session captures in [BrowserSessionBridge]
-     * 2. Normalize URL + resolve redirects (`UrlNormalizer`), invoke matching [PlatformExtractor] Strategy or [corePlatformDelegate]
+     * 2. Normalize URL + resolve shortlinks/redirects (`resolveCanonicalUrlHybrid`: OkHttp + WebView fallback),
+     *    then invoke matching [PlatformExtractor] Strategy or [corePlatformDelegate]
      * 3. Expand any single `.m3u8` / `.mpd` manifest URL into selectable resolution & audio options (Layer 2)
      * 4. If Layer 1 yields nothing and [enableHeadlessFallback] is true, run Layer 3 [HeadlessWebViewSniffer]
      */
@@ -77,8 +113,24 @@ class UnifiedExtractionRouter(
             }
         }
 
-        // Layer 1: Normalize & resolve shortlinks / redirects
-        val resolvedUrl = UrlNormalizer.resolveAndNormalize(cleanedInput, httpClient)
+        // Layer 1: Hybrid shortlink resolution (OkHttp 10-hop + mandatory WebView fallback for JS/bot gates)
+        val resolvedUrl = resolveCanonicalUrlHybrid(
+            rawUrl = cleanedInput,
+            enableWebViewFallback = enableHeadlessFallback
+        )
+
+        // Check if the WebView shortlink resolver or live browser already captured streams on the canonical URL
+        if (resolvedUrl != cleanedInput) {
+            val resolvedCaptured = BrowserSessionBridge.getCapturedMediaForPage(resolvedUrl)
+                .filter { !it.isImage }
+            if (resolvedCaptured.isNotEmpty()) {
+                val capturedStream = HeadlessWebViewSniffer.buildStreamInfoFromCaptured(resolvedUrl, "", resolvedCaptured)
+                if (capturedStream != null) {
+                    return expandManifestVariantsIfNeeded(capturedStream)
+                }
+            }
+        }
+
         val ctx = ExtractionContext(
             originalUrl = rawUrl,
             normalizedUrl = cleanedInput,
@@ -92,7 +144,7 @@ class UnifiedExtractionRouter(
 
         var layer1Result: VideoStreamInfo? = null
 
-        // Run Strategy plugins matching either original or resolved URL
+        // Run Strategy plugins matching either canonical resolved URL or original input
         for (strategy in strategies) {
             if (strategy.supports(resolvedUrl) || strategy.supports(cleanedInput)) {
                 val res = runCatching { strategy.extract(ctx) }.getOrNull()

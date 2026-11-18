@@ -26,12 +26,10 @@ class AboutActivity : AppCompatActivity() {
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         supportActionBar?.title = getString(R.string.about)
-        val versionBadge = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
-        supportActionBar?.subtitle = versionBadge
-        binding.toolbar.subtitle = versionBadge
+        supportActionBar?.subtitle = null
+        binding.toolbar.subtitle = null
         
-        binding.tvVersion.text =
-            "${getString(R.string.version, BuildConfig.VERSION_NAME)} (Build ${BuildConfig.VERSION_CODE})"
+        binding.tvVersion.text = getString(R.string.version, BuildConfig.VERSION_NAME)
         binding.tvDescription.text = getString(R.string.app_description)
 
         binding.btnPrivacyPolicy.setOnClickListener {

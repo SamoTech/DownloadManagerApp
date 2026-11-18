@@ -3,6 +3,8 @@ package com.example.downloadmanager
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import com.example.downloadmanager.activity.AddDownloadActivity
+import com.example.downloadmanager.activity.BrowserActivity
+import com.example.downloadmanager.browser.DetectedMediaStore
 import com.example.downloadmanager.manager.DownloadManager
 import com.example.downloadmanager.manager.MusicDownloadManager
 import com.example.downloadmanager.manager.TorrentDownloadManager
@@ -4873,6 +4875,236 @@ class DownloadManagerCoreVerificationTest {
         } finally {
             HeadlessWebViewSniffer.testSnifferOverride = null
             BrowserSessionBridge.clearAllForTest()
+            runCatching { server.stop(0) }
+        }
+    }
+
+    @Test
+    fun phase14_shortlinkHybridResolution_dualLayerSniffer_andRebuiltBrowser() = runBlocking {
+        BrowserSessionBridge.clearAllForTest()
+        HeadlessWebViewSniffer.testSnifferOverride = null
+        HeadlessWebViewSniffer.testShortlinkResolverOverride = null
+        DetectedMediaStore.clearAll()
+
+        assertTrue(BuildConfig.VERSION_CODE >= 30)
+        assertEquals("${BuildConfig.VERSION_CODE}.0", BuildConfig.VERSION_NAME)
+
+        // 1. Shortlink classification coverage
+        val igShare = UrlClassifier.classify("https://www.instagram.com/share/reel/BAL123abc/")
+        assertTrue(igShare.isSupported && igShare.isShortLink)
+        val threadsShort = UrlClassifier.classify("https://www.threads.net/t/C9xyz123/")
+        assertTrue(threadsShort.isSupported && threadsShort.isShortLink)
+        val snapShare = UrlClassifier.classify("https://share.snapchat.com/m/abc123")
+        assertTrue(snapShare.isSupported && snapShare.isShortLink)
+        val genShort = UrlClassifier.classify("https://bit.ly/3lucaTest")
+        assertTrue(genShort.isSupported && genShort.isShortLink)
+
+        // 2. intent:// & custom scheme fallback extraction
+        val intentUri = "intent://www.instagram.com/reel/C8canonical/?igsh=abc#Intent;scheme=https;package=com.instagram.android;S.browser_fallback_url=https%3A%2F%2Fwww.instagram.com%2Freel%2FC8canonical%2F%3Fv%3D1%26utm_source%3Dshare;end"
+        assertEquals(
+            "https://www.instagram.com/reel/C8canonical/?v=1&utm_source=share",
+            UrlNormalizer.extractFallbackUrlFromAppScheme(intentUri)
+        )
+        assertEquals(
+            "https://www.threads.com/@creator/post/D123",
+            UrlNormalizer.extractFallbackUrlFromAppScheme(
+                "threads://post?id=123&fallback_url=https%3A%2F%2Fwww.threads.com%2F%40creator%2Fpost%2FD123"
+            )
+        )
+        assertNull(UrlNormalizer.extractFallbackUrlFromAppScheme("snssdk1233://aweme/detail/123"))
+
+        // 3. Multi-hop HTTP + intent:// Location + <meta refresh> + JS window.location.replace resolution
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val okClient = OkHttpClient.Builder().followRedirects(true).followSslRedirects(true).build()
+        try {
+            server.createContext("/hop1") { ex ->
+                val port = server.address.port
+                ex.responseHeaders.add("Set-Cookie", "short_sess=hop1cookie; Path=/")
+                ex.responseHeaders.add("Location", "http://127.0.0.1:$port/hop2?utm_source=x")
+                ex.sendResponseHeaders(302, -1)
+            }
+            server.createContext("/hop2") { ex ->
+                val port = server.address.port
+                val encodedFallback = java.net.URLEncoder.encode(
+                    "http://127.0.0.1:$port/hop3_meta?xmt=track99&id=77",
+                    "UTF-8"
+                )
+                ex.responseHeaders.add(
+                    "Location",
+                    "intent://host/post#Intent;package=com.example.app;S.browser_fallback_url=$encodedFallback;end"
+                )
+                ex.sendResponseHeaders(307, -1)
+            }
+            server.createContext("/hop3_meta") { ex ->
+                val port = server.address.port
+                val html = """<html><head><meta http-equiv="refresh" content="0;url=http://127.0.0.1:$port/hop4_js?id=77"></head></html>"""
+                    .toByteArray(StandardCharsets.UTF_8)
+                ex.responseHeaders.add("Content-Type", "text/html")
+                ex.sendResponseHeaders(200, html.size.toLong())
+                ex.responseBody.use { it.write(html) }
+            }
+            server.createContext("/hop4_js") { ex ->
+                val port = server.address.port
+                val html = """<html><script>window.location.replace("http://127.0.0.1:$port/final_post?id=77&utm_campaign=share");</script></html>"""
+                    .toByteArray(StandardCharsets.UTF_8)
+                ex.responseHeaders.add("Content-Type", "text/html")
+                ex.sendResponseHeaders(200, html.size.toLong())
+                ex.responseBody.use { it.write(html) }
+            }
+            server.createContext("/final_post") { ex ->
+                val html = "<html><title>Canonical Target</title></html>".toByteArray(StandardCharsets.UTF_8)
+                ex.responseHeaders.add("Content-Type", "text/html")
+                ex.sendResponseHeaders(200, html.size.toLong())
+                ex.responseBody.use { it.write(html) }
+            }
+            server.start()
+            val port = server.address.port
+            val baseUrl = "http://127.0.0.1:$port"
+
+            val resolvedMultiHop = UrlNormalizer.resolveAndNormalize(
+                rawUrl = "$baseUrl/hop1?utm_medium=android",
+                httpClient = okClient,
+                maxHops = 10,
+                forceResolveRedirects = true
+            )
+            assertEquals("$baseUrl/final_post?id=77", resolvedMultiHop)
+
+            // Canonical & og:url fallback on share/shortlink HTML
+            val canonicalHtml = """<html><head><link rel="canonical" href="https://www.threads.com/@luca/post/CANON99"/></head></html>"""
+            assertEquals(
+                "https://www.threads.com/@luca/post/CANON99",
+                UrlNormalizer.extractRedirectTargetFromHtml(canonicalHtml, "https://www.threads.net/t/SHORT99")
+            )
+
+            // 4. UnifiedExtractionRouter WebView shortlink fallback when OkHttp cannot unwrap JS/bot gate
+            assertTrue(
+                UrlNormalizer.needsWebViewShortlinkFallback(
+                    originalUrl = "https://vm.tiktok.com/ZMjTest123/",
+                    okHttpResolvedUrl = "https://vm.tiktok.com/ZMjTest123/"
+                )
+            )
+            assertTrue(
+                UrlNormalizer.needsWebViewShortlinkFallback(
+                    originalUrl = "https://www.instagram.com/share/reel/XYZ/",
+                    okHttpResolvedUrl = "https://www.instagram.com/accounts/login/?next=..."
+                )
+            )
+            assertTrue(
+                UrlNormalizer.needsWebViewShortlinkFallback(
+                    originalUrl = "https://vm.tiktok.com/ZMjTest123/",
+                    okHttpResolvedUrl = "https://www.tiktok.com/"
+                )
+            )
+
+            var delegateReceivedUrl: String? = null
+            HeadlessWebViewSniffer.testShortlinkResolverOverride = { shortUrl ->
+                assertEquals("https://vm.tiktok.com/ZMjTest123/", shortUrl)
+                "https://www.tiktok.com/@luca_creator/video/7788990011?is_from_webapp=1"
+            }
+            val router = UnifiedExtractionRouter(
+                context = null,
+                httpClient = okClient,
+                desktopUserAgent = VideoDownloadManager.DESKTOP_USER_AGENT,
+                botUserAgent = VideoDownloadManager.DISCORD_BOT_USER_AGENT
+            )
+            val resolvedStream = router.resolve(
+                rawUrl = "https://vm.tiktok.com/ZMjTest123/",
+                enableHeadlessFallback = true
+            ) { canonicalUrl ->
+                delegateReceivedUrl = canonicalUrl
+                VideoStreamInfo(
+                    video = VideoInfo("tt1", "Canonical TikTok", canonicalUrl, author = "Creator"),
+                    formats = listOf(VideoFormat("mp4_hd", "https://cdn.example.com/v_720.mp4", "720p HD", "mp4"))
+                )
+            }
+            assertEquals("https://www.tiktok.com/@luca_creator/video/7788990011", delegateReceivedUrl)
+            assertNotNull(resolvedStream)
+            assertEquals("Canonical TikTok", resolvedStream!!.video.title)
+
+            // 5. WebMediaSniffer & DetectedMediaStore < 150 KB filtering + ranking
+            val tinyAdSegment = WebMediaSniffer.classifyInterceptedUrl(
+                url = "https://ads-cdn.example.com/promo_pixel.mp4",
+                pageUrl = "https://example.org/watch",
+                contentLength = 100_000L // < 150 KB
+            )
+            assertNull("Segments under 150 KB must be dropped as ad/tracker noise", tinyAdSegment)
+
+            val smallHlsManifest = WebMediaSniffer.classifyInterceptedUrl(
+                url = "https://cdn.example.com/hls/master.m3u8",
+                pageUrl = "https://example.org/watch",
+                contentLength = 2048L // Playlists exempt from 150 KB cutoff
+            )
+            assertNotNull("HLS playlists must be kept regardless of small size", smallHlsManifest)
+
+            assertNull(WebMediaSniffer.classifyInterceptedUrl("https://cdn.example.com/dash/seg_12.m4s", "https://example.org"))
+
+            val tabId = "tab_test_14"
+            val pendingMp4 = WebMediaSniffer.classifyInterceptedUrl(
+                url = "https://cdn.example.com/unknown_probe.mp4",
+                pageUrl = "https://example.org/watch",
+                pageTitle = "Movie"
+            )!!
+            assertTrue(DetectedMediaStore.record(tabId, DetectedMediaStore.fromCapturedResource(pendingMp4)))
+            assertEquals(1, DetectedMediaStore.getCount(tabId))
+            // Probe reveals it's a tiny 42 KB segment -> automatically removed
+            assertTrue(DetectedMediaStore.updateContentLength(tabId, "https://cdn.example.com/unknown_probe.mp4", 42_000L))
+            assertEquals(0, DetectedMediaStore.getCount(tabId))
+
+            val realMp4 = WebMediaSniffer.classifyInterceptedUrl(
+                url = "https://cdn.example.com/video_1080p.mp4",
+                pageUrl = "https://example.org/watch",
+                pageTitle = "FeatureClip",
+                contentLength = 12_500_000L
+            )!!
+            val realAudio = WebMediaSniffer.classifyInterceptedUrl(
+                url = "https://cdn.example.com/track.m4a",
+                pageUrl = "https://example.org/watch",
+                pageTitle = "TrackAudio",
+                contentLength = 3_200_000L
+            )!!
+            DetectedMediaStore.record(tabId, DetectedMediaStore.fromCapturedResource(realAudio, "DOM/JS Hook"))
+            DetectedMediaStore.record(tabId, DetectedMediaStore.fromCapturedResource(smallHlsManifest!!, "Network"))
+            DetectedMediaStore.record(tabId, DetectedMediaStore.fromCapturedResource(realMp4, "Network"))
+
+            val ordered = DetectedMediaStore.getEntries(tabId)
+            assertEquals(3, ordered.size)
+            assertEquals(DetectedMediaStore.MediaKind.VIDEO, ordered[0].kind)
+            assertEquals(DetectedMediaStore.MediaKind.HLS_DASH, ordered[1].kind)
+            assertEquals(DetectedMediaStore.MediaKind.AUDIO, ordered[2].kind)
+            assertEquals("11.9 MB", DetectedMediaStore.formatSize(12_500_000L))
+
+            // 6. Rebuilt BrowserActivity helpers: shouldOverrideUrlLoading decisions, JS hook parser, Speed Dial
+            val blockedScheme = BrowserActivity.resolveNavigationOverride("threads://post/abc")
+            assertTrue(blockedScheme is BrowserActivity.Companion.NavigationOverrideDecision.BlockAppScheme)
+
+            val intentOverride = BrowserActivity.resolveNavigationOverride(intentUri)
+            assertTrue(intentOverride is BrowserActivity.Companion.NavigationOverrideDecision.LoadFallbackUrlInWebView)
+            assertEquals(
+                "https://www.instagram.com/reel/C8canonical/?v=1",
+                (intentOverride as BrowserActivity.Companion.NavigationOverrideDecision.LoadFallbackUrlInWebView).fallbackUrl
+            )
+
+            val apkOverride = BrowserActivity.resolveNavigationOverride("https://downloads.example.org/releases/app-v29.apk")
+            assertTrue(apkOverride is BrowserActivity.Companion.NavigationOverrideDecision.RouteDirectDownload)
+            assertEquals(DownloadType.DIRECT, (apkOverride as BrowserActivity.Companion.NavigationOverrideDecision.RouteDirectDownload).downloadType)
+
+            val magnetOverride = BrowserActivity.resolveNavigationOverride("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Ubuntu+ISO")
+            assertTrue(magnetOverride is BrowserActivity.Companion.NavigationOverrideDecision.RouteDirectDownload)
+            assertEquals(DownloadType.MAGNET, (magnetOverride as BrowserActivity.Companion.NavigationOverrideDecision.RouteDirectDownload).downloadType)
+
+            val (jsTitle, jsUrls) = BrowserActivity.extractDiscoveredUrlsFromJsPayload(
+                """{"title":"Threads Clip","urls":["https://scontent.cdninstagram.com/v/clip_720.mp4","javascript:void(0)"]}"""
+            )
+            assertEquals("Threads Clip", jsTitle)
+            assertEquals(listOf("https://scontent.cdninstagram.com/v/clip_720.mp4"), jsUrls)
+
+            val speedDialNames = BrowserActivity.defaultSpeedDialPlatforms().map { it.name }
+            assertTrue(speedDialNames.containsAll(listOf("Threads", "Instagram", "TikTok", "X (Twitter)", "Facebook", "YouTube", "SoundCloud", "Vimeo")))
+        } finally {
+            HeadlessWebViewSniffer.testSnifferOverride = null
+            HeadlessWebViewSniffer.testShortlinkResolverOverride = null
+            BrowserSessionBridge.clearAllForTest()
+            DetectedMediaStore.clearAll()
             runCatching { server.stop(0) }
         }
     }

@@ -26,7 +26,7 @@ class SettingsActivity : AppCompatActivity() {
         setSupportActionBar(toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         supportActionBar?.title = getString(R.string.settings)
-        supportActionBar?.subtitle = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
+        supportActionBar?.subtitle = null
         
         if (savedInstanceState == null) {
             supportFragmentManager
@@ -49,7 +49,7 @@ class SettingsActivity : AppCompatActivity() {
             setPreferencesFromResource(R.xml.preferences, rootKey)
 
             findPreference<Preference>("pref_app_version")?.summary =
-                "Luca Download Manager v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
+                "Luca Download Manager v${BuildConfig.VERSION_NAME}"
 
             // Populate default save location if empty
             val savePathPref = findPreference<EditTextPreference>("default_save_path")

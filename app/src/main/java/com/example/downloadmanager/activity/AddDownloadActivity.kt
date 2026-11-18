@@ -20,6 +20,9 @@ import androidx.recyclerview.widget.RecyclerView
 import com.example.downloadmanager.BuildConfig
 import com.example.downloadmanager.R
 import com.example.downloadmanager.databinding.ActivityAddDownloadBinding
+import com.example.downloadmanager.extraction.BrowserSessionBridge
+import com.example.downloadmanager.extraction.UnifiedExtractionRouter
+import com.example.downloadmanager.extraction.UrlNormalizer
 import com.example.downloadmanager.manager.DownloadManager
 import com.example.downloadmanager.manager.MusicDownloadManager
 import com.example.downloadmanager.manager.TorrentDownloadManager
@@ -182,9 +185,8 @@ class AddDownloadActivity : AppCompatActivity() {
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         supportActionBar?.title = getString(R.string.add_download)
-        val versionBadge = "Luca v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
-        supportActionBar?.subtitle = versionBadge
-        binding.toolbar.subtitle = versionBadge
+        supportActionBar?.subtitle = null
+        binding.toolbar.subtitle = null
         binding.toolbar.setNavigationOnClickListener {
             onBackPressedDispatcher.onBackPressed()
         }
@@ -625,6 +627,40 @@ class AddDownloadActivity : AppCompatActivity() {
                 DownloadType.VIDEO -> extractVideoInfo(valid, token)
                 DownloadType.MUSIC -> extractMusicInfo(valid, token)
                 DownloadType.DIRECT -> {
+                    val isShortlink = classification.isShortLink || UrlNormalizer.isShortenedOrTrackingRedirect(valid)
+                    if (isShortlink) {
+                        val resolvedUrl = withContext(Dispatchers.IO) {
+                            val quickClient = okhttp3.OkHttpClient.Builder()
+                                .cookieJar(BrowserSessionBridge.createSessionCookieJar())
+                                .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                                .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                                .build()
+                            val enableWv = PreferenceManager.getDefaultSharedPreferences(this@AddDownloadActivity)
+                                .getBoolean("headless_sniffer_fallback", true)
+                            UnifiedExtractionRouter(
+                                context = application,
+                                httpClient = quickClient,
+                                desktopUserAgent = VideoDownloadManager.DESKTOP_USER_AGENT,
+                                botUserAgent = VideoDownloadManager.DISCORD_BOT_USER_AGENT
+                            ).resolveCanonicalUrlHybrid(valid, enableWebViewFallback = enableWv)
+                        }
+                        if (isProbeStillCurrent(token, valid) && resolvedUrl != valid) {
+                            val newClassification = UrlClassifier.classify(resolvedUrl)
+                            if (newClassification.kind != UrlClassifier.SourceKind.UNSUPPORTED &&
+                                newClassification.kind != UrlClassifier.SourceKind.DIRECT_FILE
+                            ) {
+                                isUpdatingUrlProgrammatically = true
+                                try {
+                                    binding.etUrl.setText(resolvedUrl)
+                                    binding.etUrl.setSelection(resolvedUrl.length)
+                                } finally {
+                                    isUpdatingUrlProgrammatically = false
+                                }
+                                autoDetectTypeFromUrl(resolvedUrl, triggerExtraction = true)
+                                return@launch
+                            }
+                        }
+                    }
                     val fastTorrentMeta = withContext(Dispatchers.IO) {
                         runCatching {
                             torrentDownloadManager.peekParsedTorrentMetadata(valid)

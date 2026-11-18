@@ -342,30 +342,32 @@ object UrlClassifier {
 
         // 7. Instagram
         if (matchesAnyDomain(host, "instagram.com", "instagr.am")) {
-            val hasPost = nonEmptySegments.size >= 2 &&
-                nonEmptySegments[0].lowercase(Locale.US) in setOf("p", "reel", "reels", "tv", "stories")
+            val isShort = matchesDomain(host, "instagr.am") || pathLower.startsWith("/share/")
+            val hasPost = isShort || (nonEmptySegments.size >= 2 &&
+                nonEmptySegments[0].lowercase(Locale.US) in setOf("p", "reel", "reels", "tv", "stories"))
             return UrlClassification(
                 category = PlatformCategory.INSTAGRAM,
                 downloadType = DownloadType.VIDEO,
                 providerName = "Instagram",
                 canonicalHost = "instagram.com",
                 isSupported = hasPost,
-                isShortLink = matchesDomain(host, "instagr.am"),
-                unsupportedReason = if (hasPost) null else "Instagram URL must point to a Reel, Post (/p/), or TV video"
+                isShortLink = isShort,
+                unsupportedReason = if (hasPost) null else "Instagram URL must point to a Reel, Post (/p/), Share (/share/), or TV video"
             )
         }
 
         // 7b. Threads (Meta)
         if (matchesAnyDomain(host, "threads.net", "threads.com", "threads.instagram.com")) {
             val postIdx = nonEmptySegments.indexOfFirst { it.equals("post", ignoreCase = true) }
-            val hasPost = (postIdx >= 0 && postIdx + 1 < nonEmptySegments.size) ||
-                (nonEmptySegments.size >= 2 && nonEmptySegments[0].equals("t", ignoreCase = true))
+            val isShortT = nonEmptySegments.size >= 2 && nonEmptySegments[0].equals("t", ignoreCase = true)
+            val hasPost = (postIdx >= 0 && postIdx + 1 < nonEmptySegments.size) || isShortT
             return UrlClassification(
                 category = PlatformCategory.THREADS,
                 downloadType = DownloadType.VIDEO,
                 providerName = "Threads",
                 canonicalHost = "threads.com",
                 isSupported = hasPost,
+                isShortLink = isShortT,
                 requiresThirdPartyIntermediary = false,
                 intermediaryHostDescription = "Direct Threads SSR / GraphQL + Headless Sniffer",
                 unsupportedReason = if (hasPost) null else "Threads URL must point to a specific post (/post/<id> or /t/<id>)"
@@ -512,8 +514,8 @@ object UrlClassifier {
             )
         }
 
-        if (matchesAnyDomain(host, "snapchat.com", "t.snapchat.com")) {
-            val isShort = matchesDomain(host, "t.snapchat.com")
+        if (matchesAnyDomain(host, "snapchat.com", "t.snapchat.com", "share.snapchat.com")) {
+            val isShort = matchesAnyDomain(host, "t.snapchat.com", "share.snapchat.com")
             val hasVideo = isShort || pathLower.contains("/spotlight/") || pathLower.contains("/p/")
             return UrlClassification(
                 category = PlatformCategory.SNAPCHAT,
@@ -641,13 +643,15 @@ object UrlClassifier {
             )
         }
 
-        // 17. Generic Direct HTTP/HTTPS File
+        // 17. Generic Direct HTTP/HTTPS File or Shortener/Share Redirect
+        val isGenericShortlink = com.example.downloadmanager.extraction.UrlNormalizer.isShortenedOrTrackingRedirect(trimmed)
         return UrlClassification(
             category = PlatformCategory.DIRECT_FILE,
             downloadType = DownloadType.DIRECT,
-            providerName = "Direct HTTP",
+            providerName = if (isGenericShortlink) "Shortlink Redirect" else "Direct HTTP",
             canonicalHost = host,
-            isSupported = true
+            isSupported = true,
+            isShortLink = isGenericShortlink
         )
     }
 }

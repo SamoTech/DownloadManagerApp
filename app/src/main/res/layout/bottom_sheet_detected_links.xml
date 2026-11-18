@@ -41,7 +41,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="2dp"
-                android:text="Tap any detected media or file link to start downloading"
+                android:text="Captured live streams &amp; files with active browser cookies"
                 android:textColor="@color/gray"
                 android:textSize="12sp" />
         </LinearLayout>
@@ -50,7 +50,7 @@
             android:id="@+id/btnDownloadAllDetected"
             style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="wrap_content"
-            android:layout_height="40dp"
+            android:layout_height="48dp"
             android:insetTop="0dp"
             android:insetBottom="0dp"
             android:text="@string/download_all"
@@ -84,13 +84,6 @@
                 android:text="@string/all_files" />
 
             <com.google.android.material.chip.Chip
-                android:id="@+id/chipFilterMusic"
-                style="@style/Widget.Material3.Chip.Filter"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/music" />
-
-            <com.google.android.material.chip.Chip
                 android:id="@+id/chipFilterVideo"
                 style="@style/Widget.Material3.Chip.Filter"
                 android:layout_width="wrap_content"
@@ -98,11 +91,18 @@
                 android:text="@string/videos" />
 
             <com.google.android.material.chip.Chip
+                android:id="@+id/chipFilterMusic"
+                style="@style/Widget.Material3.Chip.Filter"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/music" />
+
+            <com.google.android.material.chip.Chip
                 android:id="@+id/chipFilterFiles"
                 style="@style/Widget.Material3.Chip.Filter"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Files &amp; Torrents" />
+                android:text="Files &amp; Images" />
         </com.google.android.material.chip.ChipGroup>
     </HorizontalScrollView>
 
@@ -110,9 +110,9 @@
         android:id="@+id/tvNoDetectedLinks"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginVertical="24dp"
+        android:layout_marginVertical="28dp"
         android:gravity="center"
-        android:text="No downloadable links found for this filter on the current page."
+        android:text="No media detected yet on this page. Play the video or scroll the feed to trigger live stream capture."
         android:textColor="@color/gray"
         android:textSize="14sp"
         android:visibility="gone" />

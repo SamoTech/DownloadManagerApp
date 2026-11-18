@@ -194,4 +194,10 @@
     <string name="torrent_sequential_download_summary">Download torrent pieces in ascending sequential order for faster media previewing</string>
     <string name="browser_desktop_mode">Desktop</string>
     <string name="browser_adblock_short">Shield</string>
+    <string name="browser_download_now">Download Now</string>
+    <string name="browser_tabs_title">Open Browser Tabs</string>
+    <string name="browser_new_tab">New Tab</string>
+    <string name="browser_speed_dial_title">Quick Platforms &amp; Media Sites</string>
+    <string name="browser_media_badge">Download Media (%d)</string>
+    <string name="browser_stop_loading">Stop Loading</string>
 </resources>

@@ -21,10 +21,15 @@ import androidx.core.app.NotificationCompat
 import androidx.preference.PreferenceManager
 import com.example.downloadmanager.R
 import com.example.downloadmanager.activity.MainActivity
+import com.example.downloadmanager.extraction.BrowserSessionBridge
+import com.example.downloadmanager.extraction.UnifiedExtractionRouter
+import com.example.downloadmanager.extraction.UrlNormalizer
 import com.example.downloadmanager.manager.DownloadManager
 import com.example.downloadmanager.manager.MusicDownloadManager
 import com.example.downloadmanager.manager.TorrentDownloadManager
 import com.example.downloadmanager.manager.VideoDownloadManager
+import okhttp3.OkHttpClient
+import java.util.concurrent.TimeUnit
 import com.example.downloadmanager.model.DownloadDatabase
 import com.example.downloadmanager.model.DownloadItem
 import com.example.downloadmanager.model.DownloadRepository
@@ -403,8 +408,28 @@ class DownloadService : Service() {
 
     fun startNewDownload(item: DownloadItem, onIdCreated: ((Long) -> Unit)? = null) {
         serviceScope.launch {
+            val rawUrl = item.url.trim()
+            val effectiveUrl = if (UrlNormalizer.isCustomAppScheme(rawUrl)) {
+                UrlNormalizer.extractFallbackUrlFromAppScheme(rawUrl) ?: rawUrl
+            } else if (UrlNormalizer.isShortenedOrTrackingRedirect(rawUrl)) {
+                val quickClient = OkHttpClient.Builder()
+                    .cookieJar(BrowserSessionBridge.createSessionCookieJar())
+                    .connectTimeout(15, TimeUnit.SECONDS)
+                    .readTimeout(15, TimeUnit.SECONDS)
+                    .build()
+                val enableWv = prefs.getBoolean("headless_sniffer_fallback", true)
+                UnifiedExtractionRouter(
+                    context = application,
+                    httpClient = quickClient,
+                    desktopUserAgent = VideoDownloadManager.DESKTOP_USER_AGENT,
+                    botUserAgent = VideoDownloadManager.DISCORD_BOT_USER_AGENT
+                ).resolveCanonicalUrlHybrid(rawUrl, enableWebViewFallback = enableWv)
+            } else {
+                rawUrl
+            }
+
             val resolvedType = if (item.downloadType == DownloadType.DIRECT) {
-                when (com.example.downloadmanager.utils.UrlClassifier.classify(item.url).kind) {
+                when (com.example.downloadmanager.utils.UrlClassifier.classify(effectiveUrl).kind) {
                     com.example.downloadmanager.utils.UrlClassifier.SourceKind.MUSIC_PLATFORM,
                     com.example.downloadmanager.utils.UrlClassifier.SourceKind.DIRECT_AUDIO -> DownloadType.MUSIC
                     com.example.downloadmanager.utils.UrlClassifier.SourceKind.VIDEO_PLATFORM,
@@ -417,7 +442,7 @@ class DownloadService : Service() {
                 item.downloadType
             }
             val normalizedIsAudio = item.isAudioOnly || resolvedType == DownloadType.MUSIC
-            val targetUrlNorm = (item.videoUrl ?: item.url).trim()
+            val targetUrlNorm = (item.videoUrl ?: effectiveUrl).trim()
             val existingActive = repository.getAllDownloadsList().firstOrNull { existing ->
                 (existing.status == DownloadStatus.QUEUED || existing.status == DownloadStatus.DOWNLOADING) &&
                     existing.isAudioOnly == normalizedIsAudio &&
@@ -432,6 +457,7 @@ class DownloadService : Service() {
             }
 
             val queuedItem = item.copy(
+                url = effectiveUrl,
                 downloadType = resolvedType,
                 isAudioOnly = normalizedIsAudio,
                 status = DownloadStatus.QUEUED,
