@@ -280,7 +280,10 @@ class BrowserActivity : AppCompatActivity() {
                 host.endsWith("sentry.io") ||
                 host.endsWith("scorecardresearch.com") ||
                 host.endsWith("facebook.net") ||
-                host.endsWith("cloudflareinsights.com")
+                host.endsWith("cloudflareinsights.com") ||
+                host == "static.cdninstagram.com" ||
+                host.startsWith("static.") && host.endsWith(".fbcdn.net") ||
+                cleanPath.contains("/rsrc.php/")
             ) {
                 return null
             }
@@ -1366,14 +1369,20 @@ class BrowserActivity : AppCompatActivity() {
         }
 
         return try {
-            val req = Request.Builder()
+            val reqBuilder = Request.Builder()
                 .url(effectiveFetchUrl)
                 .header(
                     "User-Agent",
                     "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
                 )
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
                 .header("Accept-Language", "en-US,en;q=0.9,ar;q=0.8")
-                .build()
+                .header("Sec-Fetch-Dest", "document")
+                .header("Sec-Fetch-Mode", "navigate")
+                .header("Sec-Fetch-Site", "none")
+                .header("Sec-Fetch-User", "?1")
+                .header("Upgrade-Insecure-Requests", "1")
+            val req = reqBuilder.build()
 
             httpClient.newCall(req).execute().use { response ->
                 val finalUrl = response.request.url.toString()

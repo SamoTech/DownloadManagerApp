@@ -499,7 +499,7 @@ class MusicDownloadManager(
             }
         }
 
-        // 5. Social video URL (TikTok, Instagram, Twitter/X, Facebook, Reddit, Vimeo, Dailymotion)
+        // 5. Social video URL (TikTok, Instagram, Threads, Twitter/X, Facebook, Reddit, Vimeo, Dailymotion)
         if (VideoDownloadManager.isSocialVideoUrl(validUrl)) {
             val vdm = VideoDownloadManager(context, repository)
             val streamInfo = vdm.extractVideoInfo(validUrl)
@@ -528,6 +528,9 @@ class MusicDownloadManager(
                     return@withContext info
                 }
             }
+            // Do NOT fall through to partial-byte generic HTML scraping on social video pages,
+            // which can capture unrelated/static audio assets as fake MP3 files.
+            return@withContext null
         }
 
         val platform = detectMusicPlatform(validUrl) ?: "Audio Stream"

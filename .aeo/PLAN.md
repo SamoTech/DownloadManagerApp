@@ -1,13 +1,14 @@
-# Plan — R8 Deobfuscation & Release Optimization (v25.0 / Build 25)
+# Plan — Threads Extraction Engine Upgrade & v28.0 Release (Build 28)
 
-- **Goal:** Enable R8 code shrinking, obfuscation (`mapping.txt` / `proguard.map` generation), resource shrinking, and native debug symbol packaging for release builds (`versionCode 25` / `versionName "25.0"`) so Google Play Console automatically receives the deobfuscation file inside every release App Bundle (`.aab`).
+- **Goal:** Implement a 3-stage browser-emulated Threads (`threads.com` / `threads.net`) media extractor with SSR `data-sjs` JSON hydration, GraphQL relay fallback, fake/unrelated `.mp3` elimination, and update the app version to `versionCode = 28` (`v28.0`).
 
 ## Success Criteria
-- [x] `minifyEnabled true` and `shrinkResources true` enabled in `buildTypes.release` of `/app/build.gradle`.
-- [x] `ndk { debugSymbolLevel = 'FULL' }` configured in `defaultConfig` of `/app/build.gradle`.
-- [x] `/app/proguard-rules.pro` created with `-keepattributes SourceFile,LineNumberTable`, `-renamesourcefileattribute SourceFile`, and keep rules for Room, Activities/Services, ViewBinding, Kotlin Coroutines, OkHttp3/Okio, and Media3.
-- [x] Version bumped to `versionCode = 25` and `versionName = "25.0"` for the next Google Play Console release, with XML fallback labels and unit test assertions synchronized.
-- [x] Verified `:app:minifyReleaseWithR8` generates `app/build/outputs/mapping/release/mapping.txt` (30 MB) and `:app:testDebugUnitTest` + `compile_applet` succeed.
+- [x] `UrlClassifier` canonicalizes Threads URLs to `threads.com` and strictly requires `/post/<id>` or `/t/<id>` paths (rejecting bare profile URLs).
+- [x] SSR `<script type="application/json" data-sjs>` extraction isolates the requested post (`code == postId` / `pk == targetPk`), extracts ranked `video_versions`, `carousel_media`, voice `audio.audio_src` (`.m4a`), and `video_dash_manifest` XML representations using a zero-dependency pure-Kotlin JSON parser.
+- [x] GraphQL Relay fallback queries `/graphql/query` and `/api/graphql` using `X-IG-App-ID`, `X-ASBD-ID`, dynamically extracted `LSD`/`doc_id`/`csrftoken`, and custom-alphabet Base64 `shortcodeToMediaPk()` decoding.
+- [x] Fake/unrelated `.mp3` prevention blocks `extractGenericOrWebVideoInfo` & partial-range HTML fallback on Threads/social video URLs, unescapes `\/` before CDN regex scanning, and filters `static.cdninstagram.com`, `static.*.fbcdn.net`, `/rsrc.php/`, and static `.mp3` UI assets.
+- [x] Version bumped to `versionCode = 28` / `versionName = "28.0"` (`com.samotech.Lucadownloadmanager` preserved) across Gradle, layouts, preferences, and unit test assertions.
+- [x] All 31 unit tests (including `phase12_threadsEngine_ssrDataSjs_shortcodeToPk_graphQlRelay_andFakeMp3Prevention`) and `compile_applet` pass cleanly.
 
 ## Next Step
 - Done — all criteria verified.

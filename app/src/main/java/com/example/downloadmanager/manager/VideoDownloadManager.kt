@@ -25,16 +25,19 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.math.BigInteger
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.Date
@@ -73,6 +76,56 @@ class VideoDownloadManager(
 
         const val DISCORD_BOT_USER_AGENT =
             "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)"
+
+        const val THREADS_IG_APP_ID = "238260118697367"
+        const val THREADS_ASBD_ID = "129477"
+        private const val THREADS_SHORTCODE_ALPHABET =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+        internal fun extractThreadsPostId(url: String): String? {
+            val httpUrl = normalizeHttpUrl(url)?.toHttpUrlOrNull()
+            val path = httpUrl?.encodedPath ?: url.substringBefore('?').substringBefore('#')
+            return Regex("""/(?:@[\w.-]+/)?post/([A-Za-z0-9_-]+)""", RegexOption.IGNORE_CASE)
+                .find(path)?.groupValues?.getOrNull(1)
+                ?: Regex("""^/t/([A-Za-z0-9_-]+)""", RegexOption.IGNORE_CASE)
+                    .find(path)?.groupValues?.getOrNull(1)
+        }
+
+        internal fun shortcodeToMediaPk(shortcode: String): String? {
+            val clean = shortcode.trim().substringBefore('?').substringBefore('/')
+            if (clean.isEmpty()) return null
+            var result = BigInteger.ZERO
+            val base = BigInteger.valueOf(64L)
+            for (ch in clean) {
+                val idx = THREADS_SHORTCODE_ALPHABET.indexOf(ch)
+                if (idx < 0) return null
+                result = result.multiply(base).add(BigInteger.valueOf(idx.toLong()))
+            }
+            return result.toString()
+        }
+
+        internal fun buildThreadsCandidateUrls(url: String, postId: String): List<String> {
+            val parsed = normalizeHttpUrl(url)?.toHttpUrlOrNull()
+            val candidates = LinkedHashSet<String>()
+            if (parsed != null) {
+                val host = parsed.host.lowercase(Locale.US)
+                val path = parsed.encodedPath
+                if (UrlClassifier.matchesAnyDomain(host, "threads.net", "threads.com", "threads.instagram.com")) {
+                    // Prefer canonical threads.com preserving @username/post/<id> without tracking query params
+                    candidates.add("https://www.threads.com$path")
+                    candidates.add("https://www.threads.com/t/$postId")
+                    candidates.add("https://www.threads.net$path")
+                    candidates.add("https://www.threads.net/t/$postId")
+                } else {
+                    // Local test server / custom origin
+                    candidates.add(url)
+                }
+            } else {
+                candidates.add(url)
+                candidates.add("https://www.threads.com/t/$postId")
+            }
+            return candidates.toList()
+        }
 
         private val streamInfoCache = ConcurrentHashMap<String, VideoStreamInfo>()
 
@@ -320,7 +373,7 @@ class VideoDownloadManager(
                 isTikTokUrl(validUrl) -> extractTikTokVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
                 isTwitterUrl(validUrl) -> extractTwitterVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
                 isInstagramUrl(validUrl) -> extractInstagramVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
-                isThreadsUrl(validUrl) -> extractThreadsVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
+                isThreadsUrl(validUrl) -> extractThreadsVideoInfo(validUrl)
                 isFacebookUrl(validUrl) -> extractFacebookVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
                 isRedditUrl(validUrl) -> extractRedditVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
                 isVimeoUrl(validUrl) -> extractVimeoVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
@@ -898,21 +951,130 @@ class VideoDownloadManager(
     }
 
     private fun extractThreadsVideoInfo(url: String): VideoStreamInfo? {
+        return extractThreadsVideoInfoWithOrigin(url = url, graphQlBaseOriginOverride = null)
+    }
+
+    internal fun extractThreadsVideoInfoWithOrigin(
+        url: String,
+        graphQlBaseOriginOverride: String? = null
+    ): VideoStreamInfo? {
         return try {
-            val postId = Regex("""threads\.(?:net|com|instagram\.com)/(?:@[\w.-]+/)?post/([A-Za-z0-9_-]+)""", RegexOption.IGNORE_CASE)
-                .find(url)?.groupValues?.getOrNull(1)
-                ?: Regex("""threads\.(?:net|com|instagram\.com)/t/([A-Za-z0-9_-]+)""", RegexOption.IGNORE_CASE)
-                    .find(url)?.groupValues?.getOrNull(1)
-                ?: return null
+            val postId = extractThreadsPostId(url) ?: return null
+            val candidateUrls = buildThreadsCandidateUrls(url, postId)
+            var capturedLsd: String? = null
+            var capturedDocIds: List<String> = emptyList()
+            var capturedCookies: String? = null
+            var capturedCsrfToken: String? = null
+            var lastResolvedUrl = candidateUrls.firstOrNull() ?: url
 
-            val formats = mutableListOf<VideoFormat>()
-            var title = "Threads_Post_$postId"
-            var thumb: String? = null
+            // Step 1: Browser-emulated full HTML fetch -> SSR <script type="application/json" data-sjs>
+            for (tUrl in candidateUrls) {
+                try {
+                    val req = Request.Builder()
+                        .url(tUrl)
+                        .header("User-Agent", DESKTOP_USER_AGENT)
+                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+                        .header("Accept-Language", "en-US,en;q=0.9")
+                        .header("Sec-Fetch-Dest", "document")
+                        .header("Sec-Fetch-Mode", "navigate")
+                        .header("Sec-Fetch-Site", "none")
+                        .header("Sec-Fetch-User", "?1")
+                        .header("Upgrade-Insecure-Requests", "1")
+                        .build()
+                    okHttpClient.newCall(req).execute().use { resp ->
+                        lastResolvedUrl = resp.request.url.toString().ifBlank { tUrl }
+                        val setCookies = resp.headers("Set-Cookie")
+                        if (setCookies.isNotEmpty()) {
+                            val pairs = setCookies.mapNotNull { raw ->
+                                val nv = raw.substringBefore(';').trim()
+                                nv.takeIf { it.contains('=') }
+                            }
+                            if (pairs.isNotEmpty()) {
+                                capturedCookies = pairs.joinToString("; ")
+                                pairs.firstOrNull { it.startsWith("csrftoken=", ignoreCase = true) }
+                                    ?.substringAfter('=')
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?.let { capturedCsrfToken = it }
+                            }
+                        }
+                        if (!resp.isSuccessful) return@use
+                        val html = resp.body?.string().orEmpty()
+                        if (html.isBlank()) return@use
 
-            val cleanThreadsUrl = "https://www.threads.net/t/$postId"
-            val targetUrls = listOf(url, cleanThreadsUrl)
+                        if (capturedLsd == null) {
+                            capturedLsd = extractThreadsLsdToken(html)
+                        }
+                        if (capturedDocIds.isEmpty()) {
+                            capturedDocIds = extractThreadsDocIds(html)
+                        }
 
-            for (tUrl in targetUrls) {
+                        val parsedSsr = parseThreadsStreamInfoFromHtml(html, postId, lastResolvedUrl)
+                        if (parsedSsr != null && parsedSsr.formats.isNotEmpty()) {
+                            return parsedSsr
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }
+
+            // Step 2: Internal Relay GraphQL fallback (/graphql/query & /api/graphql)
+            val postPk = shortcodeToMediaPk(postId)
+            if (postPk != null) {
+                val origin = graphQlBaseOriginOverride ?: run {
+                    val u = lastResolvedUrl.toHttpUrlOrNull()
+                    if (u != null) "${u.scheme}://${u.host}${if (u.port != 80 && u.port != 443) ":${u.port}" else ""}" else "https://www.threads.com"
+                }
+                val lsdToken = capturedLsd ?: ""
+                val docIdCandidates = (capturedDocIds + listOf("25460088156920903", "7426707774011906")).distinct()
+                val endpoints = listOf("$origin/graphql/query", "$origin/api/graphql")
+                for (endpoint in endpoints) {
+                    for (docId in docIdCandidates) {
+                        try {
+                            val formBuilder = FormBody.Builder()
+                                .add("variables", """{"postID":"$postPk"}""")
+                                .add("doc_id", docId)
+                            if (lsdToken.isNotEmpty()) {
+                                formBuilder.add("lsd", lsdToken)
+                            }
+                            val reqBuilder = Request.Builder()
+                                .url(endpoint)
+                                .post(formBuilder.build())
+                                .header("User-Agent", DESKTOP_USER_AGENT)
+                                .header("Accept", "*/*")
+                                .header("Accept-Language", "en-US,en;q=0.9")
+                                .header("X-IG-App-ID", THREADS_IG_APP_ID)
+                                .header("X-ASBD-ID", THREADS_ASBD_ID)
+                                .header("X-FB-Friendly-Name", "BarcelonaPostPageQuery")
+                                .header("Origin", origin)
+                                .header("Referer", lastResolvedUrl)
+                                .header("Sec-Fetch-Site", "same-origin")
+                                .header("Sec-Fetch-Mode", "cors")
+                                .header("Sec-Fetch-Dest", "empty")
+                            if (lsdToken.isNotEmpty()) {
+                                reqBuilder.header("X-FB-LSD", lsdToken)
+                            }
+                            if (!capturedCsrfToken.isNullOrBlank()) {
+                                reqBuilder.header("X-CSRFToken", capturedCsrfToken!!)
+                            }
+                            if (!capturedCookies.isNullOrBlank()) {
+                                reqBuilder.header("Cookie", capturedCookies!!)
+                            }
+                            okHttpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                                if (!resp.isSuccessful) return@use
+                                val body = resp.body?.string().orEmpty()
+                                val parsedGql = parseThreadsStreamInfoFromJson(body, postId, url)
+                                if (parsedGql != null && parsedGql.formats.isNotEmpty()) {
+                                    return parsedGql
+                                }
+                            }
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+            }
+
+            // Step 3: Bot crawler OpenGraph + unescaped Meta CDN fallback (never partial-range HTML, never .mp3 UI assets)
+            for (tUrl in candidateUrls.take(2)) {
                 try {
                     val req = Request.Builder()
                         .url(tUrl)
@@ -923,94 +1085,535 @@ class VideoDownloadManager(
                     okHttpClient.newCall(req).execute().use { resp ->
                         if (!resp.isSuccessful) return@use
                         val html = resp.body?.string().orEmpty()
-                        extractTitleFromHtml(html).takeIf { it.isNotBlank() }?.let { title = it }
-                        extractMetaContent(html, "og:image")?.let { thumb = decodeHtmlEscapes(it) }
-
-                        val ogVideo = extractMetaContent(html, "og:video:secure_url")
-                            ?: extractMetaContent(html, "og:video")
-                            ?: extractMetaContent(html, "twitter:player:stream")
-                        if (!ogVideo.isNullOrBlank()) {
-                            val resolved = resolveRelativeUrl(tUrl, decodeHtmlEscapes(ogVideo))
-                            if (resolved != null && resolved.startsWith("http")) {
-                                formats.add(
-                                    VideoFormat(
-                                        formatId = "muxed_threads_og",
-                                        url = resolved,
-                                        quality = "HD MP4 (Video+Audio)",
-                                        container = "mp4",
-                                        isAudioOnly = false
-                                    )
-                                )
-                            }
-                        }
-
-                        val videoMatches = Regex(""""(https?://[^"]+\.mp4[^"]*)"""").findAll(html)
-                        for ((idx, m) in videoMatches.withIndex()) {
-                            val vUrl = decodeHtmlEscapes(m.groupValues[1]).replace("\\u002F", "/")
-                            if (vUrl.startsWith("http") && !formats.any { it.url == vUrl }) {
-                                formats.add(
-                                    VideoFormat(
-                                        formatId = "muxed_threads_cdn_$idx",
-                                        url = vUrl,
-                                        quality = "MP4 Stream",
-                                        container = "mp4",
-                                        isAudioOnly = false
-                                    )
-                                )
-                            }
-                        }
-                    }
-                    if (formats.isNotEmpty()) break
-                } catch (_: Exception) {
-                }
-            }
-
-            if (formats.isEmpty()) {
-                try {
-                    val req = Request.Builder()
-                        .url(url)
-                        .header("User-Agent", DESKTOP_USER_AGENT)
-                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                        .build()
-                    okHttpClient.newCall(req).execute().use { resp ->
-                        if (resp.isSuccessful) {
-                            val html = resp.body?.string().orEmpty()
-                            val videoMatches = Regex(""""(https?://[^"]+\.mp4[^"]*)"""").findAll(html)
-                            for ((idx, m) in videoMatches.withIndex()) {
-                                val vUrl = decodeHtmlEscapes(m.groupValues[1]).replace("\\u002F", "/")
-                                if (vUrl.startsWith("http") && !formats.any { it.url == vUrl }) {
-                                    formats.add(
-                                        VideoFormat(
-                                            formatId = "muxed_threads_desk_$idx",
-                                            url = vUrl,
-                                            quality = "HD MP4 Stream",
-                                            container = "mp4",
-                                            isAudioOnly = false
-                                        )
-                                    )
-                                }
-                            }
+                        val parsedBot = parseThreadsOpenGraphAndCdnFallback(html, postId, tUrl, url)
+                        if (parsedBot != null && parsedBot.formats.isNotEmpty()) {
+                            return parsedBot
                         }
                     }
                 } catch (_: Exception) {
                 }
             }
 
-            if (formats.isEmpty()) return null
-            VideoStreamInfo(
-                video = VideoInfo(
-                    id = postId,
-                    title = title,
-                    url = url,
-                    thumbnailUrl = thumb,
-                    author = "Threads"
-                ),
-                formats = formats.distinctBy { it.url }
-            )
+            null
         } catch (e: Exception) {
             Log.w(TAG, "Threads extraction error: ${e.message}")
             null
         }
+    }
+
+    private fun extractThreadsLsdToken(html: String): String? {
+        val patterns = listOf(
+            Regex("""\["LSD"\s*,\s*\[\]\s*,\s*\{"token"\s*:\s*"([^"]+)""""),
+            Regex(""""lsd"\s*:\s*\{"token"\s*:\s*"([^"]+)""""),
+            Regex("""name=["']lsd["'][^>]+value=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+        )
+        for (p in patterns) {
+            val found = p.find(html)?.groupValues?.getOrNull(1)?.trim()
+            if (!found.isNullOrEmpty()) return found
+        }
+        return null
+    }
+
+    private fun extractThreadsDocIds(html: String): List<String> {
+        val found = LinkedHashSet<String>()
+        val patterns = listOf(
+            Regex("""BarcelonaPostPage(?:RefetchableDirect)?Query[^\}]{0,200}?"id"\s*:\s*"(\d{10,22})""""),
+            Regex(""""id"\s*:\s*"(\d{10,22})"[^\}]{0,200}?BarcelonaPostPage(?:RefetchableDirect)?Query"""),
+            Regex("""doc_id["']?\s*[:=]\s*["'](\d{10,22})["']""")
+        )
+        for (p in patterns) {
+            for (m in p.findAll(html)) {
+                m.groupValues.getOrNull(1)?.let { found.add(it) }
+            }
+        }
+        return found.toList()
+    }
+
+    internal fun parseThreadsStreamInfoFromHtml(
+        html: String,
+        postId: String,
+        sourceUrl: String
+    ): VideoStreamInfo? {
+        if (html.isBlank()) return null
+
+        val scriptRegex = Regex(
+            """<script\b([^>]*)>(.*?)</script>""",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+        )
+        val sjsPayloads = mutableListOf<String>()
+        val otherJsonPayloads = mutableListOf<String>()
+        for (m in scriptRegex.findAll(html)) {
+            val attrs = m.groupValues[1]
+            val body = m.groupValues[2].trim()
+            if (body.isEmpty() || (!body.startsWith("{") && !body.startsWith("["))) continue
+            val looksRelevant = body.contains("video_versions") ||
+                body.contains("audio_src") ||
+                body.contains("video_dash_manifest") ||
+                body.contains("thread_items") ||
+                body.contains("carousel_media")
+            if (!looksRelevant) continue
+            if (attrs.contains("data-sjs", ignoreCase = true) ||
+                attrs.contains("application/json", ignoreCase = true)
+            ) {
+                sjsPayloads.add(body)
+            } else {
+                otherJsonPayloads.add(body)
+            }
+        }
+
+        for (jsonBlock in (sjsPayloads + otherJsonPayloads)) {
+            parseThreadsStreamInfoFromJson(jsonBlock, postId, sourceUrl)?.let { return it }
+        }
+
+        return parseThreadsOpenGraphAndCdnFallback(html, postId, sourceUrl, sourceUrl)
+    }
+
+    internal fun parseThreadsStreamInfoFromJson(
+        jsonStr: String,
+        postId: String,
+        sourceUrl: String
+    ): VideoStreamInfo? {
+        if (jsonStr.isBlank()) return null
+        val root = runCatching { SimpleJsonParser.parse(jsonStr) }.getOrNull() ?: return null
+        val targetPk = shortcodeToMediaPk(postId)
+
+        val exactPostNodes = mutableListOf<Map<*, *>>()
+        val threadItemPostNodes = mutableListOf<Map<*, *>>()
+
+        fun hasThreadsMediaFields(obj: Map<*, *>): Boolean {
+            return obj.containsKey("video_versions") ||
+                obj.containsKey("carousel_media") ||
+                obj.containsKey("audio") ||
+                obj.containsKey("video_dash_manifest")
+        }
+
+        fun walk(node: Any?, insideThreadItems: Boolean) {
+            when (node) {
+                is Map<*, *> -> {
+                    val code = node.jsonString("code").trim()
+                    val pk = node.jsonString("pk").trim()
+                    val id = node.jsonString("id").trim()
+                    val matchesExact = (code.isNotEmpty() && code == postId) ||
+                        (targetPk != null && (pk == targetPk || id == targetPk || id.startsWith("${targetPk}_")))
+                    if (matchesExact && hasThreadsMediaFields(node)) {
+                        exactPostNodes.add(node)
+                    } else if (insideThreadItems && node["post"] is Map<*, *>) {
+                        val postObj = node.jsonMap("post")
+                        if (postObj != null) {
+                            val pCode = postObj.jsonString("code").trim()
+                            val pPk = postObj.jsonString("pk").trim()
+                            val pId = postObj.jsonString("id").trim()
+                            val postMatchesExact = (pCode.isNotEmpty() && pCode == postId) ||
+                                (targetPk != null && (pPk == targetPk || pId == targetPk || pId.startsWith("${targetPk}_")))
+                            if (postMatchesExact) {
+                                exactPostNodes.add(postObj)
+                            } else if (pCode.isEmpty() && pPk.isEmpty()) {
+                                threadItemPostNodes.add(postObj)
+                            }
+                        }
+                    } else if (insideThreadItems && hasThreadsMediaFields(node) && code.isEmpty() && pk.isEmpty()) {
+                        threadItemPostNodes.add(node)
+                    }
+
+                    for ((key, value) in node) {
+                        walk(value, insideThreadItems || key == "thread_items")
+                    }
+                }
+                is List<*> -> {
+                    for (item in node) {
+                        walk(item, insideThreadItems)
+                    }
+                }
+            }
+        }
+
+        walk(root, insideThreadItems = false)
+        val chosenNodes = if (exactPostNodes.isNotEmpty()) exactPostNodes else threadItemPostNodes
+        if (chosenNodes.isEmpty()) return null
+
+        val formats = mutableListOf<VideoFormat>()
+        var thumb: String? = null
+        var author: String? = null
+        var title = "Threads_Post_$postId"
+
+        for (postObj in chosenNodes) {
+            postObj.jsonMap("user")?.jsonString("username")?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                if (author == null) author = it
+            }
+            postObj.jsonMap("caption")?.jsonString("text")?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                if (title == "Threads_Post_$postId") title = it
+            }
+            if (thumb == null) {
+                thumb = (postObj.jsonMap("image_versions2")
+                    ?.jsonList("candidates")
+                    ?.firstOrNull() as? Map<*, *>)
+                    ?.jsonString("url")
+                    ?.let { decodeHtmlEscapes(it) }
+                    ?.takeIf { it.startsWith("http") }
+            }
+
+            extractFormatsFromThreadsPostObj(postObj, formats)
+
+            val carousel = postObj.jsonList("carousel_media")
+            if (carousel != null) {
+                for ((i, slideAny) in carousel.withIndex()) {
+                    val slide = slideAny as? Map<*, *> ?: continue
+                    extractFormatsFromThreadsPostObj(slide, formats, prefix = "slide_${i}_")
+                    if (thumb == null) {
+                        thumb = (slide.jsonMap("image_versions2")
+                            ?.jsonList("candidates")
+                            ?.firstOrNull() as? Map<*, *>)
+                            ?.jsonString("url")
+                            ?.let { decodeHtmlEscapes(it) }
+                            ?.takeIf { it.startsWith("http") }
+                    }
+                }
+            }
+        }
+
+        val uniqueFormats = formats.distinctBy { it.url }
+        if (uniqueFormats.isEmpty()) return null
+
+        return VideoStreamInfo(
+            video = VideoInfo(
+                id = postId,
+                title = title,
+                url = sourceUrl,
+                thumbnailUrl = thumb,
+                author = author?.let { "@$it" } ?: "Threads"
+            ),
+            formats = uniqueFormats
+        )
+    }
+
+    private fun extractFormatsFromThreadsPostObj(
+        postObj: Map<*, *>,
+        outFormats: MutableList<VideoFormat>,
+        prefix: String = ""
+    ) {
+        val videoVersions = postObj.jsonList("video_versions")
+        if (videoVersions != null) {
+            val ranked = mutableListOf<Triple<Int, Int, VideoFormat>>()
+            for ((i, verAny) in videoVersions.withIndex()) {
+                val ver = verAny as? Map<*, *> ?: continue
+                val rawUrl = ver.jsonString("url").trim()
+                if (rawUrl.isEmpty()) continue
+                val cleanUrl = decodeHtmlEscapes(rawUrl)
+                if (!cleanUrl.startsWith("http") || isStaticMetaAssetUrl(cleanUrl)) continue
+                val width = ver.jsonInt("width", 0)
+                val height = ver.jsonInt("height", 0)
+                val type = ver.jsonInt("type", 0)
+                val area = width * height
+                val qualityLabel = when {
+                    height >= 1080 -> "1080p HD MP4"
+                    height >= 720 -> "720p HD MP4"
+                    height > 0 -> "${height}p MP4"
+                    else -> "HD MP4 (Video+Audio)"
+                }
+                val res = if (width > 0 && height > 0) "${width}x${height}" else null
+                ranked.add(
+                    Triple(
+                        area,
+                        if (type in setOf(101, 102, 103)) 1 else 0,
+                        VideoFormat(
+                            formatId = "muxed_threads_${prefix}v$i",
+                            url = cleanUrl,
+                            quality = qualityLabel,
+                            container = "mp4",
+                            resolution = res,
+                            isAudioOnly = false
+                        )
+                    )
+                )
+            }
+            ranked.sortedWith(compareByDescending<Triple<Int, Int, VideoFormat>> { it.first }.thenByDescending { it.second })
+                .forEach { outFormats.add(it.third) }
+        }
+
+        val audioObj = postObj.jsonMap("audio")
+        val audioSrc = audioObj?.jsonString("audio_src")?.trim().orEmpty()
+        if (audioSrc.isNotEmpty()) {
+            val cleanAudio = decodeHtmlEscapes(audioSrc)
+            if (cleanAudio.startsWith("http") && !isStaticMetaAssetUrl(cleanAudio)) {
+                outFormats.add(
+                    VideoFormat(
+                        formatId = "audio_threads_${prefix}voice",
+                        url = cleanAudio,
+                        quality = "Threads Audio (AAC/M4A)",
+                        container = "m4a",
+                        isAudioOnly = true
+                    )
+                )
+            }
+        }
+
+        val dashXml = postObj.jsonString("video_dash_manifest")
+            .ifBlank { postObj.jsonMap("extensions")?.jsonString("video_dash_manifest").orEmpty() }
+        if (dashXml.isNotBlank() && dashXml.contains("<Representation", ignoreCase = true)) {
+            val repRegex = Regex(
+                """<Representation\b([^>]*)>.*?<BaseURL>(.*?)</BaseURL>""",
+                setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+            )
+            var vidIdx = 0
+            var audIdx = 0
+            for (m in repRegex.findAll(dashXml)) {
+                val attrs = m.groupValues[1]
+                val rawBaseUrl = decodeHtmlEscapes(m.groupValues[2].trim())
+                if (!rawBaseUrl.startsWith("http")) continue
+                val isAudioRep = attrs.contains("audio/", ignoreCase = true)
+                val heightMatch = Regex("""height=["'](\d+)["']""", RegexOption.IGNORE_CASE).find(attrs)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                if (isAudioRep) {
+                    outFormats.add(
+                        VideoFormat(
+                            formatId = "audio_threads_${prefix}dash_${audIdx++}",
+                            url = rawBaseUrl,
+                            quality = "DASH Audio (M4A)",
+                            container = "m4a",
+                            isAudioOnly = true
+                        )
+                    )
+                } else {
+                    val q = if (heightMatch != null && heightMatch > 0) "${heightMatch}p DASH Video" else "DASH Video"
+                    outFormats.add(
+                        VideoFormat(
+                            formatId = "adaptive_threads_${prefix}dash_${vidIdx++}",
+                            url = rawBaseUrl,
+                            quality = q,
+                            container = "mp4",
+                            isAudioOnly = false
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    private fun Map<*, *>.jsonMap(key: String): Map<*, *>? = this[key] as? Map<*, *>
+
+    private fun Map<*, *>.jsonList(key: String): List<*>? = this[key] as? List<*>
+
+    private fun Map<*, *>.jsonString(key: String): String = when (val v = this[key]) {
+        is String -> v
+        is Number, is Boolean -> v.toString()
+        else -> ""
+    }
+
+    private fun Map<*, *>.jsonInt(key: String, default: Int = 0): Int = when (val v = this[key]) {
+        is Number -> v.toInt()
+        is String -> v.toIntOrNull() ?: default
+        else -> default
+    }
+
+    private object SimpleJsonParser {
+        fun parse(input: String): Any? {
+            var pos = 0
+            val len = input.length
+
+            fun skipWhitespace() {
+                while (pos < len && input[pos].isWhitespace()) pos++
+            }
+
+            fun parseString(): String {
+                pos++
+                val sb = StringBuilder()
+                while (pos < len) {
+                    val c = input[pos++]
+                    when (c) {
+                        '"' -> return sb.toString()
+                        '\\' -> {
+                            if (pos >= len) throw IllegalArgumentException("Unterminated escape")
+                            when (val esc = input[pos++]) {
+                                '"', '\\', '/' -> sb.append(esc)
+                                'b' -> sb.append('\b')
+                                'f' -> sb.append('\u000C')
+                                'n' -> sb.append('\n')
+                                'r' -> sb.append('\r')
+                                't' -> sb.append('\t')
+                                'u' -> {
+                                    if (pos + 4 > len) throw IllegalArgumentException("Invalid unicode escape")
+                                    val hex = input.substring(pos, pos + 4)
+                                    pos += 4
+                                    sb.append(hex.toInt(16).toChar())
+                                }
+                                else -> sb.append(esc)
+                            }
+                        }
+                        else -> sb.append(c)
+                    }
+                }
+                throw IllegalArgumentException("Unterminated string")
+            }
+
+            fun parseValue(): Any? {
+                skipWhitespace()
+                if (pos >= len) throw IllegalArgumentException("Unexpected end of JSON")
+                return when (input[pos]) {
+                    '{' -> {
+                        pos++
+                        val map = LinkedHashMap<String, Any?>()
+                        skipWhitespace()
+                        if (pos < len && input[pos] == '}') {
+                            pos++
+                            return map
+                        }
+                        while (pos < len) {
+                            skipWhitespace()
+                            if (pos >= len || input[pos] != '"') throw IllegalArgumentException("Expected key")
+                            val key = parseString()
+                            skipWhitespace()
+                            if (pos >= len || input[pos] != ':') throw IllegalArgumentException("Expected ':'")
+                            pos++
+                            map[key] = parseValue()
+                            skipWhitespace()
+                            if (pos < len && input[pos] == ',') {
+                                pos++
+                            } else if (pos < len && input[pos] == '}') {
+                                pos++
+                                return map
+                            } else {
+                                throw IllegalArgumentException("Expected ',' or '}'")
+                            }
+                        }
+                        map
+                    }
+                    '[' -> {
+                        pos++
+                        val list = ArrayList<Any?>()
+                        skipWhitespace()
+                        if (pos < len && input[pos] == ']') {
+                            pos++
+                            return list
+                        }
+                        while (pos < len) {
+                            list.add(parseValue())
+                            skipWhitespace()
+                            if (pos < len && input[pos] == ',') {
+                                pos++
+                            } else if (pos < len && input[pos] == ']') {
+                                pos++
+                                return list
+                            } else {
+                                throw IllegalArgumentException("Expected ',' or ']'")
+                            }
+                        }
+                        list
+                    }
+                    '"' -> parseString()
+                    't' -> {
+                        if (input.startsWith("true", pos)) {
+                            pos += 4
+                            true
+                        } else {
+                            throw IllegalArgumentException("Invalid literal")
+                        }
+                    }
+                    'f' -> {
+                        if (input.startsWith("false", pos)) {
+                            pos += 5
+                            false
+                        } else {
+                            throw IllegalArgumentException("Invalid literal")
+                        }
+                    }
+                    'n' -> {
+                        if (input.startsWith("null", pos)) {
+                            pos += 4
+                            null
+                        } else {
+                            throw IllegalArgumentException("Invalid literal")
+                        }
+                    }
+                    else -> {
+                        val start = pos
+                        while (pos < len && input[pos] !in charArrayOf(',', '}', ']', ' ', '\t', '\r', '\n')) {
+                            pos++
+                        }
+                        val numStr = input.substring(start, pos)
+                        numStr.toLongOrNull() ?: numStr.toDoubleOrNull()
+                            ?: throw IllegalArgumentException("Invalid number: $numStr")
+                    }
+                }
+            }
+
+            return parseValue()
+        }
+    }
+
+    private fun parseThreadsOpenGraphAndCdnFallback(
+        html: String,
+        postId: String,
+        baseUrl: String,
+        sourceUrl: String
+    ): VideoStreamInfo? {
+        if (html.isBlank()) return null
+        val formats = mutableListOf<VideoFormat>()
+        var title = "Threads_Post_$postId"
+        var thumb: String? = null
+
+        extractTitleFromHtml(html).takeIf { it.isNotBlank() }?.let { title = it }
+        extractMetaContent(html, "og:image")?.let { thumb = decodeHtmlEscapes(it) }
+
+        val ogVideo = extractMetaContent(html, "og:video:secure_url")
+            ?: extractMetaContent(html, "og:video")
+            ?: extractMetaContent(html, "twitter:player:stream")
+        if (!ogVideo.isNullOrBlank()) {
+            val resolved = resolveRelativeUrl(baseUrl, decodeHtmlEscapes(ogVideo))
+            if (resolved != null && resolved.startsWith("http") && !isStaticMetaAssetUrl(resolved)) {
+                formats.add(
+                    VideoFormat(
+                        formatId = "muxed_threads_og",
+                        url = resolved,
+                        quality = "HD MP4 (Video+Audio)",
+                        container = "mp4",
+                        isAudioOnly = false
+                    )
+                )
+            }
+        }
+
+        // Unescape JSON slashes (https:\/\/ -> https://) BEFORE scanning for .mp4 CDN URLs
+        val unescaped = decodeHtmlEscapes(html)
+        val mp4Matches = Regex("""["'](https?://[^"'\s<>\\]+\.mp4(?:\?[^"'\s<>\\]*)?)["']""", RegexOption.IGNORE_CASE)
+            .findAll(unescaped)
+        for ((idx, m) in mp4Matches.withIndex()) {
+            val candidate = decodeHtmlEscapes(m.groupValues[1])
+            if (candidate.startsWith("http") &&
+                !isStaticMetaAssetUrl(candidate) &&
+                !formats.any { it.url == candidate }
+            ) {
+                formats.add(
+                    VideoFormat(
+                        formatId = "muxed_threads_cdn_$idx",
+                        url = candidate,
+                        quality = "MP4 Stream",
+                        container = "mp4",
+                        isAudioOnly = false
+                    )
+                )
+            }
+        }
+
+        if (formats.isEmpty()) return null
+        return VideoStreamInfo(
+            video = VideoInfo(
+                id = postId,
+                title = title,
+                url = sourceUrl,
+                thumbnailUrl = thumb,
+                author = "Threads"
+            ),
+            formats = formats.distinctBy { it.url }
+        )
+    }
+
+    private fun isStaticMetaAssetUrl(url: String): Boolean {
+        val parsed = url.toHttpUrlOrNull() ?: return false
+        val host = parsed.host.lowercase(Locale.US)
+        val path = parsed.encodedPath.lowercase(Locale.US)
+        return host == "static.cdninstagram.com" ||
+            (host.startsWith("static.") && host.endsWith(".fbcdn.net")) ||
+            path.contains("/rsrc.php/") ||
+            path.endsWith(".mp3")
     }
 
     private fun extractFacebookVideoInfo(url: String): VideoStreamInfo? {
@@ -1987,6 +2590,7 @@ class VideoDownloadManager(
                 (targetFilename.startsWith("YouTube_") ||
                     targetFilename.startsWith("TikTok_") ||
                     targetFilename.startsWith("Instagram_") ||
+                    targetFilename.startsWith("Threads_") ||
                     targetFilename.startsWith("Facebook_") ||
                     targetFilename.startsWith("X_") ||
                     targetFilename.startsWith("Reddit_") ||
@@ -2499,6 +3103,7 @@ class VideoDownloadManager(
             host.contains("tiktok") || host.contains("tikwm") || host.contains("musical.ly") || host.contains("byteoversea") -> "https://www.tiktok.com/"
             host.contains("vimeo") -> "https://vimeo.com/"
             host.contains("dailymotion") || host.contains("dmcdn") -> "https://www.dailymotion.com/"
+            host.contains("threads.com") || host.contains("threads.net") -> "https://www.threads.com/"
             host.contains("instagram") || host.contains("cdninstagram") || host.contains("fbcdn.net") -> "https://www.instagram.com/"
             host.contains("twimg.com") || host.contains("twitter.com") || host.contains("x.com") -> "https://x.com/"
             host.contains("redd.it") || host.contains("reddit.com") -> "https://www.reddit.com/"

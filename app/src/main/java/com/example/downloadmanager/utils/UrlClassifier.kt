@@ -329,16 +329,18 @@ object UrlClassifier {
 
         // 7b. Threads (Meta)
         if (matchesAnyDomain(host, "threads.net", "threads.com", "threads.instagram.com")) {
-            val hasPost = pathLower.contains("/post/") || pathLower.contains("/t/") || nonEmptySegments.size >= 2
+            val postIdx = nonEmptySegments.indexOfFirst { it.equals("post", ignoreCase = true) }
+            val hasPost = (postIdx >= 0 && postIdx + 1 < nonEmptySegments.size) ||
+                (nonEmptySegments.size >= 2 && nonEmptySegments[0].equals("t", ignoreCase = true))
             return UrlClassification(
                 category = PlatformCategory.INSTAGRAM,
                 downloadType = DownloadType.VIDEO,
                 providerName = "Threads",
-                canonicalHost = "threads.net",
+                canonicalHost = "threads.com",
                 isSupported = hasPost,
-                requiresThirdPartyIntermediary = true,
-                intermediaryHostDescription = "Threads public media resolver",
-                unsupportedReason = if (hasPost) null else "Threads URL must point to a post (/post/...)"
+                requiresThirdPartyIntermediary = false,
+                intermediaryHostDescription = "Direct Threads SSR / GraphQL resolver",
+                unsupportedReason = if (hasPost) null else "Threads URL must point to a specific post (/post/<id> or /t/<id>)"
             )
         }
 

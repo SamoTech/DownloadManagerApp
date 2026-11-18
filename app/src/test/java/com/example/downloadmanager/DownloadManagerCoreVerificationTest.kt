@@ -1495,8 +1495,8 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun phase7_activeTorrentSelectedFile_compactAndDictTrackers_andDistinctStatuses() = runBlocking {
-        // 0. Verify Luca Version 27.0 (Build 27)
-        assertTrue(BuildConfig.VERSION_CODE >= 27)
+        // 0. Verify Luca Version 28.0 (Build 28)
+        assertTrue(BuildConfig.VERSION_CODE >= 28)
         assertEquals("${BuildConfig.VERSION_CODE}.0", BuildConfig.VERSION_NAME)
 
         val tempRoot = createTempDirectory("phase7_torrent_trace").toFile()
@@ -2752,7 +2752,7 @@ class DownloadManagerCoreVerificationTest {
             assertTrue(MediaAssetHelper.hasVideoTrack(tailMoovMp4))
             assertEquals("H.264 • AAC 44.1kHz Stereo", MediaAssetHelper.inspectMediaCodecSummary(tailMoovMp4, isVideo = true))
 
-            assertTrue(BuildConfig.VERSION_CODE >= 27)
+            assertTrue(BuildConfig.VERSION_CODE >= 28)
             assertEquals("${BuildConfig.VERSION_CODE}.0", BuildConfig.VERSION_NAME)
         } finally {
             try { peerServer.close() } catch (_: Exception) {}
@@ -3804,7 +3804,7 @@ class DownloadManagerCoreVerificationTest {
 
     @Test
     fun v21_youtubeChunkedResume_midStream403Refresh_progressivePreference_andHlsSegmentRetry() = runBlocking {
-        assertTrue(BuildConfig.VERSION_CODE >= 27)
+        assertTrue(BuildConfig.VERSION_CODE >= 28)
         assertEquals("${BuildConfig.VERSION_CODE}.0", BuildConfig.VERSION_NAME)
 
         // 1. Path-based client detection (/c/IOS/) for manifest.googlevideo.com HLS URLs
@@ -4406,6 +4406,197 @@ class DownloadManagerCoreVerificationTest {
         val proguardText = proguardFile!!.readText()
         assertTrue("proguard-rules.pro must preserve SourceFile,LineNumberTable for Play Console stack trace deobfuscation", proguardText.contains("SourceFile,LineNumberTable"))
         assertTrue("proguard-rules.pro must set -renamesourcefileattribute SourceFile", proguardText.contains("-renamesourcefileattribute SourceFile"))
+    }
+
+    @Test
+    fun phase12_threadsEngine_ssrDataSjs_shortcodeToPk_graphQlRelay_andFakeMp3Prevention() = runBlocking {
+        // 1. Canonical URL classification for threads.com / threads.net & rejection of bare profiles
+        val postClass = com.example.downloadmanager.utils.UrlClassifier.classify(
+            "https://www.threads.net/@creator_one/post/C8x1234abcd?xmt=AQF999"
+        )
+        assertTrue(postClass.isSupported)
+        assertEquals("Threads", postClass.providerName)
+        assertEquals("threads.com", postClass.canonicalHost)
+
+        val profileClass = com.example.downloadmanager.utils.UrlClassifier.classify(
+            "https://www.threads.com/@creator_one"
+        )
+        assertFalse("Bare Threads profile URL must not be treated as a downloadable post", profileClass.isSupported)
+
+        // 2. Shortcode -> Numeric media pk decoding & canonical candidate builder
+        assertEquals("C8x1234abcd", VideoDownloadManager.extractThreadsPostId("https://www.threads.com/@creator_one/post/C8x1234abcd?xmt=1"))
+        assertEquals("C8x1234abcd", VideoDownloadManager.extractThreadsPostId("https://www.threads.net/t/C8x1234abcd"))
+        val pk = VideoDownloadManager.shortcodeToMediaPk("B")
+        assertEquals("1", pk)
+        val candidates = VideoDownloadManager.buildThreadsCandidateUrls(
+            "https://www.threads.net/@creator_one/post/C8x1234abcd?xmt=AQF",
+            "C8x1234abcd"
+        )
+        assertEquals("https://www.threads.com/@creator_one/post/C8x1234abcd", candidates.first())
+
+        val repo = DownloadRepository(InMemoryDownloadDao())
+        val vdm = VideoDownloadManager(null, repo)
+
+        // 3. SSR <script type="application/json" data-sjs> parsing:
+        // Must isolate requested post (code == C8x1234abcd), ignore unrelated feed posts & static UI .mp3s, and rank 1080p above 480p.
+        val ssrHtml = """
+            <html><head><title>Threads</title></head><body>
+            <script src="https://static.cdninstagram.com/rsrc.php/v3/sound_notification.mp3"></script>
+            <script type="application/json" data-sjs>
+            {
+              "require": [["ScheduledServerJS", "handle", null, [{
+                "thread_items": [
+                  {
+                    "post": {
+                      "code": "OTHER_REPLY_999",
+                      "pk": "9999999",
+                      "caption": {"text": "Unrelated reply video"},
+                      "video_versions": [
+                        {"type": 101, "width": 720, "height": 1280, "url": "https:\/\/cdn.example.invalid\/wrong_reply.mp4"}
+                      ]
+                    }
+                  },
+                  {
+                    "post": {
+                      "code": "C8x1234abcd",
+                      "pk": "123456789",
+                      "user": {"username": "creator_one"},
+                      "caption": {"text": "Sunset timelapse on Threads"},
+                      "image_versions2": {"candidates": [{"url": "https:\/\/scontent.cdninstagram.com\/thumb.jpg?oh=1\u0026oe=2"}]},
+                      "video_versions": [
+                        {"type": 102, "width": 480, "height": 854, "url": "https:\/\/video-iad3-1.cdninstagram.com\/v\/low_480.mp4?oh=a\u0026oe=b"},
+                        {"type": 101, "width": 1080, "height": 1920, "url": "https:\/\/video-iad3-1.cdninstagram.com\/v\/hd_1080.mp4?oh=c\u0026oe=d"}
+                      ]
+                    }
+                  }
+                ]
+              }]]]
+            }
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val ssrParsed = vdm.parseThreadsStreamInfoFromHtml(
+            ssrHtml,
+            "C8x1234abcd",
+            "https://www.threads.com/@creator_one/post/C8x1234abcd"
+        )
+        assertNotNull(ssrParsed)
+        assertEquals("Sunset timelapse on Threads", ssrParsed!!.video.title)
+        assertEquals("@creator_one", ssrParsed.video.author)
+        assertEquals(2, ssrParsed.formats.size)
+        assertEquals(
+            "https://video-iad3-1.cdninstagram.com/v/hd_1080.mp4?oh=c&oe=d",
+            ssrParsed.formats.first().url
+        )
+        assertTrue(ssrParsed.formats.none { it.url.contains("wrong_reply.mp4") })
+
+        // 4. Static CDN .mp3 UI sound assets must be rejected by BrowserActivity resource classifier and Threads HTML parser
+        assertNull(
+            com.example.downloadmanager.activity.BrowserActivity.classifyDiscoveredResourceUrl(
+                "https://static.cdninstagram.com/rsrc.php/v3/sound_notification.mp3",
+                "Threads"
+            )
+        )
+        assertNull(
+            vdm.parseThreadsStreamInfoFromHtml(
+                """<html><head><meta property="og:video" content="https://static.cdninstagram.com/rsrc.php/v3/ui_sound.mp3"/></head></html>""",
+                "FAKE123",
+                "https://www.threads.com/@user/post/FAKE123"
+            )
+        )
+
+        // 4b. Voice thread (audio.audio_src) & carousel_media extraction
+        val voiceCarouselHtml = """
+            <html><body><script type="application/json" data-sjs>
+            {
+              "thread_items": [{
+                "post": {
+                  "code": "VOICE77",
+                  "pk": "777",
+                  "user": {"username": "voice_creator"},
+                  "caption": {"text": "Voice & Carousel Thread"},
+                  "audio": {"audio_src": "https:\/\/scontent.cdninstagram.com\/v\/voice_note.m4a?oe=9"},
+                  "carousel_media": [
+                    {"video_versions": [{"type": 101, "width": 720, "height": 1280, "url": "https:\/\/video.cdninstagram.com\/slide1.mp4"}]}
+                  ]
+                }
+              }]
+            }
+            </script></body></html>
+        """.trimIndent()
+        val voiceParsed = vdm.parseThreadsStreamInfoFromHtml(
+            voiceCarouselHtml,
+            "VOICE77",
+            "https://www.threads.com/@voice_creator/post/VOICE77"
+        )
+        assertNotNull(voiceParsed)
+        assertTrue(voiceParsed!!.formats.any { it.isAudioOnly && it.container == "m4a" && it.url == "https://scontent.cdninstagram.com/v/voice_note.m4a?oe=9" })
+        assertTrue(voiceParsed.formats.any { !it.isAudioOnly && it.url == "https://video.cdninstagram.com/slide1.mp4" })
+
+        // 5. End-to-end HTTP test via HttpServer: initial HTML shell without video -> GraphQL /graphql/query fallback with X-IG-App-ID & X-FB-LSD
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        var capturedGraphQlHeaders: com.sun.net.httpserver.Headers? = null
+        var capturedGraphQlBody = ""
+        try {
+            server.createContext("/@creator_one/post/BC") { ex ->
+                val shell = """
+                    <html><head><title>Threads Shell</title></head><body>
+                    <script>["LSD",[],{"token":"TEST_LSD_TOKEN_42"}]</script>
+                    <script>{"name":"BarcelonaPostPageQuery","id":"99887766554433"}</script>
+                    </body></html>
+                """.trimIndent().toByteArray(StandardCharsets.UTF_8)
+                ex.responseHeaders.add("Content-Type", "text/html; charset=utf-8")
+                ex.responseHeaders.add("Set-Cookie", "csrftoken=CSRF_ABC; Path=/")
+                ex.sendResponseHeaders(200, shell.size.toLong())
+                ex.responseBody.use { it.write(shell) }
+            }
+            server.createContext("/graphql/query") { ex ->
+                capturedGraphQlHeaders = ex.requestHeaders
+                capturedGraphQlBody = ex.requestBody.bufferedReader(StandardCharsets.UTF_8).readText()
+                val gqlJson = """
+                    {
+                      "data": {
+                        "data": {
+                          "containing_thread": {
+                            "thread_items": [{
+                              "post": {
+                                "code": "BC",
+                                "pk": "66",
+                                "user": {"username": "gql_user"},
+                                "caption": {"text": "GraphQL Resolved Clip"},
+                                "video_versions": [
+                                  {"type": 101, "width": 720, "height": 1280, "url": "https:\/\/video.cdninstagram.com\/gql_720.mp4?oe=123"}
+                                ]
+                              }
+                            }]
+                          }
+                        }
+                      }
+                    }
+                """.trimIndent().toByteArray(StandardCharsets.UTF_8)
+                ex.responseHeaders.add("Content-Type", "application/json")
+                ex.sendResponseHeaders(200, gqlJson.size.toLong())
+                ex.responseBody.use { it.write(gqlJson) }
+            }
+            server.start()
+            val port = server.address.port
+            val baseOrigin = "http://127.0.0.1:$port"
+            val gqlParsed = vdm.extractThreadsVideoInfoWithOrigin(
+                url = "$baseOrigin/@creator_one/post/BC",
+                graphQlBaseOriginOverride = baseOrigin
+            )
+            assertNotNull("GraphQL fallback should resolve Threads video from HTML LSD + doc_id", gqlParsed)
+            assertEquals("GraphQL Resolved Clip", gqlParsed!!.video.title)
+            assertEquals("https://video.cdninstagram.com/gql_720.mp4?oe=123", gqlParsed.formats.first().url)
+            assertEquals(VideoDownloadManager.THREADS_IG_APP_ID, capturedGraphQlHeaders?.getFirst("X-IG-App-ID"))
+            assertEquals("TEST_LSD_TOKEN_42", capturedGraphQlHeaders?.getFirst("X-FB-LSD"))
+            assertEquals("CSRF_ABC", capturedGraphQlHeaders?.getFirst("X-CSRFToken"))
+            assertTrue(capturedGraphQlBody.contains("doc_id=99887766554433"))
+            assertTrue(capturedGraphQlBody.contains("%22postID%22%3A%2266%22") || capturedGraphQlBody.contains("\"postID\":\"66\""))
+        } finally {
+            server.stop(0)
+        }
     }
 }
 
