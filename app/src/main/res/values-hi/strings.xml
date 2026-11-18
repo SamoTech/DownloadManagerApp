@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Luca Download Manager</string>
+    <string name="add_download">डाउनलोड जोड़ें</string>
+    <string name="download_details">डाउनलोड विवरण</string>
+    <string name="downloads">डाउनलोड</string>
+    <string name="completed">पूर्ण</string>
+    <string name="active">सक्रिय</string>
+    <string name="paused">रोक ई</string>
+    <string name="failed">असफल</string>
+    <string name="queued">कतार में</string>
+    <string name="all_files">सभी फ़ाइलें</string>
+    <string name="music">संगीत</string>
+    <string name="torrents">टॉरेंट</string>
+    <string name="videos">वीडियो</string>
+    <string name="settings">सेटिंग्स</string>
+    <string name="about">के बारे में</string>
+    <string name="exit">बाहर निकलें</string>
+    
+    <string name="url_hint">यूआरएल, संगीत/वीडियो लिंक या मैग्नेट यूआरआई दर्ज करें</string>
+    <string name="filename_hint">फ़ाइल नाम / ट्रैक शीर्षक (वैकल्पिक)</string>
+    <string name="artist_hint">कलाकार / चैनल का नाम (वैकल्पिक)</string>
+    <string name="save_to">यहाँ सहेजें</string>
+    <string name="default_download_path">डाउनलोड</string>
+    <string name="start_download">डाउनलोड शुरू करें</string>
+    <string name="starting_download">डाउनलोड शुरू हो रहा है...</string>
+    <string name="download_started">डाउनलोड शुरू हुआ</string>
+    <string name="browse">ब्रा라우ज करें</string>
+    <string name="paste_url">पेースト करें</string>
+    <string name="select_file">स्थान चुनें</string>
+    <string name="select_all_files">सभी फ़ाइलें चुनें</string>
+    <string name="search_hint">डाउनलोड खोजें या यूआरएल पेस्ट करें</string>
+    <string name="sort">क्रमबद्ध करें</string>
+    <string name="sort_by">इसके द्वारा क्रमबद्ध करें</string>
+    <string name="pause_all">सभी रोकें</string>
+    <string name="resume_all">सभी पुनः आरंभ करें</string>
+    <string name="clear_completed">पूर्ण किए गए हटाएं</string>
+    <string name="more_options">अधिक विकल्प</string>
+    <string name="copy_link">लिंक कॉपी करें</string>
+    <string name="link_copied">लिंक क्लिपबोर्ड पर कॉपी किया गया</string>
+    <string name="file_information">फ़ाइल जानकारी</string>
+    <string name="app_settings">ऐप सेटिंग्स</string>
+    <string name="pause">रोकें</string>
+    <string name="resume">पुनः आरंभ करें</string>
+    <string name="cancel">रद्द करें</string>
+    <string name="retry">पुनः प्रयास करें</string>
+    <string name="delete">हटाएं</string>
+    <string name="open">खولें</string>
+    <string name="share">शेयर करें</string>
+    
+    <string name="downloading">डाउनलोड हो रहा है...</string>
+    <string name="downloading_files">पृष्ठभूमि में फ़ाइलें डाउनलोड हो रही हैं...</string>
+    <string name="completed_notification">डाउनलोड पूर्ण: %s</string>
+    <string name="failed_notification">डाउनलोड असफल: %s</string>
+    <string name="notification_channel_name">डाउनलोड सूचनाएं</string>
+    <string name="notification_channel_description">डाउनलोड स्थिति के लिए सूचनाएं</string>
+    
+    <string name="storage_permission_rationale">डाउनलोड की गई फ़ाइलों को सहेजने के लिए ऐप को स्टोरेज अनुमति की आवश्यकता है</string>
+    <string name="notification_permission_rationale">डाउनलोड प्रगति दिखाने के लिए ऐप को सूचना अनुमति की आवश्यकता है</string>
+    <string name="grant_permission">अनुमति दें</string>
+    <string name="permission_denied">अनुमति अस्वीकार कर दी गई। कुछ सुविधाएँ काम नहीं कर सकती हैं।</string>
+    
+    <string name="no_downloads">अभी तक कोई डाउनलोड नहीं। + पर टैप करें या फ़ाइलें, संगीत, वीडियो या टॉरेंट डाउनलोड करने के लिए यूआरएल पेस्ट करें।</string>
+    <string name="no_active_downloads">कोई सक्रिय डाउनलोड नहीं</string>
+    <string name="no_completed_downloads">कोई पूर्ण डाउनलोड नहीं</string>
+    
+    <string name="download_speed">%s/सेकंड</string>
+    <string name="eta">शेष समय: %s</string>
+    <string name="of">का</string>
+    <string name="unknown_size">अज्ञात आकार</string>
+    <string name="unknown_speed">--</string>
+    <string name="unknown_eta">--:--</string>
+    
+    <string name="app_description">Luca Download Manager मल्टी-सेगमेंट HTTP/HTTPS डाउनलोड, सार्वजनिक ऑडियो स्ट्रीमिंग (SoundCloud, YouTube, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org), सोशल मीडिया वीडियो और BitTorrent/मैग्नेट ट्रांसफर का समर्थन करता है।</string>
+    <string name="version">संस्करण %s</string>
+    <string name="developer">डेलपर</string>
+    <string name="privacy_policy">गोपनीयता नीति</string>
+    <string name="open_source_licenses">ओपन सोर्स लाइसेंस</string>
+    
+    <string name="download_settings">डाउनलोड सेटिंग्स</string>
+    <string name="max_concurrent_downloads">अधिकतम समवर्ती डाउनलोड</string>
+    <string name="download_speed_limit">गति सीमा (KB/s, 0 = असीमित)</string>
+    <string name="none">कोई नहीं</string>
+    <string name="unlimited">असीमित</string>
+    <string name="save_location">सहेजने का स्थान</string>
+    <string name="use_mobile_data">मोबाइल डेटा का उपयोग करें</string>
+    <string name="wifi_only">केवल वाई-फाई</string>
+    <string name="auto_resume">असफल डाउनलोड स्वतः पुनः आरंभ करें</string>
+    <string name="enable_notifications">सूचनाएं सक्षम करें</string>
+    <string name="dark_mode">डार्क मोड</string>
+    <string name="language">भाषा</string>
+    
+    <string name="torrent_settings">टॉरेंट सेटिंग्स</string>
+    <string name="max_upload_speed">अधिकतम अपलोड गति (KB/s)</string>
+    <string name="max_connections">अधिकतम कनेक्शन</string>
+    <string name="enable_seeding">सीडिंग सक्षम करें</string>
+    <string name="seed_ratio">सीड अनुपात</string>
+    <string name="seed_until">तक सीड करें</string>
+    <string name="seed_forever">हमेशा के लिए</string>
+    <string name="seed_for_minutes">%d मिनट के लिए</string>
+    
+    <string name="video_settings">वीडियो सेटिंग्स</string>
+    <string name="video_quality">वीडियो गुणवत्ता</string>
+    <string name="best">सर्वोत्तम (1080p / 4K)</string>
+    <string name="high">उच्च (720p HD)</string>
+    <string name="medium">मध्यम (480p)</string>
+    <string name="low">निम्न (360p डेटा सेवर)</string>
+    <string name="audio_only">केवल ऑडियो</string>
+    <string name="extract_audio">ऑडियो ट्रैक निकालें</string>
+    <string name="allow_third_party_resolvers">तृतीय-पक्ष वीडियो सॉल्वर की अनुमति दें</string>
+    <string name="allow_third_party_resolvers_summary">प्रत्यक्ष पृष्ठ निष्कर्षण प्रतिबंधित होने पर सार्वजनिक सॉल्वर सेवाएँ क्वेरी करें</string>
+    <string name="allow_third_party_torrent_resolvers">तृतीय-पक्ष टॉरेंट कैश की अनुमति दें</string>
+    <string name="allow_third_party_torrent_resolvers_summary">मैग्नेट लिंक हल करते समय बाहरी टॉरेंट मेटाडेटा सेवाओं से पूछताछ करें</string>
+
+    <string name="music_settings">संगीत और ऑडियो सेटिंग्स</string>
+    <string name="music_download">संगीत डाउनलोड</string>
+    <string name="music_format">ऑडियो प्रारूप और बिटrate</string>
+    <string name="music_mp3_320">MP3 320 kbps (प्रत्यक्ष / लक्ष्य)</string>
+    <string name="music_mp3_192">MP3 192 kbps (उच्च गुणवत्ता)</string>
+    <string name="music_flac">FLAC लॉसलेस</string>
+    <string name="music_m4a_256">M4A / AAC 256 kbps</string>
+    <string name="music_ogg_192">OGG Vorbis 192 kbps</string>
+    <string name="embed_metadata">ID3 टैग और कवर आर्ट एम्बेड करें</string>
+    <string name="allow_alternate_music_source">वैकल्पिक स्रोत खोज की अनुमति दें (YouTube)</string>
+    <string name="allow_alternate_music_source_summary">जब स्रोत लिंक केवल पूर्वावलोकन प्रदान करता है तो YouTube पर मिलान खोजें</string>
+    <string name="supported_music_sites">समर्थित: SoundCloud, YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org, पॉडकास्ट और डायरेक्ट ऑडियो</string>
+    
+    <string name="confirm_delete">क्या आप वाकई इस डाउनलोड को हटाना चाहते हैं?</string>
+    <string name="confirm_delete_file">डाउनलोड की गई फ़ाइल भी हटाएं?</string>
+    <string name="download_url_confirmation">क्या आप %s से डाउनलोड करना चाहते हैं?</string>
+    <string name="yes">हाँ</string>
+    <string name="no">नहीं</string>
+    <string name="ok">ٹھیک ਹੈ</string>
+    
+    <string name="error_invalid_url">अमान्य यूआरएल। एक मान्य http/https या मैग्नेट लिंक दर्ज करें।</string>
+    <string name="error_invalid_download">अमान्य डाउनलोड आइटम</string>
+    <string name="error_file_not_found">डाउनलोड की गई फ़ाइल नहीं मिली</string>
+    <string name="error_open_file">इस फ़ाइल प्रकार को खोला नहीं जा सकता</string>
+    <string name="error_share_file">इस फ़ाइल को साझा नहीं किया जा सकता</string>
+    <string name="error_connection">कनेक्शन त्रुटि</string>
+    <string name="error_storage">स्टोरेज त्रुटि</string>
+    <string name="error_unknown">अज्ञात त्रुटि</string>
+    <string name="error_insufficient_space">अपर्याप्त स्टोरेज स्थान</string>
+    <string name="error_file_exists">फ़ाइल पहले से मौजूद है</string>
+    
+    <string name="torrent">टॉरेंट</string>
+    <string name="torrent_download">टॉरेंट डाउनलोड</string>
+    <string name="magnet_link">मैग्नेट लिंक</string>
+    <string name="direct_download">प्रत्यक्ष डाउनलोड</string>
+    <string name="video_download">वीडियो डाउनलोड</string>
+    <string name="extract_metadata">मेटाडेटा निकाला जा रहा है...</string>
+    <string name="getting_torrent_info">टॉरेंट जानकारी प्राप्त की जा रही है...</string>
+    <string name="connecting_to_peers">पीर्स से कनेक्ट किया जा रहा है...</string>
+    <string name="download_metadata">मेटाडेटा डाउनलोड किया जा रहा है...</string>
+    
+    <string name="peers">पीर्स: %d</string>
+    <string name="seeds">सीड्स: %d</string>
+    <string name="peers_unavailable">पीर्स: अनुपलब्ध</string>
+    <string name="seeds_unavailable">सीड्स: अनुपलब्ध</string>
+    <string name="upload_speed">अपलोड: %s/सेकंड</string>
+    <string name="uploaded_total">अपलोड किया गया: %s</string>
+    <string name="seed">सीड</string>
+    <string name="stop_seeding">सीडिंग रोकें</string>
+    <string name="seeding_status">सीडिंग हो ਰਹੀ ਹੈ</string>
+    <string name="download_progress">%d%%</string>
+    <string name="status">स्थिति: %s</string>
+    <string name="file_size">आकार: %s</string>
+    <string name="save_path">पथ: %s</string>
+    <string name="added_on">जोड़ा गया: %s</string>
+    <string name="completed_on">पूर्ण हुआ: %s</string>
+    <string name="completed_status">पूर्ण</string>
+    <string name="cancelled">रद्द किया गया</string>
+    <string name="clipboard_empty_or_invalid">क्लिपबोर्ड में कोई मान्य यूआरएल नहीं है।</string>
+    <string name="search_downloads">डाउनलोड खोजें या यूआरएल पेस्ट करें...</string>
+    <string name="sort_date_newest">दिनांक (नवीनतम पहले)</string>
+    <string name="sort_date_oldest">दिनांक (सबसे पुराना पहले)</string>
+    <string name="sort_name_az">फ़ाइल नाम (A - Z)</string>
+    <string name="sort_size_largest">फ़ाइल आकार (सबसे बड़ा पहले)</string>
+    <string name="sort_progress">प्रगति (उच्चतम पहले)</string>
+    <string name="all_downloads_paused">सभी सक्रिय डाउनलोड रोक दिए गए</string>
+    <string name="all_downloads_resumed">सभी रुके हुए डाउनलोड पुनः आरंभ किए गए</string>
+    <string name="completed_cleared">पूर्ण किए गए डाउनलोड हटाए गए</string>
+    <string name="smart_browser">स्मार्ट ब्राउज़र</string>
+    <string name="browser_sniff_links">डाउनलोड करने योग्य लिंक ब्राउज़ करें और पहचानें</string>
+    <string name="browser_url_hint">DuckDuckGo खोजें या यूआरएल दर्ज करें...</string>
+    <string name="detected_links">पह पहचाने गए डाउनलोड योग्य लिंक</string>
+    <string name="download_all">सभी डाउनलोड करें</string>
+    <string name="media_player">मीडिया प्लेयर</string>
+</resources>

@@ -909,29 +909,29 @@ class VideoDownloadManager(
             var title = "Threads_Post_$postId"
             var thumb: String? = null
 
-            val previewUrls = buildList {
-                if (isThirdPartyResolverEnabled()) {
-                    add("https://www.ddinstagram.com/p/$postId/")
-                }
-                add(url)
-            }
-            for (pUrl in previewUrls) {
+            val cleanThreadsUrl = "https://www.threads.net/t/$postId"
+            val targetUrls = listOf(url, cleanThreadsUrl)
+
+            for (tUrl in targetUrls) {
                 try {
                     val req = Request.Builder()
-                        .url(pUrl)
+                        .url(tUrl)
                         .header("User-Agent", DISCORD_BOT_USER_AGENT)
+                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                        .header("Accept-Language", "en-US,en;q=0.9")
                         .build()
                     okHttpClient.newCall(req).execute().use { resp ->
                         if (!resp.isSuccessful) return@use
                         val html = resp.body?.string().orEmpty()
                         extractTitleFromHtml(html).takeIf { it.isNotBlank() }?.let { title = it }
                         extractMetaContent(html, "og:image")?.let { thumb = decodeHtmlEscapes(it) }
+
                         val ogVideo = extractMetaContent(html, "og:video:secure_url")
                             ?: extractMetaContent(html, "og:video")
                             ?: extractMetaContent(html, "twitter:player:stream")
                         if (!ogVideo.isNullOrBlank()) {
-                            val resolved = resolveRelativeUrl(pUrl, decodeHtmlEscapes(ogVideo))
-                            if (resolved != null) {
+                            val resolved = resolveRelativeUrl(tUrl, decodeHtmlEscapes(ogVideo))
+                            if (resolved != null && resolved.startsWith("http")) {
                                 formats.add(
                                     VideoFormat(
                                         formatId = "muxed_threads_og",
@@ -943,8 +943,55 @@ class VideoDownloadManager(
                                 )
                             }
                         }
+
+                        val videoMatches = Regex(""""(https?://[^"]+\.mp4[^"]*)"""").findAll(html)
+                        for ((idx, m) in videoMatches.withIndex()) {
+                            val vUrl = decodeHtmlEscapes(m.groupValues[1]).replace("\\u002F", "/")
+                            if (vUrl.startsWith("http") && !formats.any { it.url == vUrl }) {
+                                formats.add(
+                                    VideoFormat(
+                                        formatId = "muxed_threads_cdn_$idx",
+                                        url = vUrl,
+                                        quality = "MP4 Stream",
+                                        container = "mp4",
+                                        isAudioOnly = false
+                                    )
+                                )
+                            }
+                        }
                     }
                     if (formats.isNotEmpty()) break
+                } catch (_: Exception) {
+                }
+            }
+
+            if (formats.isEmpty()) {
+                try {
+                    val req = Request.Builder()
+                        .url(url)
+                        .header("User-Agent", DESKTOP_USER_AGENT)
+                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                        .build()
+                    okHttpClient.newCall(req).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            val html = resp.body?.string().orEmpty()
+                            val videoMatches = Regex(""""(https?://[^"]+\.mp4[^"]*)"""").findAll(html)
+                            for ((idx, m) in videoMatches.withIndex()) {
+                                val vUrl = decodeHtmlEscapes(m.groupValues[1]).replace("\\u002F", "/")
+                                if (vUrl.startsWith("http") && !formats.any { it.url == vUrl }) {
+                                    formats.add(
+                                        VideoFormat(
+                                            formatId = "muxed_threads_desk_$idx",
+                                            url = vUrl,
+                                            quality = "HD MP4 Stream",
+                                            container = "mp4",
+                                            isAudioOnly = false
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
                 } catch (_: Exception) {
                 }
             }

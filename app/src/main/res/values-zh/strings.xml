@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Luca Download Manager</string>
+    <string name="add_download">添加下载</string>
+    <string name="download_details">下载详情</string>
+    <string name="downloads">下载</string>
+    <string name="completed">已完成</string>
+    <string name="active">进行中</string>
+    <string name="paused">已暂停</string>
+    <string name="failed">已失败</string>
+    <string name="queued">排队中</string>
+    <string name="all_files">所有文件</string>
+    <string name="music">音乐</string>
+    <string name="torrents">种子</string>
+    <string name="videos">视频</string>
+    <string name="settings">设置</string>
+    <string name="about">关于</string>
+    <string name="exit">退出</string>
+    
+    <string name="url_hint">输入网址、音乐/视频链接或磁力链接</string>
+    <string name="filename_hint">文件名 / 曲目标题（可选）</string>
+    <string name="artist_hint">艺术家 / 频道名称（可选）</string>
+    <string name="save_to">保存到</string>
+    <string name="default_download_path">下载</string>
+    <string name="start_download">开始下载</string>
+    <string name="starting_download">正在开始下载...</string>
+    <string name="download_started">下载已开始</string>
+    <string name="browse">浏览</string>
+    <string name="paste_url">粘贴</string>
+    <string name="select_file">选择位置</string>
+    <string name="select_all_files">全选文件</string>
+    <string name="search_hint">搜索下载或粘贴网址</string>
+    <string name="sort">排序</string>
+    <string name="sort_by">下载排序方式</string>
+    <string name="pause_all">全部暂停</string>
+    <string name="resume_all">全部恢复</string>
+    <string name="clear_completed">清除已完成</string>
+    <string name="more_options">更多选项</string>
+    <string name="copy_link">复制链接</string>
+    <string name="link_copied">链接已复制到剪贴板</string>
+    <string name="file_information">文件信息</string>
+    <string name="app_settings">应用设置</string>
+    <string name="pause">暂停</string>
+    <string name="resume">恢复</string>
+    <string name="cancel">取消</string>
+    <string name="retry">重试</string>
+    <string name="delete">删除</string>
+    <string name="open">打开</string>
+    <string name="share">分享</string>
+    
+    <string name="downloading">正在下载...</string>
+    <string name="downloading_files">正在后台下载文件...</string>
+    <string name="completed_notification">下载已完成: %s</string>
+    <string name="failed_notification">下载失败: %s</string>
+    <string name="notification_channel_name">下载通知</string>
+    <string name="notification_channel_description">下载状态通知</string>
+    
+    <string name="storage_permission_rationale">本应用需要存储权限以保存下载的文件</string>
+    <string name="notification_permission_rationale">本应用需要通知权限以显示下载进度</string>
+    <string name="grant_permission">授予权限</string>
+    <string name="permission_denied">权限被拒绝。某些功能可能无法正常运行。</string>
+    
+    <string name="no_downloads">暂无下载。点击 + 或粘贴网址以开始下载文件、音乐、视频或种子。</string>
+    <string name="no_active_downloads">没有进行中的下载</string>
+    <string name="no_completed_downloads">没有已完成的下载</string>
+    
+    <string name="download_speed">%s/秒</string>
+    <string name="eta">剩余时间: %s</string>
+    <string name="of">/</string>
+    <string name="unknown_size">未知大小</string>
+    <string name="unknown_speed">--</string>
+    <string name="unknown_eta">--:--</string>
+    
+    <string name="app_description">Luca Download Manager 支持多线程 HTTP/HTTPS 下载、公共音频流媒体（SoundCloud、YouTube、Bandcamp、Audiomack、Mixcloud、Spotify、Jamendo、Archive.org）、社交媒体视频以及 BitTorrent/磁力链接传输。</string>
+    <string name="version">版本 %s</string>
+    <string name="developer">开发者</string>
+    <string name="privacy_policy">隐私政策</string>
+    <string name="open_source_licenses">开源许可</string>
+    
+    <string name="download_settings">下载设置</string>
+    <string name="max_concurrent_downloads">最大同时下载数</string>
+    <string name="download_speed_limit">速度限制 (KB/s, 0 = 不限速)</string>
+    <string name="none">无</string>
+    <string name="unlimited">不限速</string>
+    <string name="save_location">保存路径</string>
+    <string name="use_mobile_data">使用移动数据</string>
+    <string name="wifi_only">仅限 Wi-Fi</string>
+    <string name="auto_resume">自动恢复失败的下载</string>
+    <string name="enable_notifications">启用通知</string>
+    <string name="dark_mode">深色模式</string>
+    <string name="language">语言</string>
+    
+    <string name="torrent_settings">种子设置</string>
+    <string name="max_upload_speed">最大上传速度 (KB/s)</string>
+    <string name="max_connections">最大连接数</string>
+    <string name="enable_seeding">启用做种</string>
+    <string name="seed_ratio">分享率</string>
+    <string name="seed_until">做种直到</string>
+    <string name="seed_forever">永久</string>
+    <string name="seed_for_minutes">%d分钟后</string>
+    
+    <string name="video_settings">视频设置</string>
+    <string name="video_quality">视频画质</string>
+    <string name="best">最佳 (1080p / 4K)</string>
+    <string name="high">高清 (720p HD)</string>
+    <string name="medium">标清 (480p)</string>
+    <string name="low">省流 (360p)</string>
+    <string name="audio_only">仅音频</string>
+    <string name="extract_audio">提取音轨</string>
+    <string name="allow_third_party_resolvers">允许第三方视频解析器</string>
+    <string name="allow_third_party_resolvers_summary">当直接页面提取受限时查询公共解析服务</string>
+    <string name="allow_third_party_torrent_resolvers">允许第三方种子缓存</string>
+    <string name="allow_third_party_torrent_resolvers_summary">解析磁力链接时查询外部种子元数据服务</string>
+
+    <string name="music_settings">音乐与音频设置</string>
+    <string name="music_download">音乐下载</string>
+    <string name="music_format">音频格式与比特率</string>
+    <string name="music_mp3_320">MP3 320 kbps (直接 / 目标)</string>
+    <string name="music_mp3_192">MP3 192 kbps (高品质)</string>
+    <string name="music_flac">FLAC 无损音频</string>
+    <string name="music_m4a_256">M4A / AAC 256 kbps</string>
+    <string name="music_ogg_192">OGG Vorbis 192 kbps</string>
+    <string name="embed_metadata">内嵌 ID3 标签与封面</string>
+    <string name="allow_alternate_music_source">允许备用来源搜索 (YouTube)</string>
+    <string name="allow_alternate_music_source_summary">当源链接仅提供30秒预览时，在YouTube上搜索匹配项</string>
+    <string name="supported_music_sites">支持: SoundCloud, YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org, 播客及直接音频</string>
+    
+    <string name="confirm_delete">您确定要删除此下载吗？</string>
+    <string name="confirm_delete_file">同时删除已下载的文件吗？</string>
+    <string name="download_url_confirmation">是否从 %s 下载？</string>
+    <string name="yes">是</string>
+    <string name="no">否</string>
+    <string name="ok">确定</string>
+    
+    <string name="error_invalid_url">网址无效。请输入有效的 http/https 或磁力链接。</string>
+    <string name="error_invalid_download">无效的下载项目</string>
+    <string name="error_file_not_found">未找到已下载的文件</string>
+    <string name="error_open_file">无法打开此类型的文件</string>
+    <string name="error_share_file">无法分享此文件</string>
+    <string name="error_connection">连接错误</string>
+    <string name="error_storage">存储错误</string>
+    <string name="error_unknown">未知错误</string>
+    <string name="error_insufficient_space">存储空间不足</string>
+    <string name="error_file_exists">文件已存在</string>
+    
+    <string name="torrent">种子</string>
+    <string name="torrent_download">种子下载</string>
+    <string name="magnet_link">磁力链接</string>
+    <string name="direct_download">直接下载</string>
+    <string name="video_download">视频下载</string>
+    <string name="extract_metadata">正在提取元数据...</string>
+    <string name="getting_torrent_info">正在获取种子信息...</string>
+    <string name="connecting_to_peers">正在连接对等节点...</string>
+    <string name="downloading_metadata">正在下载元数据...</string>
+    
+    <string name="peers">对等节点: %d</string>
+    <string name="seeds">做种数: %d</string>
+    <string name="peers_unavailable">对等节点: 不可用</string>
+    <string name="seeds_unavailable">做种数: 不可用</string>
+    <string name="upload_speed">上传: %s/秒</string>
+    <string name="uploaded_total">已上传: %s</string>
+    <string name="seed">做种</string>
+    <string name="stop_seeding">停止做种</string>
+    <string name="seeding_status">正在做种</string>
+    <string name="download_progress">%d%%</string>
+    <string name="status">状态: %s</string>
+    <string name="file_size">大小: %s</string>
+    <string name="save_path">路径: %s</string>
+    <string name="added_on">添加时间: %s</string>
+    <string name="completed_on">完成时间: %s</string>
+    <string name="completed_status">已完成</string>
+    <string name="cancelled">已取消</string>
+    <string name="clipboard_empty_or_invalid">剪贴板中没有有效的网址。</string>
+    <string name="search_downloads">搜索下载或粘贴网址...</string>
+    <string name="sort_date_newest">添加日期 (由新到旧)</string>
+    <string name="sort_date_oldest">添加日期 (由旧到新)</string>
+    <string name="sort_name_az">文件名 (A - Z)</string>
+    <string name="sort_size_largest">文件大小 (由大到小)</string>
+    <string name="sort_progress">进度 (由高到低)</string>
+    <string name="all_downloads_paused">所有进行中的下载已暂停</string>
+    <string name="all_downloads_resumed">所有暂停的下载已恢复</string>
+    <string name="completed_cleared">已清除完成的下载</string>
+    <string name="smart_browser">智能浏览器</string>
+    <string name="browser_sniff_links">浏览并检测可下载链接</string>
+    <string name="browser_url_hint">在 DuckDuckGo 中搜索或输入网址...</string>
+    <string name="detected_links">已检测到的可下载链接</string>
+    <string name="download_all">全部下载</string>
+    <string name="media_player">媒体播放器</string>
+</resources>

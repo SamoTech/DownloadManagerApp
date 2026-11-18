@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Luca Download Manager</string>
+    <string name="add_download">Download hinzufügen</string>
+    <string name="download_details">Download-Details</string>
+    <string name="downloads">Downloads</string>
+    <string name="completed">Abgeschlossen</string>
+    <string name="active">Aktiv</string>
+    <string name="paused">Pausiert</string>
+    <string name="failed">Fehlgeschlagen</string>
+    <string name="queued">In Warteschlange</string>
+    <string name="all_files">Alle Dateien</string>
+    <string name="music">Musik</string>
+    <string name="torrents">Torrents</string>
+    <string name="videos">Videos</string>
+    <string name="settings">Einstellungen</string>
+    <string name="about">Über</string>
+    <string name="exit">Beenden</string>
+    
+    <string name="url_hint">URL, Musik-/Video-Link oder Magnet-URI eingeben</string>
+    <string name="filename_hint">Dateiname / Titel (optional)</string>
+    <string name="artist_hint">Interpret / Kanalname (optional)</string>
+    <string name="save_to">Speichern unter</string>
+    <string name="default_download_path">Downloads</string>
+    <string name="start_download">Download starten</string>
+    <string name="starting_download">Download wird gestartet...</string>
+    <string name="download_started">Download gestartet</string>
+    <string name="browse">Durchsuchen</string>
+    <string name="paste_url">Einfügen</string>
+    <string name="select_file">Speicherort wählen</string>
+    <string name="select_all_files">Alle Dateien auswählen</string>
+    <string name="search_hint">Downloads durchsuchen oder URL einfügen</string>
+    <string name="sort">Sortieren</string>
+    <string name="sort_by">Sortieren nach</string>
+    <string name="pause_all">Alle pausieren</string>
+    <string name="resume_all">Alle fortsetzen</string>
+    <string name="clear_completed">Fertige löschen</string>
+    <string name="more_options">Mehr Optionen</string>
+    <string name="copy_link">Link kopieren</string>
+    <string name="link_copied">Link in Zwischenablage kopiert</string>
+    <string name="file_information">Dateiinformationen</string>
+    <string name="app_settings">App-Einstellungen</string>
+    <string name="pause">Pausieren</string>
+    <string name="resume">Fortsetzen</string>
+    <string name="cancel">Abbrechen</string>
+    <string name="retry">Wiederholen</string>
+    <string name="delete">Löschen</string>
+    <string name="open">Öffnen</string>
+    <string name="share">Teilen</string>
+    
+    <string name="downloading">Wird heruntergeladen...</string>
+    <string name="downloading_files">Dateien werden im Hintergrund geladen...</string>
+    <string name="completed_notification">Download abgeschlossen: %s</string>
+    <string name="failed_notification">Download fehlgeschlagen: %s</string>
+    <string name="notification_channel_name">Download-Benachrichtigungen</string>
+    <string name="notification_channel_description">Benachrichtigungen zum Download-Status</string>
+    
+    <string name="storage_permission_rationale">Die App benötigt Speicherberechtigung, um heruntergeladene Dateien zu speichern</string>
+    <string name="notification_permission_rationale">Die App benötigt Benachrichtigungsberechtigung, um den Fortschritt anzuzeigen</string>
+    <string name="grant_permission">Berechtigung erteilen</string>
+    <string name="permission_denied">Berechtigung verweigert. Einige Funktionen funktionieren möglicherweise nicht.</string>
+    
+    <string name="no_downloads">Noch keine Downloads. Tippen Sie auf + oder fügen Sie eine URL ein.</string>
+    <string name="no_active_downloads">Keine aktiven Downloads</string>
+    <string name="no_completed_downloads">Keine abgeschlossenen Downloads</string>
+    
+    <string name="download_speed">%s/s</string>
+    <string name="eta">Verbleibend: %s</string>
+    <string name="of">von</string>
+    <string name="unknown_size">Unbekannte Größe</string>
+    <string name="unknown_speed">--</string>
+    <string name="unknown_eta">--:--</string>
+    
+    <string name="app_description">Luca Download Manager unterstützt Multi-Segment-HTTP/HTTPS-Downloads, öffentliches Audio-Streaming (SoundCloud, YouTube, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org), Social-Media-Videos und BitTorrent/Magnet-Transfers.</string>
+    <string name="version">Version %s</string>
+    <string name="developer">Entwickler</string>
+    <string name="privacy_policy">Datenschutzrichtlinie</string>
+    <string name="open_source_licenses">Open-Source-Lizenzen</string>
+    
+    <string name="download_settings">Download-Einstellungen</string>
+    <string name="max_concurrent_downloads">Max. gleichzeitige Downloads</string>
+    <string name="download_speed_limit">Geschwindigkeitslimit (KB/s, 0 = Unbegrenzt)</string>
+    <string name="none">Keine</string>
+    <string name="unlimited">Unbegrenzt</string>
+    <string name="save_location">Speicherort</string>
+    <string name="use_mobile_data">Mobile Daten verwenden</string>
+    <string name="wifi_only">Nur WLAN</string>
+    <string name="auto_resume">Fehlgeschlagene automatisch fortsetzen</string>
+    <string name="enable_notifications">Benachrichtigungen aktivieren</string>
+    <string name="dark_mode">Dunkelmodus</string>
+    <string name="language">Sprache</string>
+    
+    <string name="torrent_settings">Torrent-Einstellungen</string>
+    <string name="max_upload_speed">Max. Upload-Geschwindigkeit (KB/s)</string>
+    <string name="max_connections">Max. Verbindungen</string>
+    <string name="enable_seeding">Seeding aktivieren</string>
+    <string name="seed_ratio">Seed-Ratio</string>
+    <string name="seed_until">Seeden bis</string>
+    <string name="seed_forever">Für immer</string>
+    <string name="seed_for_minutes">Für %d Minuten</string>
+    
+    <string name="video_settings">Video-Einstellungen</string>
+    <string name="video_quality">Videoqualität</string>
+    <string name="best">Beste (1080p / 4K)</string>
+    <string name="high">Hoch (720p HD)</string>
+    <string name="medium">Mittel (480p)</string>
+    <string name="low">Niedrig (360p Datensparmodus)</string>
+    <string name="audio_only">Nur Audio</string>
+    <string name="extract_audio">Audiospur extrahieren</string>
+    <string name="allow_third_party_resolvers">Video-Resolver von Drittanbietern erlauben</string>
+    <string name="allow_third_party_resolvers_summary">Öffentliche Resolver-Dienste abfragen, wenn der direkte Extrakt eingeschränkt ist</string>
+    <string name="allow_third_party_torrent_resolvers">Torrent-Metadaten-Caches von Drittanbietern erlauben</string>
+    <string name="allow_third_party_torrent_resolvers_summary">Externe Torrent-Dienste beim Auflösen von Magnet-Links abfragen</string>
+
+    <string name="music_settings">Musik- und Audio-Einstellungen</string>
+    <string name="music_download">Musik-Download</string>
+    <string name="music_format">Audioformat &amp; Bitrate</string>
+    <string name="music_mp3_320">MP3 320 kbps (Direkt / Ziel)</string>
+    <string name="music_mp3_192">MP3 192 kbps (Hohe Qualität)</string>
+    <string name="music_flac">FLAC Lossless</string>
+    <string name="music_m4a_256">M4A / AAC 256 kbps</string>
+    <string name="music_ogg_192">OGG Vorbis 192 kbps</string>
+    <string name="embed_metadata">ID3-Tags &amp; Cover einbetten</string>
+    <string name="allow_alternate_music_source">Nach alternativer Quelle suchen (YouTube)</string>
+    <string name="allow_alternate_music_source_summary">Auf YouTube nach Übereinstimmungen suchen, wenn die Quelle nur eine Vorschau liefert</string>
+    <string name="supported_music_sites">Unterstützt: SoundCloud, YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org, Podcasts &amp; Direkt-Audio</string>
+    
+    <string name="confirm_delete">Möchten Sie diesen Download wirklich löschen?</string>
+    <string name="confirm_delete_file">Heruntergeladene Datei ebenfalls löschen?</string>
+    <string name="download_url_confirmation">Möchten Sie von %s herunterladen?</string>
+    <string name="yes">Ja</string>
+    <string name="no">Nein</string>
+    <string name="ok">OK</string>
+    
+    <string name="error_invalid_url">Ungültige URL. Geben Sie einen gültigen http/https- oder Magnet-Link ein.</string>
+    <string name="error_invalid_download">Ungültiges Download-Element</string>
+    <string name="error_file_not_found">Heruntergeladene Datei nicht gefunden</string>
+    <string name="error_open_file">Dateityp kann nicht geöffnet werden</string>
+    <string name="error_share_file">Datei kann nicht geteilt werden</string>
+    <string name="error_connection">Verbindungsfehler</string>
+    <string name="error_storage">Speicherfehler</string>
+    <string name="error_unknown">Unbekannter Fehler</string>
+    <string name="error_insufficient_space">Unzureichender Speicherplatz</string>
+    <string name="error_file_exists">Datei existiert bereits</string>
+    
+    <string name="torrent">Torrent</string>
+    <string name="torrent_download">Torrent-Download</string>
+    <string name="magnet_link">Magnet-Link</string>
+    <string name="direct_download">Direkter Download</string>
+    <string name="video_download">Video-Download</string>
+    <string name="extract_metadata">Metadaten werden extrahiert...</string>
+    <string name="getting_torrent_info">Torrent-Informationen werden abgerufen...</string>
+    <string name="connecting_to_peers">Verbindung zu Peers wird hergestellt...</string>
+    <string name="downloading_metadata">Metadaten werden heruntergeladen...</string>
+    
+    <string name="peers">Peers: %d</string>
+    <string name="seeds">Seeds: %d</string>
+    <string name="peers_unavailable">Peers: Nicht verfügbar</string>
+    <string name="seeds_unavailable">Seeds: Nicht verfügbar</string>
+    <string name="upload_speed">Upload: %s/s</string>
+    <string name="uploaded_total">Hochgeladen: %s</string>
+    <string name="seed">Seeden</string>
+    <string name="stop_seeding">Seeding stoppen</string>
+    <string name="seeding_status">Seeding läuft</string>
+    <string name="download_progress">%d%%</string>
+    <string name="status">Status: %s</string>
+    <string name="file_size">Größe: %s</string>
+    <string name="save_path">Pfad: %s</string>
+    <string name="added_on">Hinzugefügt: %s</string>
+    <string name="completed_on">Abgeschlossen: %s</string>
+    <string name="completed_status">Abgeschlossen</string>
+    <string name="cancelled">Abgebrochen</string>
+    <string name="clipboard_empty_or_invalid">Keine gültige URL in der Zwischenablage.</string>
+    <string name="search_downloads">Downloads durchsuchen oder URL einfügen...</string>
+    <string name="sort_date_newest">Datum (Neueste zuerst)</string>
+    <string name="sort_date_oldest">Datum (Älteste zuerst)</string>
+    <string name="sort_name_az">Dateiname (A - Z)</string>
+    <string name="sort_size_largest">Dateigröße (Größte zuerst)</string>
+    <string name="sort_progress">Fortschritt (Höchste zuerst)</string>
+    <string name="all_downloads_paused">Alle aktiven Downloads pausiert</string>
+    <string name="all_downloads_resumed">Alle pausierten Downloads fortgesetzt</string>
+    <string name="completed_cleared">Abgeschlossene Downloads gelöscht</string>
+    <string name="smart_browser">Intelligenter Browser</string>
+    <string name="browser_sniff_links">Durchsuchen &amp; herunterladbare Links erkennen</string>
+    <string name="browser_url_hint">DuckDuckGo durchsuchen oder URL eingeben...</string>
+    <string name="detected_links">Erkannte herunterladbare Links</string>
+    <string name="download_all">Alle herunterladen</string>
+    <string name="media_player">Mediaplayer</string>
+</resources>

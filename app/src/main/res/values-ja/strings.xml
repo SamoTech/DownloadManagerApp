@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Luca Download Manager</string>
+    <string name="add_download">ダウンロードを追加</string>
+    <string name="download_details">ダウンロード詳細</string>
+    <string name="downloads">ダウンロード</string>
+    <string name="completed">完了</string>
+    <string name="active">アクティブ</string>
+    <string name="paused">一時停止</string>
+    <string name="failed">失敗</string>
+    <string name="queued">待機中</string>
+    <string name="all_files">すべてのファイル</string>
+    <string name="music">音楽</string>
+    <string name="torrents">トルント</string>
+    <string name="videos">動画</string>
+    <string name="settings">設定</string>
+    <string name="about">情報</string>
+    <string name="exit">終了</string>
+    
+    <string name="url_hint">URL、音楽/動画リンク、またはマグネットURIを入力</string>
+    <string name="filename_hint">ファイル名 / トラックタイトル（任意）</string>
+    <string name="artist_hint">アーティスト / チャンネル名（任意）</string>
+    <string name="save_to">保存先</string>
+    <string name="default_download_path">ダウンロード</string>
+    <string name="start_download">ダウンロード開始</string>
+    <string name="starting_download">ダウンロードを開始しています...</string>
+    <string name="download_started">ダウンロードを開始しました</string>
+    <string name="browse">参照</string>
+    <string name="paste_url">貼り付け</string>
+    <string name="select_file">保存場所を選択</string>
+    <string name="select_all_files">すべてのファイルを選択</string>
+    <string name="search_hint">ダウンロードを検索またはURLを貼り付け</string>
+    <string name="sort">並べ替え</string>
+    <string name="sort_by">並べ替え基準</string>
+    <string name="pause_all">すべて一時停止</string>
+    <string name="resume_all">すべて再開</string>
+    <string name="clear_completed">完了をクリア</string>
+    <string name="more_options">その他のオプション</string>
+    <string name="copy_link">リンクをコピー</string>
+    <string name="link_copied">リンクをクリップボードにコピーしました</string>
+    <string name="file_information">ファイル情報</string>
+    <string name="app_settings">アプリ設定</string>
+    <string name="pause">一時停止</string>
+    <string name="resume">再開</string>
+    <string name="cancel">キャンセル</string>
+    <string name="retry">リトライ</string>
+    <string name="delete">削除</string>
+    <string name="open">開く</string>
+    <string name="share">共有</string>
+    
+    <string name="downloading">ダウンロード中...</string>
+    <string name="downloading_files">バックグラウンドでダウンロード中...</string>
+    <string name="completed_notification">ダウンロード完了: %s</string>
+    <string name="failed_notification">ダウンロード失敗: %s</string>
+    <string name="notification_channel_name">ダウンロード通知</string>
+    <string name="notification_channel_description">ダウンロード状態の通知</string>
+    
+    <string name="storage_permission_rationale">ダウンロードしたファイルを保存するためにストレージ権限が必要です</string>
+    <string name="notification_permission_rationale">進捗を表示するために通知権限が必要です</string>
+    <string name="grant_permission">権限を許可</string>
+    <string name="permission_denied">権限が拒否されました。一部の機能が動作しない場合があります。</string>
+    
+    <string name="no_downloads">ダウンロードはまだありません。+をタップするかURLを貼り付けてください。</string>
+    <string name="no_active_downloads">アクティブなダウンロードはありません</string>
+    <string name="no_completed_downloads">完了したダウンロードはありません</string>
+    
+    <string name="download_speed">%s/秒</string>
+    <string name="eta">残り時間: %s</string>
+    <string name="of">/</string>
+    <string name="unknown_size">不明なサイズ</string>
+    <string name="unknown_speed">--</string>
+    <string name="unknown_eta">--:--</string>
+    
+    <string name="app_description">Luca Download Managerは、マルチセグメントHTTP/HTTPSダウンロード、パブリックオーディオストリーミング（SoundCloud、YouTube、Bandcamp、Audiomack、Mixcloud、Spotify、Jamendo、Archive.org）、ソーシャルメディア動画、BitTorrent/マグネット転送をサポートしています。</string>
+    <string name="version">バージョン %s</string>
+    <string name="developer">開発者</string>
+    <string name="privacy_policy">プライバシーポリシー</string>
+    <string name="open_source_licenses">オープンソースライセンス</string>
+    
+    <string name="download_settings">ダウンロード設定</string>
+    <string name="max_concurrent_downloads">最大同時ダウンロード数</string>
+    <string name="download_speed_limit">速度制限 (KB/s, 0 = 無制限)</string>
+    <string name="none">なし</string>
+    <string name="unlimited">無制限</string>
+    <string name="save_location">保存場所</string>
+    <string name="use_mobile_data">モバイルデータを使用</string>
+    <string name="wifi_only">Wi-Fiのみ</string>
+    <string name="auto_resume">失敗したダウンロードを自動再開</string>
+    <string name="enable_notifications">通知を有効化</string>
+    <string name="dark_mode">ダークモード</string>
+    <string name="language">言語</string>
+    
+    <string name="torrent_settings">トルント設定</string>
+    <string name="max_upload_speed">最大アップロード速度 (KB/s)</string>
+    <string name="max_connections">最大接続数</string>
+    <string name="enable_seeding">シードを有効化</string>
+    <string name="seed_ratio">共有比率 (RATIO)</string>
+    <string name="seed_until">シード終了条件</string>
+    <string name="seed_forever">無期限</string>
+    <string name="seed_for_minutes">%d分間</string>
+    
+    <string name="video_settings">動画設定</string>
+    <string name="video_quality">動画品質</string>
+    <string name="best">最高 (1080p / 4K)</string>
+    <string name="high">高 (720p HD)</string>
+    <string name="medium">中 (480p)</string>
+    <string name="low">低 (360p データ節約)</string>
+    <string name="audio_only">音声のみ</string>
+    <string name="extract_audio">音声トラックを抽出</string>
+    <string name="allow_third_party_resolvers">サードパーティ動画リゾルバを許可</string>
+    <string name="allow_third_party_resolvers_summary">直接抽出が制限されている場合に公開リゾルバサービスを照会</string>
+    <string name="allow_third_party_torrent_resolvers">サードパーティ・トルントキャッシュを許可</string>
+    <string name="allow_third_party_torrent_resolvers_summary">マグネットリンク解決時に外部メタデータサービスを照会</string>
+
+    <string name="music_settings">音楽・音声設定</string>
+    <string name="music_download">音楽ダウンロード</string>
+    <string name="music_format">音声フォーマット &amp; ビットレート</string>
+    <string name="music_mp3_320">MP3 320 kbps (ダイレクト / ターゲット)</string>
+    <string name="music_mp3_192">MP3 192 kbps (高品質)</string>
+    <string name="music_flac">FLAC ロスレス</string>
+    <string name="music_m4a_256">M4A / AAC 256 kbps</string>
+    <string name="music_ogg_192">OGG Vorbis 192 kbps</string>
+    <string name="embed_metadata">ID3タグ &amp; カバーアートを埋め込む</string>
+    <string name="allow_alternate_music_source">代替ソース検索を許可 (YouTube)</string>
+    <string name="allow_alternate_music_source_summary">元リンクがプレビューのみの場合にYouTubeで一致曲を検索</string>
+    <string name="supported_music_sites">対応: SoundCloud, YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org, ポッドキャスト &amp; ダイレクト音声</string>
+    
+    <string name="confirm_delete">このダウンロードを削除してもよろしいですか？</string>
+    <string name="confirm_delete_file">ダウンロードしたファイルも削除しますか？</string>
+    <string name="download_url_confirmation">%s からダウンロードしますか？</string>
+    <string name="yes">はい</string>
+    <string name="no">いいえ</string>
+    <string name="ok">OK</string>
+    
+    <string name="error_invalid_url">無効なURLです。有効な http/https またはマグネットリンクを入力してください。</string>
+    <string name="error_invalid_download">無効なダウンロードアイテム</string>
+    <string name="error_file_not_found">ダウンロードファイルが見つかりません</string>
+    <string name="error_open_file">このファイル形式は開けません</string>
+    <string name="error_share_file">このファイルを共有できません</string>
+    <string name="error_connection">接続エラー</string>
+    <string name="error_storage">ストレージエラー</string>
+    <string name="error_unknown">不明なエラー</string>
+    <string name="error_insufficient_space">ストレージの空き容量が不足しています</string>
+    <string name="error_file_exists">ファイルは既に存在します</string>
+    
+    <string name="torrent">トルント</string>
+    <string name="torrent_download">トルントダウンロード</string>
+    <string name="magnet_link">マグネットリンク</string>
+    <string name="direct_download">直接ダウンロード</string>
+    <string name="video_download">動画ダウンロード</string>
+    <string name="extract_metadata">メタデータを抽出中...</string>
+    <string name="getting_torrent_info">トルント情報を取得中...</string>
+    <string name="connecting_to_peers">ピアに接続中...</string>
+    <string name="downloading_metadata">メタデータをダウンロード中...</string>
+    
+    <string name="peers">ピア: %d</string>
+    <string name="seeds">シード: %d</string>
+    <string name="peers_unavailable">ピア: 不明</string>
+    <string name="seeds_unavailable">シード: 不明</string>
+    <string name="upload_speed">アップロード: %s/秒</string>
+    <string name="uploaded_total">アップロード総量: %s</string>
+    <string name="seed">シード</string>
+    <string name="stop_seeding">シード停止</string>
+    <string name="seeding_status">シード中</string>
+    <string name="download_progress">%d%%</string>
+    <string name="status">ステータス: %s</string>
+    <string name="file_size">サイズ: %s</string>
+    <string name="save_path">パス: %s</string>
+    <string name="added_on">追加日時: %s</string>
+    <string name="completed_on">完了日時: %s</string>
+    <string name="completed_status">完了</string>
+    <string name="cancelled">キャンセル済み</string>
+    <string name="clipboard_empty_or_invalid">クリップボードに有効なURLがありません。</string>
+    <string name="search_downloads">ダウンロードを検索またはURLを貼り付け...</string>
+    <string name="sort_date_newest">追加日時 (新しい順)</string>
+    <string name="sort_date_oldest">追加日時 (古い順)</string>
+    <string name="sort_name_az">ファイル名 (A - Z)</string>
+    <string name="sort_size_largest">ファイルサイズ (大きい順)</string>
+    <string name="sort_progress">進捗 (高い順)</string>
+    <string name="all_downloads_paused">すべてのアクティブなダウンロードを一時停止しました</string>
+    <string name="all_downloads_resumed">すべての一時停止中ダウンロードを再開しました</string>
+    <string name="completed_cleared">完了したダウンロードをクリアしました</string>
+    <string name="smart_browser">スマートブラウザ</string>
+    <string name="browser_sniff_links">ダウンロード可能リンクを閲覧・検出</string>
+    <string name="browser_url_hint">DuckDuckGoで検索またはURLを入力...</string>
+    <string name="detected_links">検出しダウンロード可能なリンク</string>
+    <string name="download_all">すべてダウンロード</string>
+    <string name="media_player">メディアプレーヤー</string>
+</resources>

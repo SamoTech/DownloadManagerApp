@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Luca Download Manager</string>
+    <string name="add_download">다운로드 추가</string>
+    <string name="download_details">다운로드 상세</string>
+    <string name="downloads">다운로드</string>
+    <string name="completed">완료됨</string>
+    <string name="active">진행 중</string>
+    <string name="paused">일시정지됨</string>
+    <string name="failed">실패함</string>
+    <string name="queued">대기 중</string>
+    <string name="all_files">모든 파일</string>
+    <string name="music">음악</string>
+    <string name="torrents">토렌트</string>
+    <string name="videos">동영상</string>
+    <string name="settings">설정</string>
+    <string name="about">정보</string>
+    <string name="exit">종료</string>
+    
+    <string name="url_hint">URL, 음악/동영상 링크 또는 마그넷 입력</string>
+    <string name="filename_hint">파일명 / 트랙 제목 (선택 사항)</string>
+    <string name="artist_hint">아티스트 / 채널명 (선택 사항)</string>
+    <string name="save_to">저장 위치</string>
+    <string name="default_download_path">다운로드</string>
+    <string name="start_download">다운로드 시작</string>
+    <string name="starting_download">다운로드 시작 중...</string>
+    <string name="download_started">다운로드가 시작되었습니다</string>
+    <string name="browse">찾아보기</string>
+    <string name="paste_url">붙여넣기</string>
+    <string name="select_file">위치 선택</string>
+    <string name="select_all_files">모든 파일 선택</string>
+    <string name="search_hint">다운로드 검색 또는 URL 붙여넣기</string>
+    <string name="sort">정렬</string>
+    <string name="sort_by">정렬 기준</string>
+    <string name="pause_all">모두 일시정지</string>
+    <string name="resume_all">모두 재개</string>
+    <string name="clear_completed">완료된 항목 지우기</string>
+    <string name="more_options">추가 옵션</string>
+    <string name="copy_link">링크 복사</string>
+    <string name="link_copied">클립보드에 링크가 복사되었습니다</string>
+    <string name="file_information">파일 정보</string>
+    <string name="app_settings">앱 설정</string>
+    <string name="pause">일시정지</string>
+    <string name="resume">재개</string>
+    <string name="cancel">취소</string>
+    <string name="retry">재시도</string>
+    <string name="delete">삭제</string>
+    <string name="open">열기</string>
+    <string name="share">공유</string>
+    
+    <string name="downloading">다운로드 중...</string>
+    <string name="downloading_files">백그라운드에서 파일 다운로드 중...</string>
+    <string name="completed_notification">다운로드 완료: %s</string>
+    <string name="failed_notification">다운로드 실패: %s</string>
+    <string name="notification_channel_name">다운로드 알림</string>
+    <string name="notification_channel_description">다운로드 상태 알림</string>
+    
+    <string name="storage_permission_rationale">다운로드한 파일을 저장하려면 저장공간 권한이 필요합니다</string>
+    <string name="notification_permission_rationale">다운로드 진행 상황을 표시하려면 알림 권한이 필요합니다</string>
+    <string name="grant_permission">권한 허용</string>
+    <string name="permission_denied">권한이 거부되었습니다. 일부 기능이 작동하지 않을 수 있습니다.</string>
+    
+    <string name="no_downloads">다운로드가 없습니다. +를 누르거나 URL을 붙여넣으세요.</string>
+    <string name="no_active_downloads">진행 중인 다운로드 없음</string>
+    <string name="no_completed_downloads">완료된 다운로드 없음</string>
+    
+    <string name="download_speed">%s/초</string>
+    <string name="eta">남은 시간: %s</string>
+    <string name="of">/</string>
+    <string name="unknown_size">알 수 없는 크기</string>
+    <string name="unknown_speed">--</string>
+    <string name="unknown_eta">--:--</string>
+    
+    <string name="app_description">Luca Download Manager는 멀티 세그먼트 HTTP/HTTPS 다운로드, 공개 오디오 스트리밍(SoundCloud, YouTube, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org), 소셜 미디어 동영상 및 토렌트/마그넷 전송을 지원합니다.</string>
+    <string name="version">버전 %s</string>
+    <string name="developer">개발자</string>
+    <string name="privacy_policy">개인정보 처리방침</string>
+    <string name="open_source_licenses">오픈소스 라이선스</string>
+    
+    <string name="download_settings">다운로드 설정</string>
+    <string name="max_concurrent_downloads">최대 동시 다운로드 수</string>
+    <string name="download_speed_limit">속도 제한 (KB/s, 0 = 무제한)</string>
+    <string name="none">없음</string>
+    <string name="unlimited">무제한</string>
+    <string name="save_location">저장 경로</string>
+    <string name="use_mobile_data">모바일 데이터 사용</string>
+    <string name="wifi_only">Wi-Fi 전용</string>
+    <string name="auto_resume">실패한 다운로드 자동 재개</string>
+    <string name="enable_notifications">알림 사용</string>
+    <string name="dark_mode">다크 모드</string>
+    <string name="language">언어</string>
+    
+    <string name="torrent_settings">토렌트 설정</string>
+    <string name="max_upload_speed">최대 업로드 속도 (KB/s)</string>
+    <string name="max_connections">최대 연결 수</string>
+    <string name="enable_seeding">시딩 사용</string>
+    <string name="seed_ratio">시드 비율</string>
+    <string name="seed_until">시딩 유지 조건</string>
+    <string name="seed_forever">영구</string>
+    <string name="seed_for_minutes">%d분 동안</string>
+    
+    <string name="video_settings">동영상 설정</string>
+    <string name="video_quality">동영상 화질</string>
+    <string name="best">최고 (1080p / 4K)</string>
+    <string name="high">고화질 (720p HD)</string>
+    <string name="medium">중간 (480p)</string>
+    <string name="low">저화질 (360p 데이터 절약)</string>
+    <string name="audio_only">오디오만</string>
+    <string name="extract_audio">오디오 트랙 추출</string>
+    <string name="allow_third_party_resolvers">타사 동영상 리졸버 허용</string>
+    <string name="allow_third_party_resolvers_summary">직접 추출이 제한된 경우 공개 리졸버 서비스 조회</string>
+    <string name="allow_third_party_torrent_resolvers">타사 토렌트 캐시 허용</string>
+    <string name="allow_third_party_torrent_resolvers_summary">마그넷 링크 해결 시 외부 메타데이터 서비스 조회</string>
+
+    <string name="music_settings">음악 및 오디오 설정</string>
+    <string name="music_download">음악 다운로드</string>
+    <string name="music_format">오디오 포맷 및 비트레이트</string>
+    <string name="music_mp3_320">MP3 320 kbps (직접 / 대상)</string>
+    <string name="music_mp3_192">MP3 192 kbps (고품질)</string>
+    <string name="music_flac">FLAC 무손실</string>
+    <string name="music_m4a_256">M4A / AAC 256 kbps</string>
+    <string name="music_ogg_192">OGG Vorbis 192 kbps</string>
+    <string name="embed_metadata">ID3 태그 및 앨범 아트 삽입</string>
+    <string name="allow_alternate_music_source">대체 소스 검색 허용 (YouTube)</string>
+    <string name="allow_alternate_music_source_summary">소스 링크가 미리보기만 제공하는 경우 YouTube에서 일치하는 항목 검색</string>
+    <string name="supported_music_sites">지원: SoundCloud, YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org, 팟캐스트 및 다이렉트 오디오</string>
+    
+    <string name="confirm_delete">이 다운로드를 삭제하시겠습니까?</string>
+    <string name="confirm_delete_file">다운로드된 파일도 함께 삭제하시겠습니까?</string>
+    <string name="download_url_confirmation">%s에서 다운로드하시겠습니까?</string>
+    <string name="yes">예</string>
+    <string name="no">아니요</string>
+    <string name="ok">확인</string>
+    
+    <string name="error_invalid_url">잘못된 URL입니다. 유효한 http/https 또는 마그넷 링크를 입력하세요.</string>
+    <string name="error_invalid_download">잘못된 다운로드 항목</string>
+    <string name="error_file_not_found">다운로드된 파일을 찾을 수 없습니다</string>
+    <string name="error_open_file">이 파일 형식은 열 수 없습니다</string>
+    <string name="error_share_file">이 파일을 공유할 수 없습니다</string>
+    <string name="error_connection">연결 오류</string>
+    <string name="error_storage">저장공간 오류</string>
+    <string name="error_unknown">알 수 없는 오류</string>
+    <string name="error_insufficient_space">저장공간이 부족합니다</string>
+    <string name="error_file_exists">파일이 이미 존재합니다</string>
+    
+    <string name="torrent">토렌트</string>
+    <string name="torrent_download">토렌트 다운로드</string>
+    <string name="magnet_link">마그넷 링크</string>
+    <string name="direct_download">직접 다운로드</string>
+    <string name="video_download">동영상 다운로드</string>
+    <string name="extract_metadata">메타데이터 추출 중...</string>
+    <string name="getting_torrent_info">토렌트 정보 가져오는 중...</string>
+    <string name="connecting_to_peers">피어 연결 중...</string>
+    <string name="downloading_metadata">메타데이터 다운로드 중...</string>
+    
+    <string name="peers">피어: %d</string>
+    <string name="seeds">시드: %d</string>
+    <string name="peers_unavailable">피어: 사용할 수 없음</string>
+    <string name="seeds_unavailable">시드: 사용할 수 없음</string>
+    <string name="upload_speed">업로드: %s/초</string>
+    <string name="uploaded_total">업로드됨: %s</string>
+    <string name="seed">시드</string>
+    <string name="stop_seeding">시딩 중지</string>
+    <string name="seeding_status">시딩 중</string>
+    <string name="download_progress">%d%%</string>
+    <string name="status">상태: %s</string>
+    <string name="file_size">크기: %s</string>
+    <string name="save_path">경로: %s</string>
+    <string name="added_on">추가됨: %s</string>
+    <string name="completed_on">완료됨: %s</string>
+    <string name="completed_status">완료됨</string>
+    <string name="cancelled">취소됨</string>
+    <string name="clipboard_empty_or_invalid">클립보드에 유효한 URL이 없습니다.</string>
+    <string name="search_downloads">다운로드 검색 또는 URL 붙여넣기...</string>
+    <string name="sort_date_newest">추가일 (최신순)</string>
+    <string name="sort_date_oldest">추가일 (오래된순)</string>
+    <string name="sort_name_az">파일명 (A - Z)</string>
+    <string name="sort_size_largest">파일 크기 (큰 순)</string>
+    <string name="sort_progress">진행률 (높은 순)</string>
+    <string name="all_downloads_paused">모든 활성 다운로드가 일시정지되었습니다</string>
+    <string name="all_downloads_resumed">모든 일시정지된 다운로드가 재개되었습니다</string>
+    <string name="completed_cleared">완료된 다운로드가 지워졌습니다</string>
+    <string name="smart_browser">스마트 브라우저</string>
+    <string name="browser_sniff_links">다운로드 가능한 링크 탐색 및 감지</string>
+    <string name="browser_url_hint">DuckDuckGo 검색 또는 URL 입력...</string>
+    <string name="detected_links">감지된 다운로드 가능 링크</string>
+    <string name="download_all">모두 다운로드</string>
+    <string name="media_player">미디어 플레이어</string>
+</resources>
