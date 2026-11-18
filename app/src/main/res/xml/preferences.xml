@@ -156,7 +156,7 @@
         <Preference
             android:key="pref_app_version"
             android:title="App Version"
-            android:summary="Luca Download Manager v26.0 (Build 26)"
+            android:summary="Luca Download Manager v27.0 (Build 27)"
             android:selectable="false" />
     </PreferenceCategory>
 
