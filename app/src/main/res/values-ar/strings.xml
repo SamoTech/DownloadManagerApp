@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">لوكا لمدير التحميل</string>
+    <string name="add_download">إضافة تحميل</string>
+    <string name="download_details">تفاصيل التحميل</string>
+    <string name="downloads">التحميلات</string>
+    <string name="completed">المكتملة</string>
+    <string name="active">النشطة</string>
+    <string name="paused">المؤقتة</string>
+    <string name="failed">الفاشلة</string>
+    <string name="queued">في الانتظار</string>
+    <string name="all_files">كل الملفات</string>
+    <string name="music">الصوتيات</string>
+    <string name="torrents">التورنت</string>
+    <string name="videos">الفيديوهات</string>
+    <string name="settings">الإعدادات</string>
+    <string name="about">حول التطبيق</string>
+    <string name="exit">خروج</string>
+    
+    <string name="url_hint">أدخل الرابط، رابط فيديو/صوت، أو مغناطيس تورنت</string>
+    <string name="filename_hint">اسم الملف / عنوان المسار (اختياري)</string>
+    <string name="artist_hint">الفنان / اسم القناة (اختياري)</string>
+    <string name="save_to">حفظ إلى</string>
+    <string name="default_download_path">التنزيلات</string>
+    <string name="start_download">بدء التحميل</string>
+    <string name="starting_download">جاري بدء التحميل...</string>
+    <string name="download_started">بدأ التحميل</string>
+    <string name="browse">تصفح</string>
+    <string name="paste_url">لصق</string>
+    <string name="select_file">اختر المجلد</string>
+    <string name="select_all_files">تحديد كل الملفات</string>
+    <string name="search_hint">بحث في التحميلات أو لصق رابط</string>
+    <string name="sort">ترتيب</string>
+    <string name="sort_by">ترتيب التحميلات حسب</string>
+    <string name="pause_all">إيقاف الكل مؤقتاً</string>
+    <string name="resume_all">استئناف الكل</string>
+    <string name="clear_completed">مسح المكتملة</string>
+    <string name="more_options">خيارات إضافية</string>
+    <string name="copy_link">نسخ الرابط</string>
+    <string name="link_copied">تم نسخ الرابط إلى الحافظة</string>
+    <string name="file_information">معلومات الملف</string>
+    <string name="app_settings">إعدادات التطبيق</string>
+    <string name="pause">إيقاف مؤقت</string>
+    <string name="resume">استئناف</string>
+    <string name="cancel">إلغاء</string>
+    <string name="retry">إعادة المحاولة</string>
+    <string name="delete">حذف</string>
+    <string name="open">فتح</string>
+    <string name="share">مشاركة</string>
+    
+    <string name="downloading">جاري التحميل...</string>
+    <string name="downloading_files">جاري تحميل الملفات في الخلفية...</string>
+    <string name="completed_notification">اكتمل التحميل: %s</string>
+    <string name="failed_notification">فشل التحميل: %s</string>
+    <string name="notification_channel_name">إشعارات التحميل</string>
+    <string name="notification_channel_description">إشعارات لحالة التحميل</string>
+    
+    <string name="storage_permission_rationale">يحتاج التطبيق إلى إذن التخزين لحفظ الملفات التي تم تنزيلها</string>
+    <string name="notification_permission_rationale">يحتاج التطبيق إلى إذن الإشعارات لإظهار تقدم التحميل</string>
+    <string name="grant_permission">منح الإذن</string>
+    <string name="permission_denied">تم رفض الإذن. قد لا تعمل بعض الميزات بشكل صحيح.</string>
+    
+    <string name="no_downloads">لا توجد تحميلات بعد. اضغط على + أو الصق رابطاً لبدء تحميل الملفات أو الموسيقى أو الفيديوهات أو التورنت.</string>
+    <string name="no_active_downloads">لا توجد تحميلات نشطة</string>
+    <string name="no_completed_downloads">لا توجد تحميلات مكتملة</string>
+    
+    <string name="download_speed">%s/ثا</string>
+    <string name="eta">الوقت المتبقي: %s</string>
+    <string name="of">من</string>
+    <string name="unknown_size">حجم غير معروف</string>
+    <string name="unknown_speed">--</string>
+    <string name="unknown_eta">--:--</string>
+    
+    <string name="app_description">يدعم لوكا لمدير التحميل التحميلات متعددة الأجزاء عبر HTTP/HTTPS، والبث الصوتي العام (ساوند كلاود، يوتيوب، باندكامب، أوديوماك، ميكسكلود، سبوتيفاي، جاميندو، الأرشيف، والبودكاست)، وفيديوهات وسائل التواصل الاجتماعي، ونقل تورنت ومغناطيس.</string>
+    <string name="version">الإصدار %s</string>
+    <string name="developer">المطور</string>
+    <string name="privacy_policy">سياسة الخصوصية</string>
+    <string name="open_source_licenses">رخص المصدر المفتوح</string>
+    
+    <string name="download_settings">إعدادات التحميل</string>
+    <string name="max_concurrent_downloads">الحد الأقصى للتحميلات المتزامنة</string>
+    <string name="download_speed_limit">حد السرعة (كيلوبايت/ثا، 0 = غير محدود)</string>
+    <string name="none">لا شيء</string>
+    <string name="unlimited">غير محدود</string>
+    <string name="save_location">موقع الحفظ</string>
+    <string name="use_mobile_data">استخدام بيانات الجوال</string>
+    <string name="wifi_only">شبكة واي فاي فقط</string>
+    <string name="auto_resume">استئناف التحميلات الفاشلة تلقائياً</string>
+    <string name="enable_notifications">تمكين الإشعارات</string>
+    <string name="dark_mode">الوضع الداكن</string>
+    <string name="language">اللغة</string>
+    
+    <string name="torrent_settings">إعدادات التورنت</string>
+    <string name="max_upload_speed">الحد الأقصى لسرعة الرفع (كيلوبايت/ثا)</string>
+    <string name="max_connections">الحد الأقصى للاتصالات</string>
+    <string name="enable_seeding">تمكين البذر (Seeding)</string>
+    <string name="seed_ratio">نسبة البذر</string>
+    <string name="seed_until">البذر حتى</string>
+    <string name="seed_forever">إلى الأبد</string>
+    <string name="seed_for_minutes">لمدة %d دقائق</string>
+    
+    <string name="video_settings">إعدادات الفيديو</string>
+    <string name="video_quality">جودة الفيديو</string>
+    <string name="best">الأفضل (1080p / 4K)</string>
+    <string name="high">عالية (720p HD)</string>
+    <string name="medium">متوسطة (480p)</string>
+    <string name="low">منخفضة (360p لتوفير البيانات)</string>
+    <string name="audio_only">صوت فقط</string>
+    <string name="extract_audio">استخراج المسار الصوتي</string>
+    <string name="allow_third_party_resolvers">السماح بمحللات الفيديو الخارجية</string>
+    <string name="allow_third_party_resolvers_summary">الاستعلام عن خدمات محللات وسائل التواصل العامة عند تقييد استخراج الصفحة المباشرة</string>
+    <string name="allow_third_party_torrent_resolvers">السماح بذاكرة التخزين المؤقت للتورنت الخارجية</string>
+    <string name="allow_third_party_torrent_resolvers_summary">الاستعلام عن خدمات تخزين تورنت الخارجية عند حل روابط المغناطيس</string>
+
+    <string name="music_settings">إعدادات الصوت والموسيقى</string>
+    <string name="music_download">تحميل الموسيقى</string>
+    <string name="music_format">صيغة الصوت ومعدل البت</string>
+    <string name="music_mp3_320">MP3 320 كيلوبت في الثانية (مباشر / الهدف)</string>
+    <string name="music_mp3_192">MP3 192 كيلوبت في الثانية (جودة عالية)</string>
+    <string name="music_flac">FLAC بدون فقدان (عند توفر المصدر)</string>
+    <string name="music_m4a_256">M4A / AAC 256 كيلوبت في الثانية</string>
+    <string name="music_ogg_192">OGG Vorbis 192 كيلوبت في الثانية</string>
+    <string name="embed_metadata">تضمين علامات ID3 وصورة الغلاف</string>
+    <string name="allow_alternate_music_source">السماح بالبحث عن مصادر بديلة (يوتيوب)</string>
+    <string name="allow_alternate_music_source_summary">البحث في يوتيوب عن عنوان/فنان مطابق عندما يوفر رابط المصدر معاينة فقط</string>
+    <string name="supported_music_sites">مدعوم: ساوند كلاود، يوتيوب ميوزيك، باندكامب، أوديوماك، ميكسكلود، سبوتيفاي، جاميندو، الأرشيف، والبودكاست</string>
+    
+    <string name="confirm_delete">هل أنت متأكد أنك تريد حذف هذا التحميل؟</string>
+    <string name="confirm_delete_file">حذف الملف المُحمل أيضاً؟</string>
+    <string name="download_url_confirmation">هل تريد التحميل من %s؟</string>
+    <string name="yes">نعم</string>
+    <string name="no">لا</string>
+    <string name="ok">موافق</string>
+    
+    <string name="error_invalid_url">رابط غير صالح. أدخل رابط http/https أو مغناطيس صالح.</string>
+    <string name="error_invalid_download">عنصر تحميل غير صالح</string>
+    <string name="error_file_not_found">الملف المُحمل غير موجود</string>
+    <string name="error_open_file">لا يمكن فتح هذا النوع من الملفات</string>
+    <string name="error_share_file">لا يمكن مشاركة هذا الملف</string>
+    <string name="error_connection">خطأ في الاتصال</string>
+    <string name="error_storage">خطأ في التخزين</string>
+    <string name="error_unknown">خطأ غير معروف</string>
+    <string name="error_insufficient_space">مساحة التخزين غير كافية</string>
+    <string name="error_file_exists">الملف موجود بالفعل</string>
+    
+    <string name="torrent">تورنت</string>
+    <string name="torrent_download">تحميل تورنت</string>
+    <string name="magnet_link">رابط مغناطيسي (Magnet)</string>
+    <string name="direct_download">تحميل مباشر</string>
+    <string name="video_download">تحميل فيديو</string>
+    <string name="extract_metadata">جاري استخراج البيانات الوصفية...</string>
+    <string name="getting_torrent_info">جاري الحصول على معلومات التورنت...</string>
+    <string name="connecting_to_peers">جاري الاتصال بالأقران...</string>
+    <string name="downloading_metadata">جاري تحميل البيانات الوصفية...</string>
+    
+    <string name="peers">الأقران: %d</string>
+    <string name="seeds">البذور: %d</string>
+    <string name="peers_unavailable">الأقران: غير متوفر</string>
+    <string name="seeds_unavailable">البذور: غير متوفر</string>
+    <string name="upload_speed">الرفع: %s/ثا</string>
+    <string name="uploaded_total">تم رفع: %s</string>
+    <string name="seed">بذر (Seed)</string>
+    <string name="stop_seeding">إيقاف البذر</string>
+    <string name="seeding_status">جاري البذر</string>
+    <string name="download_progress">%d%%</string>
+    <string name="status">الحالة: %s</string>
+    <string name="file_size">الحجم: %s</string>
+    <string name="save_path">المسار: %s</string>
+    <string name="added_on">أُضيف في: %s</string>
+    <string name="completed_on">اكتمل في: %s</string>
+    <string name="completed_status">مكتمل</string>
+    <string name="cancelled">ملغي</string>
+    <string name="clipboard_empty_or_invalid">لا يوجد رابط صالح في الحافظة. أدخل أو اختر مصدراً أدناه.</string>
+    <string name="search_downloads">بحث في التحميلات أو لصق رابط...</string>
+    <string name="sort_date_newest">تاريخ الإضافة (الأحدث أولاً)</string>
+    <string name="sort_date_oldest">تاريخ الإضافة (الأقدم أولاً)</string>
+    <string name="sort_name_az">اسم الملف (أ - ي)</string>
+    <string name="sort_size_largest">حجم الملف (الأكبر أولاً)</string>
+    <string name="sort_progress">التقدم (الأعلى أولاً)</string>
+    <string name="all_downloads_paused">تم إيقاف جميع التحميلات مؤقتاً</string>
+    <string name="all_downloads_resumed">تم استئناف جميع التحميلات المؤقتة</string>
+    <string name="completed_cleared">تم مسح التحميلات المكتملة</string>
+    <string name="smart_browser">المتصفح الذكي</string>
+    <string name="browser_sniff_links">تصفح واكتشاف الروابط القابلة للتحميل</string>
+    <string name="browser_url_hint">بحث في DuckDuckGo أو إدخال عنوان موقع...</string>
+    <string name="detected_links">الروابط المكتشفة القابلة للتحميل</string>
+    <string name="download_all">تحميل الكل</string>
+    <string name="media_player">مشغل الوسائط</string>
+</resources>

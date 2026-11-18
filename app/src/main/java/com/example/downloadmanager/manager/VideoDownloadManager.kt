@@ -98,7 +98,10 @@ class VideoDownloadManager(
             "pinterest.com" to "Pinterest",
             "pin.it" to "Pinterest",
             "twitch.tv" to "Twitch (Unsupported)",
-            "archive.org" to "Internet Archive"
+            "archive.org" to "Internet Archive",
+            "threads.net" to "Threads",
+            "threads.com" to "Threads",
+            "threads.instagram.com" to "Threads"
         )
 
         fun detectVideoPlatform(url: String): String? {
@@ -223,10 +226,16 @@ class VideoDownloadManager(
             return UrlClassifier.matchesDomain(host, "twitch.tv")
         }
 
+        fun isThreadsUrl(url: String): Boolean {
+            val host = parseHost(url) ?: return false
+            return UrlClassifier.matchesAnyDomain(host, "threads.net", "threads.com", "threads.instagram.com")
+        }
+
         fun isSocialVideoUrl(url: String): Boolean {
             return isYouTubeUrl(url) ||
                 isTikTokUrl(url) ||
                 isInstagramUrl(url) ||
+                isThreadsUrl(url) ||
                 isTwitterUrl(url) ||
                 isFacebookUrl(url) ||
                 isRedditUrl(url) ||
@@ -262,6 +271,7 @@ class VideoDownloadManager(
                 isArchiveDetailsUrl(url) ||
                 isTikTokUrl(url) ||
                 isInstagramUrl(url) ||
+                isThreadsUrl(url) ||
                 isTwitterUrl(url) ||
                 isFacebookUrl(url) ||
                 (isRedditUrl(url) && !UrlClassifier.matchesDomain(host, "v.redd.it")) ||
@@ -310,6 +320,7 @@ class VideoDownloadManager(
                 isTikTokUrl(validUrl) -> extractTikTokVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
                 isTwitterUrl(validUrl) -> extractTwitterVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
                 isInstagramUrl(validUrl) -> extractInstagramVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
+                isThreadsUrl(validUrl) -> extractThreadsVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
                 isFacebookUrl(validUrl) -> extractFacebookVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
                 isRedditUrl(validUrl) -> extractRedditVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
                 isVimeoUrl(validUrl) -> extractVimeoVideoInfo(validUrl) ?: extractGenericOrWebVideoInfo(validUrl)
@@ -882,6 +893,75 @@ class VideoDownloadManager(
             )
         } catch (e: Exception) {
             Log.w(TAG, "Instagram extraction error: ${e.message}")
+            null
+        }
+    }
+
+    private fun extractThreadsVideoInfo(url: String): VideoStreamInfo? {
+        return try {
+            val postId = Regex("""threads\.(?:net|com|instagram\.com)/(?:@[\w.-]+/)?post/([A-Za-z0-9_-]+)""", RegexOption.IGNORE_CASE)
+                .find(url)?.groupValues?.getOrNull(1)
+                ?: Regex("""threads\.(?:net|com|instagram\.com)/t/([A-Za-z0-9_-]+)""", RegexOption.IGNORE_CASE)
+                    .find(url)?.groupValues?.getOrNull(1)
+                ?: return null
+
+            val formats = mutableListOf<VideoFormat>()
+            var title = "Threads_Post_$postId"
+            var thumb: String? = null
+
+            val previewUrls = buildList {
+                if (isThirdPartyResolverEnabled()) {
+                    add("https://www.ddinstagram.com/p/$postId/")
+                }
+                add(url)
+            }
+            for (pUrl in previewUrls) {
+                try {
+                    val req = Request.Builder()
+                        .url(pUrl)
+                        .header("User-Agent", DISCORD_BOT_USER_AGENT)
+                        .build()
+                    okHttpClient.newCall(req).execute().use { resp ->
+                        if (!resp.isSuccessful) return@use
+                        val html = resp.body?.string().orEmpty()
+                        extractTitleFromHtml(html).takeIf { it.isNotBlank() }?.let { title = it }
+                        extractMetaContent(html, "og:image")?.let { thumb = decodeHtmlEscapes(it) }
+                        val ogVideo = extractMetaContent(html, "og:video:secure_url")
+                            ?: extractMetaContent(html, "og:video")
+                            ?: extractMetaContent(html, "twitter:player:stream")
+                        if (!ogVideo.isNullOrBlank()) {
+                            val resolved = resolveRelativeUrl(pUrl, decodeHtmlEscapes(ogVideo))
+                            if (resolved != null) {
+                                formats.add(
+                                    VideoFormat(
+                                        formatId = "muxed_threads_og",
+                                        url = resolved,
+                                        quality = "HD MP4 (Video+Audio)",
+                                        container = "mp4",
+                                        isAudioOnly = false
+                                    )
+                                )
+                            }
+                        }
+                    }
+                    if (formats.isNotEmpty()) break
+                } catch (_: Exception) {
+                }
+            }
+
+            if (formats.isEmpty()) return null
+            VideoStreamInfo(
+                video = VideoInfo(
+                    id = postId,
+                    title = title,
+                    url = url,
+                    thumbnailUrl = thumb,
+                    author = "Threads"
+                ),
+                formats = formats.distinctBy { it.url }
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Threads extraction error: ${e.message}")
             null
         }
     }

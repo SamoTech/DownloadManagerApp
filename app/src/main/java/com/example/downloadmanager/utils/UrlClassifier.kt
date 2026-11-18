@@ -327,6 +327,21 @@ object UrlClassifier {
             )
         }
 
+        // 7b. Threads (Meta)
+        if (matchesAnyDomain(host, "threads.net", "threads.com", "threads.instagram.com")) {
+            val hasPost = pathLower.contains("/post/") || pathLower.contains("/t/") || nonEmptySegments.size >= 2
+            return UrlClassification(
+                category = PlatformCategory.INSTAGRAM,
+                downloadType = DownloadType.VIDEO,
+                providerName = "Threads",
+                canonicalHost = "threads.net",
+                isSupported = hasPost,
+                requiresThirdPartyIntermediary = true,
+                intermediaryHostDescription = "Threads public media resolver",
+                unsupportedReason = if (hasPost) null else "Threads URL must point to a post (/post/...)"
+            )
+        }
+
         // 8. Facebook
         if (matchesAnyDomain(host, "facebook.com", "fb.watch", "fb.com")) {
             val isShort = matchesDomain(host, "fb.watch")
