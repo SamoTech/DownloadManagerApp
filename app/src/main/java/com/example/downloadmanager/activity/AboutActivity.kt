@@ -36,11 +36,23 @@ class AboutActivity : AppCompatActivity() {
             AlertDialog.Builder(this)
                 .setTitle(R.string.privacy_policy)
                 .setMessage(
-                    "Luca Download Manager downloads files directly to your selected device storage.\n\n" +
-                    "• Direct HTTP/HTTPS, HLS, and BitTorrent connections are made directly from your device to the target hosts, trackers, and peers.\n" +
-                    "• When 'Allow Third-Party Social Video Resolvers' is enabled in Settings, social media video URLs (TikTok, X/Twitter, Instagram) may be queried against public resolver services (tikwm.com, vxtwitter.com, fxtwitter.com, ddinstagram.com) if direct page extraction is restricted.\n" +
-                    "• When 'Allow Alternate-Source Lookup (YouTube)' is explicitly enabled by you, track metadata (title and artist) may be searched on YouTube to locate a matching stream.\n" +
-                    "• You can disable third-party resolvers and alternate-source lookups at any time in Settings."
+                    "Luca Download Manager saves files directly to your selected device storage and collects no personal data, account credentials, or analytics.\n\n" +
+                    "• Direct HTTP/HTTPS, HLS/DASH, and BitTorrent/Magnet connections are initiated directly from your device to the URLs, trackers, and peers you provide.\n" +
+                    "• Optional public metadata resolvers, public torrent metadata caches, and alternate public audio lookup are user-controlled in Settings and can be toggled off at any time.\n" +
+                    "• Luca Download Manager does not host, index, or distribute any media files."
+                )
+                .setPositiveButton(R.string.ok, null)
+                .show()
+        }
+
+        binding.btnCopyrightNotice.setOnClickListener {
+            AlertDialog.Builder(this)
+                .setTitle(R.string.copyright_notice)
+                .setMessage(
+                    "Luca Download Manager is an independent, general-purpose public download manager and is not affiliated with, endorsed by, or sponsored by any third-party website, media platform, or streaming service.\n\n" +
+                    "• Intended Use: Download only public-domain, Creative Commons, open-access, or self-owned files, or content for which you hold explicit legal permission from the rights holder.\n" +
+                    "• Copyright & DRM Compliance: Downloading DRM-protected, paywalled, or unauthorized copyrighted material is strictly prohibited and not supported.\n" +
+                    "• User Responsibility: You are solely responsible for complying with applicable copyright laws and the terms of service of any website you access."
                 )
                 .setPositiveButton(R.string.ok, null)
                 .show()

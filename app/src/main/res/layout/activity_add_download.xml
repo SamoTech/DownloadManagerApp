@@ -519,7 +519,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
-                    android:text="Supports YouTube, TikTok, Instagram, X/Twitter, Facebook, Reddit, Vimeo, Dailymotion &amp; Direct Video"
+                    android:text="@string/supported_video_sites"
                     android:textColor="@color/colorPrimary"
                     android:textSize="12sp" />
 

@@ -246,7 +246,7 @@
                                     <TextView
                                         android:layout_width="wrap_content"
                                         android:layout_height="wrap_content"
-                                        android:text="Browse &amp; sniff MP4, HLS, DASH, MP3 &amp; files in real time"
+                                        android:text="Browse public websites &amp; download open-access media and files"
                                         android:textColor="#94A3B8"
                                         android:textSize="12sp" />
                                 </LinearLayout>

@@ -71,7 +71,7 @@
     <string name="unknown_speed">--</string>
     <string name="unknown_eta">--:--</string>
     
-    <string name="app_description">Luca Download Manager मल्टी-सेगमेंट HTTP/HTTPS डाउनलोड, सार्वजनिक ऑडियो स्ट्रीमिंग (SoundCloud, YouTube, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org), सोशल मीडिया वीडियो और BitTorrent/मैग्नेट ट्रांसफर का समर्थन करता है।</string>
+    <string name="app_description">Luca Download Manager एक सामान्य-उद्देश्य वाला सार्वजनिक डाउनलोड प्रबंधक है जो मल्टी-सेगमेंट HTTP/HTTPS फ़ाइल डाउनलोड, सार्वजनिक ऑडियो और वीडियो स्ट्रीम (MP3, FLAC, M4A, OGG, MP4, HLS/DASH), आर्काइव, दस्तावेज़ और BitTorrent/मैग्नेट ट्रांसफर का समर्थन करता है। उपयोगकर्ता केवल सार्वजनिक-डोमेन, क्रिएटिव कॉमन्स या अधिकृत सामग्री ही डाउनलोड करने के लिए ज़िम्मेदार हैं।</string>
     <string name="version">संस्करण %s</string>
     <string name="developer">डेलपर</string>
     <string name="privacy_policy">गोपनीयता नीति</string>
@@ -107,10 +107,10 @@
     <string name="low">निम्न (360p डेटा सेवर)</string>
     <string name="audio_only">केवल ऑडियो</string>
     <string name="extract_audio">ऑडियो ट्रैक निकालें</string>
-    <string name="allow_third_party_resolvers">तृतीय-पक्ष वीडियो सॉल्वर की अनुमति दें</string>
-    <string name="allow_third_party_resolvers_summary">प्रत्यक्ष पृष्ठ निष्कर्षण प्रतिबंधित होने पर सार्वजनिक सॉल्वर सेवाएँ क्वेरी करें</string>
-    <string name="allow_third_party_torrent_resolvers">तृतीय-पक्ष टॉरेंट कैश की अनुमति दें</string>
-    <string name="allow_third_party_torrent_resolvers_summary">मैग्नेट लिंक हल करते समय बाहरी टॉरेंट मेटाडेटा सेवाओं से पूछताछ करें</string>
+    <string name="allow_third_party_resolvers">सार्वजनिक मेटाडेटा रिज़ॉल्वर की अनुमति दें</string>
+    <string name="allow_third_party_resolvers_summary">जब किसी सार्वजनिक वेब लिंक में अप्रत्यक्ष एम्बेड या शॉर्टलिंक हो तो सार्वजनिक मेटाडेटा रिज़ॉल्वर सेवाएँ क्वेरी करें</string>
+    <string name="allow_third_party_torrent_resolvers">सार्वजनिक टॉरेंट मेटाडेटा कैश की अनुमति दें</string>
+    <string name="allow_third_party_torrent_resolvers_summary">मैग्नेट लिंक हल करते समय सार्वजनिक टॉरेंट मेटाडेटा कैश सेवाओं से पूछताछ करें</string>
 
     <string name="music_settings">संगीत और ऑडियो सेटिंग्स</string>
     <string name="music_download">संगीत डाउनलोड</string>
@@ -121,9 +121,9 @@
     <string name="music_m4a_256">M4A / AAC 256 kbps</string>
     <string name="music_ogg_192">OGG Vorbis 192 kbps</string>
     <string name="embed_metadata">ID3 टैग और कवर आर्ट एम्बेड करें</string>
-    <string name="allow_alternate_music_source">वैकल्पिक स्रोत खोज की अनुमति दें (YouTube)</string>
-    <string name="allow_alternate_music_source_summary">जब स्रोत लिंक केवल पूर्वावलोकन प्रदान करता है तो YouTube पर मिलान खोजें</string>
-    <string name="supported_music_sites">समर्थित: SoundCloud, YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org, पॉडकास्ट और डायरेक्ट ऑडियो</string>
+    <string name="allow_alternate_music_source">वैकल्पिक सार्वजनिक ऑडियो खोज की अनुमति दें</string>
+    <string name="allow_alternate_music_source_summary">जब लिंक केवल मेटाडेटा या संक्षिप्त पूर्वावलोकन दिखाता है तो सार्वजनिक ऑडियो इंडेक्स में खोजें</string>
+    <string name="supported_music_sites">समर्थित: सार्वजनिक ऑडियो लिंक, ओपन-एक्सेस संगीत आर्काइव, पॉडकास्ट, HLS ऑडियो और डायरेक्ट MP3/FLAC/M4A/OGG स्ट्रीम</string>
     
     <string name="confirm_delete">क्या आप वाकई इस डाउनलोड को हटाना चाहते हैं?</string>
     <string name="confirm_delete_file">डाउनलोड की गई फ़ाइल भी हटाएं?</string>

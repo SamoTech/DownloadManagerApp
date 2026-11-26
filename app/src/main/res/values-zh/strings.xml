@@ -71,7 +71,7 @@
     <string name="unknown_speed">--</string>
     <string name="unknown_eta">--:--</string>
     
-    <string name="app_description">Luca Download Manager 支持多线程 HTTP/HTTPS 下载、公共音频流媒体（SoundCloud、YouTube、Bandcamp、Audiomack、Mixcloud、Spotify、Jamendo、Archive.org）、社交媒体视频以及 BitTorrent/磁力链接传输。</string>
+    <string name="app_description">Luca Download Manager 是一款通用的公共下载管理器，支持多线程 HTTP/HTTPS 文件下载、公开音视频流（MP3、FLAC、M4A、OGG、MP4、HLS/DASH）、压缩包、文档以及 BitTorrent/磁力链接传输。用户有责任确保仅下载公有领域、知识共享或已获合法授权的内容。</string>
     <string name="version">版本 %s</string>
     <string name="developer">开发者</string>
     <string name="privacy_policy">隐私政策</string>
@@ -107,10 +107,10 @@
     <string name="low">省流 (360p)</string>
     <string name="audio_only">仅音频</string>
     <string name="extract_audio">提取音轨</string>
-    <string name="allow_third_party_resolvers">允许第三方视频解析器</string>
-    <string name="allow_third_party_resolvers_summary">当直接页面提取受限时查询公共解析服务</string>
-    <string name="allow_third_party_torrent_resolvers">允许第三方种子缓存</string>
-    <string name="allow_third_party_torrent_resolvers_summary">解析磁力链接时查询外部种子元数据服务</string>
+    <string name="allow_third_party_resolvers">允许公共元数据解析器</string>
+    <string name="allow_third_party_resolvers_summary">当公共网页链接使用间接嵌入或短链接时查询公共元数据解析服务</string>
+    <string name="allow_third_party_torrent_resolvers">允许公共种子元数据缓存</string>
+    <string name="allow_third_party_torrent_resolvers_summary">解析磁力链接时查询公共种子元数据缓存服务</string>
 
     <string name="music_settings">音乐与音频设置</string>
     <string name="music_download">音乐下载</string>
@@ -121,9 +121,9 @@
     <string name="music_m4a_256">M4A / AAC 256 kbps</string>
     <string name="music_ogg_192">OGG Vorbis 192 kbps</string>
     <string name="embed_metadata">内嵌 ID3 标签与封面</string>
-    <string name="allow_alternate_music_source">允许备用来源搜索 (YouTube)</string>
-    <string name="allow_alternate_music_source_summary">当源链接仅提供30秒预览时，在YouTube上搜索匹配项</string>
-    <string name="supported_music_sites">支持: SoundCloud, YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org, 播客及直接音频</string>
+    <string name="allow_alternate_music_source">允许备用公共音频检索</string>
+    <string name="allow_alternate_music_source_summary">当链接仅提供元数据或短预览时，检索公共音频索引以匹配曲目</string>
+    <string name="supported_music_sites">支持: 公共音频链接、开放获取音乐档案、播客、HLS 音频及直接 MP3/FLAC/M4A/OGG 流</string>
     
     <string name="confirm_delete">您确定要删除此下载吗？</string>
     <string name="confirm_delete_file">同时删除已下载的文件吗？</string>

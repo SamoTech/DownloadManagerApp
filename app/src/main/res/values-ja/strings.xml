@@ -71,7 +71,7 @@
     <string name="unknown_speed">--</string>
     <string name="unknown_eta">--:--</string>
     
-    <string name="app_description">Luca Download Managerは、マルチセグメントHTTP/HTTPSダウンロード、パブリックオーディオストリーミング（SoundCloud、YouTube、Bandcamp、Audiomack、Mixcloud、Spotify、Jamendo、Archive.org）、ソーシャルメディア動画、BitTorrent/マグネット転送をサポートしています。</string>
+    <string name="app_description">Luca Download Managerは、マルチセグメントHTTP/HTTPSファイルダウンロード、公開音声・動画ストリーム（MP3、FLAC、M4A、OGG、MP4、HLS/DASH）、アーカイブ、ドキュメント、およびBitTorrent/マグネット転送をサポートする汎用パブリックダウンロードマネージャーです。パブリックドメイン、クリエイティブ・コモンズ、または正当な権限のあるコンテンツのみをダウンロードしてください。</string>
     <string name="version">バージョン %s</string>
     <string name="developer">開発者</string>
     <string name="privacy_policy">プライバシーポリシー</string>
@@ -107,10 +107,10 @@
     <string name="low">低 (360p データ節約)</string>
     <string name="audio_only">音声のみ</string>
     <string name="extract_audio">音声トラックを抽出</string>
-    <string name="allow_third_party_resolvers">サードパーティ動画リゾルバを許可</string>
-    <string name="allow_third_party_resolvers_summary">直接抽出が制限されている場合に公開リゾルバサービスを照会</string>
-    <string name="allow_third_party_torrent_resolvers">サードパーティ・トルントキャッシュを許可</string>
-    <string name="allow_third_party_torrent_resolvers_summary">マグネットリンク解決時に外部メタデータサービスを照会</string>
+    <string name="allow_third_party_resolvers">公開メタデータリゾルバを許可</string>
+    <string name="allow_third_party_resolvers_summary">公開ウェブリンクに埋め込みや短縮URLが含まれる場合、公開メタデータ解決サービスを照会します</string>
+    <string name="allow_third_party_torrent_resolvers">公開トレントメタデータキャッシュを許可</string>
+    <string name="allow_third_party_torrent_resolvers_summary">マグネットリンク解決時に公開トレントメタデータキャッシュを照会します</string>
 
     <string name="music_settings">音楽・音声設定</string>
     <string name="music_download">音楽ダウンロード</string>
@@ -121,9 +121,9 @@
     <string name="music_m4a_256">M4A / AAC 256 kbps</string>
     <string name="music_ogg_192">OGG Vorbis 192 kbps</string>
     <string name="embed_metadata">ID3タグ &amp; カバーアートを埋め込む</string>
-    <string name="allow_alternate_music_source">代替ソース検索を許可 (YouTube)</string>
-    <string name="allow_alternate_music_source_summary">元リンクがプレビューのみの場合にYouTubeで一致曲を検索</string>
-    <string name="supported_music_sites">対応: SoundCloud, YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org, ポッドキャスト &amp; ダイレクト音声</string>
+    <string name="allow_alternate_music_source">代替公開オーディオ検索を許可</string>
+    <string name="allow_alternate_music_source_summary">リンクがメタデータまたは短いプレビューのみを提供する場合、公開オーディオインデックスを検索します</string>
+    <string name="supported_music_sites">対応: 公開音声リンク、オープンアクセス音楽アーカイブ、ポッドキャスト、HLS音声、直接MP3/FLAC/M4A/OGGストリーム</string>
     
     <string name="confirm_delete">このダウンロードを削除してもよろしいですか？</string>
     <string name="confirm_delete_file">ダウンロードしたファイルも削除しますか？</string>

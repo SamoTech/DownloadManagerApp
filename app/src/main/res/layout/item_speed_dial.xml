@@ -49,7 +49,7 @@
                 android:layout_height="wrap_content"
                 android:ellipsize="end"
                 android:maxLines="1"
-                android:text="Threads"
+                android:text="Internet Archive"
                 android:textColor="@android:color/white"
                 android:textSize="14sp"
                 android:textStyle="bold" />
@@ -60,7 +60,7 @@
                 android:layout_height="wrap_content"
                 android:ellipsize="end"
                 android:maxLines="1"
-                android:text="Reels &amp; Video"
+                android:text="Public Domain Media"
                 android:textColor="#94A3B8"
                 android:textSize="11sp" />
         </LinearLayout>

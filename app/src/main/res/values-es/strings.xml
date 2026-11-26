@@ -71,7 +71,7 @@
     <string name="unknown_speed">--</string>
     <string name="unknown_eta">--:--</string>
     
-    <string name="app_description">Luca Download Manager admite descargas HTTP/HTTPS multisegmento, streaming de audio público (SoundCloud, YouTube, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org, Podcasts), videos públicos y de redes sociales, y transferencias BitTorrent/Magnet.</string>
+    <string name="app_description">Luca Download Manager es un gestor de descargas público de propósito general para archivos HTTP/HTTPS multisegmento, transmisiones públicas de audio y video (MP3, FLAC, M4A, OGG, MP4, HLS/DASH), archivos, documentos y transferencias BitTorrent/Magnet. Los usuarios son responsables de contar con el derecho o permiso legal para descargar cualquier contenido.</string>
     <string name="version">Versión %s</string>
     <string name="developer">Desarrollador</string>
     <string name="privacy_policy">Política de privacidad</string>
@@ -107,10 +107,10 @@
     <string name="low">Baja (360p Ahorro de datos)</string>
     <string name="audio_only">Solo audio</string>
     <string name="extract_audio">Extraer pista de audio</string>
-    <string name="allow_third_party_resolvers">Permitir resolutores de video de terceros</string>
-    <string name="allow_third_party_resolvers_summary">Consultar servicios de resolución públicos cuando se restrinja la extracción directa</string>
-    <string name="allow_third_party_torrent_resolvers">Permitir caché de torrents de terceros</string>
-    <string name="allow_third_party_torrent_resolvers_summary">Consultar servicios externos de metadatos de torrent al resolver enlaces magnet</string>
+    <string name="allow_third_party_resolvers">Permitir resolutores públicos de metadatos</string>
+    <string name="allow_third_party_resolvers_summary">Consultar servicios públicos de resolución de metadatos para enlaces indirectos o acortados</string>
+    <string name="allow_third_party_torrent_resolvers">Permitir cachés públicos de metadatos torrent</string>
+    <string name="allow_third_party_torrent_resolvers_summary">Consultar servicios públicos de metadatos torrent al resolver enlaces magnet</string>
 
     <string name="music_settings">Ajustes de música y audio</string>
     <string name="music_download">Descarga de música</string>
@@ -121,9 +121,9 @@
     <string name="music_m4a_256">M4A / AAC 256 kbps</string>
     <string name="music_ogg_192">OGG Vorbis 192 kbps</string>
     <string name="embed_metadata">Incrustar etiquetas ID3 y carátula</string>
-    <string name="allow_alternate_music_source">Permitir búsqueda en fuente alternativa (YouTube)</string>
-    <string name="allow_alternate_music_source_summary">Buscar en YouTube coincidencia cuando el enlace de origen solo proporcione vista previa</string>
-    <string name="supported_music_sites">Soportado: SoundCloud, YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org, Podcasts y Audio Directo</string>
+    <string name="allow_alternate_music_source">Permitir búsqueda pública alternativa de audio</string>
+    <string name="allow_alternate_music_source_summary">Buscar coincidencias en índices públicos de audio cuando un enlace solo proporcione una vista previa</string>
+    <string name="supported_music_sites">Compatible con enlaces de audio públicos, archivos musicales abiertos, podcasts, audio HLS y MP3/FLAC/M4A/OGG directo</string>
     
     <string name="confirm_delete">¿Estás seguro de que deseas eliminar esta descarga?</string>
     <string name="confirm_delete_file">¿Eliminar también el archivo descargado?</string>

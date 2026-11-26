@@ -5099,7 +5099,22 @@ class DownloadManagerCoreVerificationTest {
             assertEquals(listOf("https://scontent.cdninstagram.com/v/clip_720.mp4"), jsUrls)
 
             val speedDialNames = BrowserActivity.defaultSpeedDialPlatforms().map { it.name }
-            assertTrue(speedDialNames.containsAll(listOf("Threads", "Instagram", "TikTok", "X (Twitter)", "Facebook", "YouTube", "SoundCloud", "Vimeo")))
+            assertTrue(
+                speedDialNames.containsAll(
+                    listOf(
+                        "DuckDuckGo",
+                        "Internet Archive",
+                        "Wikimedia Commons",
+                        "Jamendo",
+                        "Pexels",
+                        "Pixabay",
+                        "Project Gutenberg",
+                        "Ubuntu Releases"
+                    )
+                )
+            )
+            val restrictedPlatforms = listOf("YouTube", "TikTok", "Instagram", "Threads", "Facebook", "X (Twitter)")
+            assertTrue(restrictedPlatforms.none { it in speedDialNames })
         } finally {
             HeadlessWebViewSniffer.testSnifferOverride = null
             HeadlessWebViewSniffer.testShortlinkResolverOverride = null

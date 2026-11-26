@@ -71,7 +71,7 @@
     <string name="unknown_speed">--</string>
     <string name="unknown_eta">--:--</string>
     
-    <string name="app_description">Luca Download Manager prend en charge les téléchargements HTTP/HTTPS multi-segments, le streaming audio public (SoundCloud, YouTube, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org), les vidéos sociales et les transferts BitTorrent.</string>
+    <string name="app_description">Luca Download Manager est un gestionnaire de téléchargements public polyvalent prenant en charge les téléchargements HTTP/HTTPS multi-segments, les flux audio et vidéo accessibles publiquement (MP3, FLAC, M4A, OGG, MP4, HLS/DASH), les archives, les documents et les transferts BitTorrent/Magnet. Les utilisateurs doivent s\'assurer qu\'ils disposent des droits légaux nécessaires.</string>
     <string name="version">Version %s</string>
     <string name="developer">Développeur</string>
     <string name="privacy_policy">Politique de confidentialité</string>
@@ -107,10 +107,10 @@
     <string name="low">Basse (360p Économie)</string>
     <string name="audio_only">Audio uniquement</string>
     <string name="extract_audio">Extraire la piste audio</string>
-    <string name="allow_third_party_resolvers">Autoriser les résolveurs tiers</string>
-    <string name="allow_third_party_resolvers_summary">Interroger les services publics de résolution de liens sociaux</string>
-    <string name="allow_third_party_torrent_resolvers">Autoriser les caches torrent tiers</string>
-    <string name="allow_third_party_torrent_resolvers_summary">Interroger les caches externes pour les liens magnet</string>
+    <string name="allow_third_party_resolvers">Autoriser les résolveurs publics de métadonnées</string>
+    <string name="allow_third_party_resolvers_summary">Interroger les services publics de métadonnées pour les liens indirects ou raccourcis</string>
+    <string name="allow_third_party_torrent_resolvers">Autoriser les caches publics de métadonnées torrent</string>
+    <string name="allow_third_party_torrent_resolvers_summary">Interroger les caches publics de métadonnées pour les liens magnet</string>
 
     <string name="music_settings">Paramètres audio et musique</string>
     <string name="music_download">Téléchargement de musique</string>
@@ -121,9 +121,9 @@
     <string name="music_m4a_256">M4A / AAC 256 kbps</string>
     <string name="music_ogg_192">OGG Vorbis 192 kbps</string>
     <string name="embed_metadata">Intégrer les tags ID3 et la pochette</string>
-    <string name="allow_alternate_music_source">Autoriser la recherche de source alternative (YouTube)</string>
-    <string name="allow_alternate_music_source_summary">Rechercher sur YouTube si le lien source ne fournit qu\'un extrait</string>
-    <string name="supported_music_sites">Supporté : SoundCloud, YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify, Jamendo, Archive.org et Audio Direct</string>
+    <string name="allow_alternate_music_source">Autoriser la recherche audio publique alternative</string>
+    <string name="allow_alternate_music_source_summary">Rechercher dans des index audio publics si un lien ne fournit qu\'un court extrait</string>
+    <string name="supported_music_sites">Prend en charge les liens audio publics, archives musicales ouvertes, podcasts, audio HLS et MP3/FLAC/M4A/OGG direct</string>
     
     <string name="confirm_delete">Voulez-vous vraiment supprimer ce téléchargement ?</string>
     <string name="confirm_delete_file">Supprimer également le fichier téléchargé ?</string>

@@ -1,6 +1,6 @@
 {
   "name": "Luca Download Manager",
-  "description": "Luca Download Manager supports high-speed downloading of all file types, music from major audio platforms, videos, and torrents.",
+  "description": "Luca Download Manager is a general-purpose public download manager for multi-segment HTTP/HTTPS files, open-access media streams, archives, documents, and BitTorrent/Magnet transfers.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

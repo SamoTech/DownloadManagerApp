@@ -71,7 +71,7 @@
     <string name="unknown_speed">--</string>
     <string name="unknown_eta">--:--</string>
     
-    <string name="app_description">يدعم لوكا لمدير التحميل التحميلات متعددة الأجزاء عبر HTTP/HTTPS، والبث الصوتي العام (ساوند كلاود، يوتيوب، باندكامب، أوديوماك، ميكسكلود، سبوتيفاي، جاميندو، الأرشيف، والبودكاست)، وفيديوهات وسائل التواصل الاجتماعي، ونقل تورنت ومغناطيس.</string>
+    <string name="app_description">لوكا لمدير التحميل هو مدير تحميل عام يدعم التحميلات متعددة الأجزاء عبر HTTP/HTTPS، وملفات الصوت والفيديو المتاحة للجمهور (MP3 وFLAC وM4A وOGG وMP4 وHLS/DASH)، والأرشيفات والمستندات ونقل BitTorrent/Magnet. المستخدم مسؤول عن امتلاك الحق القانوني أو الإذن لتحميل أي محتوى.</string>
     <string name="version">الإصدار %s</string>
     <string name="developer">المطور</string>
     <string name="privacy_policy">سياسة الخصوصية</string>
@@ -107,10 +107,10 @@
     <string name="low">منخفضة (360p لتوفير البيانات)</string>
     <string name="audio_only">صوت فقط</string>
     <string name="extract_audio">استخراج المسار الصوتي</string>
-    <string name="allow_third_party_resolvers">السماح بمحللات الفيديو الخارجية</string>
-    <string name="allow_third_party_resolvers_summary">الاستعلام عن خدمات محللات وسائل التواصل العامة عند تقييد استخراج الصفحة المباشرة</string>
-    <string name="allow_third_party_torrent_resolvers">السماح بذاكرة التخزين المؤقت للتورنت الخارجية</string>
-    <string name="allow_third_party_torrent_resolvers_summary">الاستعلام عن خدمات تخزين تورنت الخارجية عند حل روابط المغناطيس</string>
+    <string name="allow_third_party_resolvers">السماح بمحللات البيانات الوصفية العامة</string>
+    <string name="allow_third_party_resolvers_summary">الاستعلام عن خدمات تحليل الروابط العامة عند استخدام تضمينات أو روابط مختصرة</string>
+    <string name="allow_third_party_torrent_resolvers">السماح بذاكرة التخزين المؤقت العامة للتورنت</string>
+    <string name="allow_third_party_torrent_resolvers_summary">الاستعلام عن خدمات تخزين التورنت العامة عند حل روابط المغناطيس</string>
 
     <string name="music_settings">إعدادات الصوت والموسيقى</string>
     <string name="music_download">تحميل الموسيقى</string>
@@ -121,9 +121,9 @@
     <string name="music_m4a_256">M4A / AAC 256 كيلوبت في الثانية</string>
     <string name="music_ogg_192">OGG Vorbis 192 كيلوبت في الثانية</string>
     <string name="embed_metadata">تضمين علامات ID3 وصورة الغلاف</string>
-    <string name="allow_alternate_music_source">السماح بالبحث عن مصادر بديلة (يوتيوب)</string>
-    <string name="allow_alternate_music_source_summary">البحث في يوتيوب عن عنوان/فنان مطابق عندما يوفر رابط المصدر معاينة فقط</string>
-    <string name="supported_music_sites">مدعوم: ساوند كلاود، يوتيوب ميوزيك، باندكامب، أوديوماك، ميكسكلود، سبوتيفاي، جاميندو، الأرشيف، والبودكاست</string>
+    <string name="allow_alternate_music_source">السماح بالبحث الصوتي العام البديل</string>
+    <string name="allow_alternate_music_source_summary">البحث في الفهارس الصوتية العامة عن عنوان/فنان مطابق عندما يوفر الرابط معاينة قصيرة فقط</string>
+    <string name="supported_music_sites">يدعم روابط الصوت العامة، أرشيفات الموسيقى المفتوحة، البودكاست وبث MP3/FLAC/M4A/OGG المباشر</string>
     
     <string name="confirm_delete">هل أنت متأكد أنك تريد حذف هذا التحميل؟</string>
     <string name="confirm_delete_file">حذف الملف المُحمل أيضاً؟</string>

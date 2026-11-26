@@ -71,10 +71,11 @@
     <string name="unknown_speed">--</string>
     <string name="unknown_eta">--:--</string>
     
-    <string name="app_description">Luca Download Manager supports multi-segment HTTP/HTTPS downloads, public audio streams (SoundCloud, YouTube/YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify 30s previews or opt-in alternate match, Jamendo, Archive.org, Podcasts, and direct MP3/FLAC/M4A/OGG), public social and HLS videos, and BitTorrent/Magnet transfers.</string>
+    <string name="app_description">Luca Download Manager is a general-purpose public download manager supporting multi-segment HTTP/HTTPS file downloads, publicly accessible audio and video streams (MP3, FLAC, M4A, OGG, MP4, HLS/DASH), archives, documents, and BitTorrent/Magnet transfers. Users are responsible for ensuring they have the legal right or permission to download any content. DRM-protected or restricted copyrighted sources are not supported.</string>
     <string name="version">Version %s</string>
     <string name="developer">Developer</string>
     <string name="privacy_policy">Privacy Policy</string>
+    <string name="copyright_notice">Copyright &amp; Usage Notice</string>
     <string name="open_source_licenses">Open Source Licenses</string>
     
     <string name="download_settings">Download Settings</string>
@@ -107,10 +108,10 @@
     <string name="low">Low (360p Data Saver)</string>
     <string name="audio_only">Audio Only</string>
     <string name="extract_audio">Extract Audio Track</string>
-    <string name="allow_third_party_resolvers">Allow Third-Party Social Video Resolvers</string>
-    <string name="allow_third_party_resolvers_summary">Query public resolver APIs (tikwm, vxtwitter, fxtwitter, ddinstagram) when direct social page extraction is restricted</string>
-    <string name="allow_third_party_torrent_resolvers">Allow Third-Party Torrent Metadata Caches</string>
-    <string name="allow_third_party_torrent_resolvers_summary">Query external torrent metadata cache services (iTorrents, Torrage, Btdig) when resolving magnet links</string>
+    <string name="allow_third_party_resolvers">Allow Public Metadata Resolvers</string>
+    <string name="allow_third_party_resolvers_summary">Query public metadata resolution endpoints when a public web link uses indirect embeds or shortlinks</string>
+    <string name="allow_third_party_torrent_resolvers">Allow Public Torrent Metadata Caches</string>
+    <string name="allow_third_party_torrent_resolvers_summary">Query public torrent metadata cache services when resolving magnet links</string>
 
     <string name="music_settings">Music &amp; Audio Settings</string>
     <string name="music_download">Music Download</string>
@@ -121,9 +122,10 @@
     <string name="music_m4a_256">M4A / AAC 256 kbps</string>
     <string name="music_ogg_192">OGG Vorbis 192 kbps</string>
     <string name="embed_metadata">Embed ID3 Tags &amp; Cover Art</string>
-    <string name="allow_alternate_music_source">Allow Alternate-Source Lookup (YouTube)</string>
-    <string name="allow_alternate_music_source_summary">Opt in to search YouTube for a verified title/artist/duration match when a track page (e.g. Spotify) only exposes a 30s preview or metadata</string>
-    <string name="supported_music_sites">Supported: SoundCloud, YouTube Music, Bandcamp, Audiomack, Mixcloud, Spotify (30s preview or opt-in match), Jamendo, Archive.org, Podcasts &amp; Direct Audio</string>
+    <string name="allow_alternate_music_source">Allow Alternate Public Audio Lookup</string>
+    <string name="allow_alternate_music_source_summary">Opt in to search public audio indexes for a verified title and artist match when a link only exposes metadata or a short preview</string>
+    <string name="supported_music_sites">Supports public audio links, open-access music archives, podcasts, HLS audio &amp; direct MP3/FLAC/M4A/OGG streams</string>
+    <string name="supported_video_sites">Supports public video links, open-access media streams, HLS/DASH playlists &amp; direct MP4/WebM files</string>
     
     <string name="confirm_delete">Are you sure you want to delete this download?</string>
     <string name="confirm_delete_file">Also delete the downloaded file?</string>
@@ -197,7 +199,8 @@
     <string name="browser_download_now">Download Now</string>
     <string name="browser_tabs_title">Open Browser Tabs</string>
     <string name="browser_new_tab">New Tab</string>
-    <string name="browser_speed_dial_title">Quick Platforms &amp; Media Sites</string>
+    <string name="browser_speed_dial_title">Public &amp; Open-Access Media Directories</string>
     <string name="browser_media_badge">Download Media (%d)</string>
     <string name="browser_stop_loading">Stop Loading</string>
+    <string name="copyright_disclaimer_short">Independent public download manager. Download only public-domain, Creative Commons, or authorized files.</string>
 </resources>

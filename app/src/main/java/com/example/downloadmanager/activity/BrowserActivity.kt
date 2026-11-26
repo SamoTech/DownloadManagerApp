@@ -249,14 +249,14 @@ class BrowserActivity : AppCompatActivity() {
         }
 
         internal fun defaultSpeedDialPlatforms(): List<SpeedDialPlatform> = listOf(
-            SpeedDialPlatform("Threads", "Posts & Videos", "https://www.threads.com", 0xFF0F172A.toInt(), R.drawable.ic_video),
-            SpeedDialPlatform("Instagram", "Reels & Stories", "https://www.instagram.com", 0xFFE11D48.toInt(), R.drawable.ic_video),
-            SpeedDialPlatform("TikTok", "Short Videos", "https://www.tiktok.com", 0xFF0EA5E9.toInt(), R.drawable.ic_video),
-            SpeedDialPlatform("X (Twitter)", "Clips & Threads", "https://x.com", 0xFF334155.toInt(), R.drawable.ic_video),
-            SpeedDialPlatform("Facebook", "Reels & Watch", "https://www.facebook.com", 0xFF2563EB.toInt(), R.drawable.ic_video),
-            SpeedDialPlatform("YouTube", "Video & Audio", "https://www.youtube.com", 0xFFDC2626.toInt(), R.drawable.ic_play),
-            SpeedDialPlatform("SoundCloud", "Music & Mixes", "https://soundcloud.com/discover", 0xFFF97316.toInt(), R.drawable.ic_music),
-            SpeedDialPlatform("Vimeo", "HD Streaming", "https://vimeo.com/watch", 0xFF0284C7.toInt(), R.drawable.ic_video)
+            SpeedDialPlatform("DuckDuckGo", "Private Web Search", "https://duckduckgo.com", 0xFFEA580C.toInt(), R.drawable.ic_browser),
+            SpeedDialPlatform("Internet Archive", "Public Domain Media", "https://archive.org", 0xFF0F172A.toInt(), R.drawable.ic_video),
+            SpeedDialPlatform("Wikimedia Commons", "Free Media Files", "https://commons.wikimedia.org", 0xFF0284C7.toInt(), R.drawable.ic_video),
+            SpeedDialPlatform("Jamendo", "CC Licensed Music", "https://www.jamendo.com", 0xFF7C3AED.toInt(), R.drawable.ic_music),
+            SpeedDialPlatform("Pexels", "Free Stock Videos", "https://www.pexels.com/videos/", 0xFF059669.toInt(), R.drawable.ic_video),
+            SpeedDialPlatform("Pixabay", "Royalty-Free Media", "https://pixabay.com", 0xFF16A34A.toInt(), R.drawable.ic_play),
+            SpeedDialPlatform("Project Gutenberg", "Public Domain Books", "https://www.gutenberg.org", 0xFF2563EB.toInt(), R.drawable.ic_browser),
+            SpeedDialPlatform("Ubuntu Releases", "Open-Source ISO & Torrents", "https://ubuntu.com/download", 0xFFD97706.toInt(), R.drawable.ic_torrent)
         )
 
         /**

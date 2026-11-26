@@ -893,7 +893,7 @@ class AddDownloadActivity : AppCompatActivity() {
             if (trackInfo == null) {
                 if (platform == "Spotify" && !allowAlt) {
                     binding.tvDetectedMusicPlatform.text =
-                        "Spotify: No public 30s preview on this track. Enable 'Allow Alternate-Source Lookup (YouTube)' below to search for a full-track match."
+                        "Only metadata or a short public preview is available for this link. Enable 'Allow Alternate Public Audio Lookup' below to search public audio sources."
                 } else if (platform != null) {
                     binding.tvDetectedMusicPlatform.text = "Detected: $platform (will resolve stream on start)"
                 }
